@@ -18,3 +18,60 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # PostgreSQL integration job. Uses ONLY the disposable service container below with test
+  # credentials: no remote database, no provider, no secrets. Lint, typecheck, unit tests and the
+  # build (which already cover src/db) stay in the `verify` job above.
+  database:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: al_ict_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d al_ict_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Dedicated CI application database: migrated from empty by `db:migrate` below.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/al_ict_ci
+      # Used by the DB test harness to create/drop isolated scratch databases. The harness refuses
+      # non-local hosts; this points at the service container on localhost.
+      TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Validate migration folder consistency
+        run: npm run db:check
+      - name: Detect schema/migration drift
+        run: |
+          npm run db:generate
+          changes="$(git status --porcelain --untracked-files=all -- src/db/migrations)"
+          if [ -n "$changes" ]; then
+            echo "::error::Schema and committed migrations are out of sync. Run 'npm run db:generate', review the new migration, and commit it."
+            echo "$changes"
+            git --no-pager diff -- src/db/migrations
+            exit 1
+          fi
+      - name: Migrate the clean CI database from empty
+        run: npm run db:migrate
+      - name: Confirm migrations were applied
+        run: >-
+          node -e "const { Client } = require('pg'); (async () => { const c = new Client({ connectionString: process.env.DATABASE_URL }); await c.connect();
+          const m = (await c.query('select count(*)::int n from drizzle.__drizzle_migrations')).rows[0].n;
+          const t = (await c.query(\"select count(*)::int n from information_schema.tables where table_schema = 'public'\")).rows[0].n;
+          console.log('migrations applied:', m, 'public tables:', t); await c.end(); if (m < 1 || t < 1) process.exit(1); })().catch((e) => { console.error(e); process.exit(1); })"
+      - name: Database integration tests
+        run: npm run test:db

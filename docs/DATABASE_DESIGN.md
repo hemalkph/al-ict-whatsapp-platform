@@ -1,51 +1,32 @@
 # Database Design
 
-Status: **design notes only. No schema exists yet.** Decisions marked "open" are made in the database/security milestone.
+Status: **Phase 02 schema defined in `src/db/schema/` with its first generated migration under review; not yet applied or tested against a database.** Conventions and rationale: [ADR 0011](adr/0011-database-foundation-conventions.md).
 
 ## Direction
 
-Next.js → Drizzle ORM → standard PostgreSQL. Production hosting provider: **TBD** during the database/deployment milestone (candidates include Supabase PostgreSQL and Neon PostgreSQL). The data layer stays provider-neutral.
+Next.js → Drizzle ORM (node-postgres, isolated in `src/db/client.ts`) → standard PostgreSQL via `DATABASE_URL`. Production hosting provider: **TBD** in the database/deployment milestone (candidates include Supabase PostgreSQL and Neon PostgreSQL; neither is selected). This milestone uses local PostgreSQL (Docker) and a GitHub Actions PostgreSQL service only. The schema is provider-neutral.
 
-| Item                       | Status                                    |
-| -------------------------- | ----------------------------------------- |
-| Production PostgreSQL host | TBD (Supabase / Neon candidates)          |
-| Realtime for inbox         | Later evaluation (e.g. Supabase Realtime) |
-| Better Auth                | Provisional                               |
-| Cloudflare R2              | Future media storage candidate            |
-| Local PostgreSQL (Docker)  | Optional for development                  |
+## Layout
 
-Use connection pooling suitable for a serverless/pooled Postgres. Media goes in object storage, never in PostgreSQL BLOBs.
+`src/db/schema/*` (tables and `enums.ts`), `src/db/client.ts` (lazy `getDb()`; nothing connects or reads `DATABASE_URL` until called), `src/db/migrations/` (generated SQL, committed). Scripts: `db:generate`, `db:migrate`, `db:check` (drizzle-kit). `db:push` is not used. The migration file is generated from the schema; to confirm there is no drift, `db:generate` must report "No schema changes, nothing to migrate".
+
+## Data-layer operations
+
+`src/db/ops/` holds the small, transaction-aware SQL primitives whose correctness the schema depends on: message status transitions, conversation activity timestamps, marketing-consent cache, and the webhook queue claim. They take an executor (database or transaction) so callers own transaction boundaries. Application modules use them through `@/db`; they never import `pg`.
+
+## Tables in Phase 02
+
+organizations, whatsapp_accounts, webhook_requests, webhook_events, contacts, contact_consents, conversations, messages, message_status_events, message_attachments, leads, lead_attributions, tags, contact_tags.
+
+Everything tenant-owned carries `organization_id` with composite organization-aware foreign keys; `webhook_events` routing columns are nullable until resolved. No Meta credential is ever stored in a column (`whatsapp_accounts.credential_ref` is only a pointer to server-side configuration).
 
 ## Principles
 
-Important records carry `organization_id`. Paginated, indexed queries; no N+1. Do not create a table per concept without need; each entity is evaluated below.
+Paginated, indexed queries; no N+1. Media goes in object storage, never in PostgreSQL BLOBs (object storage is not integrated yet). PII (phone numbers, profile names, message bodies, raw webhook payloads) is minimized, masked in logs, and subject to retention/erasure policy that is decided later.
 
-## Entity evaluation (leanings, not decided)
+## Deferred (not in Phase 02)
 
-| Entity                            | Leaning                                                                                    |
-| --------------------------------- | ------------------------------------------------------------------------------------------ |
-| organizations, users, memberships | Separate tables.                                                                           |
-| roles/permissions                 | **Open.** See options below.                                                               |
-| whatsapp_accounts                 | Separate table (WABA id, phone number id; multiple later).                                 |
-| contacts                          | Separate table.                                                                            |
-| contact_consents                  | Append-only history (consent source and timestamps, opt-out); needed for compliance audit. |
-| leads                             | Separate table; lifecycle states extensible, not hardcoded in UI.                          |
-| lead_sources / ad_referrals       | Possibly one attribution table.                                                            |
-| students                          | Separate table, created on conversion.                                                     |
-| conversations                     | Separate table; current assignee likely a column.                                          |
-| conversation_assignments          | **Open.** See options below.                                                               |
-| messages                          | Separate; the highest-volume table.                                                        |
-| message_status_events             | Append-only events (sent/delivered/read/failed).                                           |
-| message_attachments               | Separate; stores object-storage references.                                                |
-| internal_notes                    | Separate.                                                                                  |
-| tags, contact_tags                | Separate with a join table.                                                                |
-| quick_replies, message_templates  | Separate.                                                                                  |
-| webhook_events                    | Separate; the webhook inbox (idempotency keys, processing state).                          |
-| bots, bot_versions                | Separate; versions immutable once published.                                               |
-| bot_flows                         | Likely folded into the bot_versions definition (JSON).                                     |
-| bot_sessions, bot_execution_logs  | Separate.                                                                                  |
-| campaigns, campaign_recipients    | Separate.                                                                                  |
-| audit_logs                        | Separate, append-only.                                                                     |
+users, authentication, memberships, roles/permissions, conversation assignment, internal notes, quick replies and templates, bots, campaigns, offerings/programs, students, batches, payments, attendance, audit logs. Cloudflare R2 remains a future media-storage candidate. Better Auth is provisional (ADR 0010).
 
 ## Open decision: roles and permissions
 
