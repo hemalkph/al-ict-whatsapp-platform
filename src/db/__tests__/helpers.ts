@@ -20,24 +20,111 @@ function assertLocal(url: string) {
 
 export type TestDb = Awaited<ReturnType<typeof createTestDatabase>>;
 
-export async function createTestDatabase() {
+/**
+ * A pg Pool with explicit ownership. `pool.end()` alone is not enough: pg-pool drops its clients from
+ * its own bookkeeping immediately and closes the sockets asynchronously, so `await pool.end()` can
+ * resolve while backend connections are still closing. end() therefore also waits for every client
+ * the pool ever created to emit "end". Pool-level errors are recorded and re-thrown from end()
+ * rather than ignored.
+ */
+function ownedPool(connectionString: string, max: number) {
+  const pool = new Pool({ connectionString, max });
+  const clientsClosed: Promise<void>[] = [];
+  const errors: Error[] = [];
+  pool.on("connect", (client) => {
+    clientsClosed.push(new Promise<void>((resolve) => client.once("end", () => resolve())));
+  });
+  pool.on("error", (e) => errors.push(e)); // idle-client errors; surfaced by end(), never swallowed
+  let ended: Promise<void> | undefined;
+  return {
+    pool,
+    end() {
+      ended ??= (async () => {
+        await pool.end();
+        await withTimeout(Promise.all(clientsClosed), 10_000, "pool connections did not close");
+        if (errors.length > 0) throw new AggregateError(errors, "pg pool reported errors");
+      })();
+      return ended;
+    },
+  };
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Waits until the scratch database has no remaining sessions. Backends exit asynchronously after
+ * their client disconnects, so brief polling is expected. Sessions that never go away are leaks
+ * (e.g. a pool created by a test and never ended): they are reported, never force-terminated.
+ */
+async function waitForNoSessions(admin: Pool, name: string, waitMs: number) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const r = await admin.query(
+      "select pid, application_name, state from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()",
+      [name],
+    );
+    if (r.rowCount === 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Test database ${name} still connected after teardown (leaked connections: ${JSON.stringify(r.rows)}). ` +
+          "A test created a pool/client that it never closed.",
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+export async function createTestDatabase(options: { sessionWaitMs?: number } = {}) {
   assertLocal(ADMIN_URL);
   const name = `al_ict_test_${randomBytes(6).toString("hex")}`;
-  const admin = new Pool({ connectionString: ADMIN_URL, max: 1 });
-  await admin.query(`CREATE DATABASE ${name}`);
+  const admin = ownedPool(ADMIN_URL, 1);
+  await admin.pool.query(`CREATE DATABASE ${name}`);
   const url = new URL(ADMIN_URL);
   url.pathname = `/${name}`;
-  const pool = new Pool({ connectionString: url.toString(), max: 10 });
+  const owned = ownedPool(url.toString(), 10);
+  const pool = owned.pool;
   const db = drizzle(pool, { schema });
-  await migrate(db, { migrationsFolder: fileURLToPath(new URL("../migrations", import.meta.url)) });
+  let closed: Promise<void> | undefined;
+  try {
+    await migrate(db, {
+      migrationsFolder: fileURLToPath(new URL("../migrations", import.meta.url)),
+    });
+  } catch (e) {
+    await owned.end();
+    await admin.pool.query(`DROP DATABASE IF EXISTS ${name}`);
+    await admin.end();
+    throw e;
+  }
   return {
     db,
     pool,
     name,
-    async close() {
-      await pool.end();
-      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-      await admin.end();
+    url: url.toString(),
+    /**
+     * Lifecycle: finish all work -> end the harness pool and wait for its sockets to close -> wait
+     * for the server to report no sessions -> DROP DATABASE (no FORCE) -> close the admin pool.
+     * Throws if a test leaked a connection; the database is then left in place (retry after the
+     * leak is closed succeeds).
+     */
+    close() {
+      if (closed) return closed;
+      closed = (async () => {
+        await owned.end();
+        await waitForNoSessions(admin.pool, name, options.sessionWaitMs ?? 10_000);
+        await admin.pool.query(`DROP DATABASE IF EXISTS ${name}`);
+        await admin.end();
+      })();
+      // A failed close (leak) may be retried once the leak is fixed; a successful one is final.
+      closed.catch(() => (closed = undefined));
+      return closed;
     },
   };
 }
