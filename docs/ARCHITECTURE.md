@@ -24,6 +24,7 @@ docs/          specs and ADRs
 
 - `auth` (`src/modules/auth`): the two Better Auth instances built from one shared base configuration. Public API (`@/modules/auth`): `getAuth()` (public instance, the only one that may ever be HTTP-mounted), `getSession()`, `readAuthEnv()`. The private provisioning instance lives in `src/modules/auth/provisioning.ts`, is not exported from the barrel, and is import-restricted by ESLint to the auth and access modules.
 - `access` (`src/modules/access`): fixed roles/permission matrix, `can`/`assertCan`, `requireUser`/`requireAccess`/`requirePermission`, `AccessContext`. Feature modules take an `AccessContext` and scope every query by `ctx.organizationId`.
+- Staff HTTP API: `src/app/api/staff/**` (5 route files) + `src/lib/route-helpers.ts`; routes call only the `@/modules/access` public API.
 - Staff lifecycle services live in `src/modules/access/staff/` (re-exported from `@/modules/access`): createStaff, listStaff, changeMemberRole, suspendMember, reactivateMember, resetStaffPassword.
 - Cross-cutting security helpers in `src/shared`: HTTP authorization errors and `toErrorResponse`, `emitSecurityEvent`, same-origin check, safe redirect validation.
 - `src/app/**` may not import `@/db` or the private provisioner (ESLint).

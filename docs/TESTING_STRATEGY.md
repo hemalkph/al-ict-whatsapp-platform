@@ -18,6 +18,10 @@ Unit: permission matrix (every role x permission, explicit expectations), same-o
 
 ## Entrypoint tests
 
+## Staff API route tests
+
+`src/modules/access/staff/staff-api.db.test.ts` (real route handlers, real session cookies, real PostgreSQL + Better Auth): 401/403 matrix per role, forged org/role headers, same-origin matrix on every mutation route, content-type/body validation, list DTO and tenant scoping, create (201, normalized email, generic indistinguishable 409s, mass assignment), role/suspend/reactivate/reset behavior including last-admin races, foreign-vs-missing id indistinguishability, a secrets-in-responses-and-logs regression test and a route-import-boundary test. Kept under `src/modules/access` because lint forbids `src/app` from importing `@/db` helpers.
+
 `src/proxy.test.ts` and `page-access.test.ts` (DB-free: proxy behavior, redirect decisions, loop simulation over every user state); real-PostgreSQL: `route.db.test.ts` (public route, closed paths, private-provisioner boundary, login/logout, events, proxy vs real access), `password-change.db.test.ts` (forced change, failure ordering and fail-closed retry), `bootstrap.db.test.ts` and `intent-recovery.db.test.ts` (including real CLI runs through `tsx`, with no secrets in output).
 
 ## Password-reset concurrency tests

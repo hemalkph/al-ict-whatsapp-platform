@@ -89,6 +89,16 @@ Service functions only (no HTTP routes, UI or CLI yet), in `src/modules/access/s
 - **Limitation A:** administrative password replacement uses Better Auth 1.7.7's documented password-reset APIs (`requestPasswordReset`, `resetPassword`) through the private server-only instance. It relies on verified callback behavior (the `sendResetPassword` callback is awaited in the caller's async context and receives the token). The compatibility tests (concurrency, token-ownership, failure-lifecycle, public-surface-closed) must catch any library behavior change on upgrade, and must be re-run on every Better Auth upgrade.
 - **Limitation B:** stale `staff_provisioning_intents` are intentionally NOT expired automatically: blindly releasing one could let another organization claim a partially created global identity. An operational stale-intent recovery tool is deferred, but it MUST be completed before production staff administration is considered operationally complete.
 
+## Implementation notes (checkpoint 6: staff management HTTP API)
+
+- Routes: `GET|POST /api/staff`, `PATCH /api/staff/[membershipId]/role`, `POST /api/staff/[membershipId]/{suspend,reactivate,reset-password}`. No generic endpoint, no `organizationId` anywhere: the organization comes only from `AccessContext`.
+- Routes are thin. One helper (`src/lib/route-helpers.ts`, `handleApi`) does: same-origin guard (mutations) -> `requireAccess` -> content-type / size / JSON parse -> service call -> `toErrorResponse`. All business rules (last admin, global identity, provisioning recovery, session behavior) stay in the service layer. Routes import only `@/modules/access` and the helper (asserted by a test).
+- The membership id from the URL is the single source of the target: a body that also contains `membershipId` is rejected (400). Zod strict schemas from the services reject every other unknown field (mass assignment).
+- Permissions: `GET` = `staff.read`; every mutation = `staff.manage` (enforced in the services).
+- Status mapping: 200 read/update, 201 create, 400 invalid, 401 no session, 403 forbidden / foreign Origin / password change pending, 404 unknown or foreign membership id (identical bodies), 409 generic refusal (existing identity, self-mutation, shared identity, last admin), 500 generic. No 429: no limiter applies to these routes.
+- Responses never include passwords, hashes, tokens, provisioning/intent data, or `sessionsRevoked` (omitted because it would reveal whether an identity is active in another organization).
+- Not done here: no UI, no pagination (staff lists are small and organization-bounded).
+
 ## Known unresolved issue (must be resolved before production deployment)
 
 `npm audit --omit=dev` reports **4 moderate** findings: `better-auth` declares `drizzle-kit` as an optional peer dependency, so a production-style `npm ci --omit=dev` installs `drizzle-kit` → `@esbuild-kit/esm-loader` → `@esbuild-kit/core-utils` → `esbuild@0.18.20`, which is affected by the esbuild dev-server advisory (GHSA-67mh-4wv8-2f99). No application code imports `drizzle-kit`, but this is not considered harmless: it is recorded as unresolved, with no override or dependency change made yet.
