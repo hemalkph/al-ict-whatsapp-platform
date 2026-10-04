@@ -1,3 +1,4 @@
+import { drizzle } from "drizzle-orm/node-postgres";
 import { schema } from "../index";
 import { createProvisioningAuth } from "@/modules/auth/provisioning";
 import { createPublicAuth } from "@/modules/auth/public-instance";
@@ -80,3 +81,11 @@ export async function login(a: RealAuth, email: string, password = PASSWORD): Pr
 
 export const headersWith = (cookie: string, extra: Record<string, string> = {}) =>
   new Headers({ cookie, ...extra });
+
+/**
+ * A SECOND Drizzle instance over the same pool. Staff-service tests inject it as `deps.db` so that failures can be
+ * injected into the service's own transactions without touching the transactions Better Auth opens on `t.db`.
+ */
+export function serviceDb(t: TestDb) {
+  return drizzle(t.pool, { schema });
+}

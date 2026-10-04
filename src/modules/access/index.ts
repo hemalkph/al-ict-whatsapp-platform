@@ -17,3 +17,13 @@ export {
   type AccessOptions,
   type AuthenticatedUser,
 } from "./access";
+export {
+  changeMemberRole,
+  createStaff,
+  listStaff,
+  reactivateMember,
+  resetStaffPassword,
+  suspendMember,
+  type StaffDeps,
+  type StaffMember,
+} from "./staff";

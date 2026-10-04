@@ -13,7 +13,17 @@ export type SecurityEventName =
   | "access.permission_denied"
   | "access.cross_origin_rejected"
   | "auth.session_denied"
-  | "auth.login_failed";
+  | "auth.login_failed"
+  | "staff.created"
+  | "staff.creation_refused"
+  | "staff.provisioning_incomplete"
+  | "staff.password_reset"
+  | "staff.password_reset_refused"
+  | "staff.password_reset_incomplete"
+  | "membership.role_changed"
+  | "membership.suspended"
+  | "membership.reactivated"
+  | "membership.change_refused";
 
 export type SecurityEvent = {
   event: SecurityEventName;
@@ -21,6 +31,11 @@ export type SecurityEvent = {
   userId?: string;
   organizationId?: string;
   membershipId?: string;
+  /** The user / membership an operation acted on (as opposed to the actor above). */
+  targetUserId?: string;
+  targetMembershipId?: string;
+  role?: string;
+  previousRole?: string;
   permission?: string;
   reason?: string;
   /** Output of hashForLog(email); never the email itself. */
@@ -39,6 +54,10 @@ export function emitSecurityEvent(e: SecurityEvent): void {
     user_id: e.userId,
     organization_id: e.organizationId,
     membership_id: e.membershipId,
+    target_user_id: e.targetUserId,
+    target_membership_id: e.targetMembershipId,
+    role: e.role,
+    previous_role: e.previousRole,
     permission: e.permission,
     reason: e.reason,
     email_hash: e.emailHash,

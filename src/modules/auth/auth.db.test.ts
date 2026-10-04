@@ -35,7 +35,7 @@ describe("real public/private Better Auth instances (production configuration)",
             ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, normalize(x)]))
             : v;
 
-    it("public and private instances differ ONLY in sign-up/auto-sign-in and disabled paths", () => {
+    it("public and private instances differ ONLY in sign-up/auto-sign-in, disabled paths and the private reset capture", () => {
       const pub = normalize(a.pub.options) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
       const prov = normalize(a.prov.options) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
       expect(pub.emailAndPassword.disableSignUp).toBe(true);
@@ -43,11 +43,18 @@ describe("real public/private Better Auth instances (production configuration)",
       expect(prov.emailAndPassword.autoSignIn).toBe(false);
       expect(pub.disabledPaths).toEqual([...PUBLIC_DISABLED_PATHS]);
       expect(prov.disabledPaths).toBeUndefined();
+      // The private instance (never HTTP-mounted) can complete administrator password resets; the public one cannot.
+      expect(prov.emailAndPassword.sendResetPassword).toBe("[fn]");
+      expect(prov.emailAndPassword.revokeSessionsOnPasswordReset).toBe(true);
+      expect(pub.emailAndPassword.sendResetPassword).toBeUndefined();
 
       delete pub.disabledPaths;
       delete pub.emailAndPassword.disableSignUp;
       delete prov.emailAndPassword.disableSignUp;
       delete prov.emailAndPassword.autoSignIn;
+      delete prov.emailAndPassword.sendResetPassword;
+      delete prov.emailAndPassword.revokeSessionsOnPasswordReset;
+      delete prov.emailAndPassword.resetPasswordTokenExpiresIn;
       expect(pub).toEqual(prov);
     });
 
@@ -73,8 +80,8 @@ describe("real public/private Better Auth instances (production configuration)",
         });
         expect(o.user.modelName).toBe("users");
         expect(o.plugins ?? []).toHaveLength(0); // no Admin / Organization / other plugins
-        expect(o.emailAndPassword.sendResetPassword).toBeUndefined();
       }
+      expect(a.pub.options.emailAndPassword?.sendResetPassword).toBeUndefined(); // public: reset stays disabled
     });
 
     it("uses adapter transaction: true (the adapter opens a real database transaction)", async () => {

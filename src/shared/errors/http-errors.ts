@@ -46,12 +46,68 @@ export class OrganizationSelectionRequiredError extends AppError {
   }
 }
 
+/** Input failed strict schema validation. Carries field NAMES only, never values. */
+export class ValidationError extends AppError {
+  constructor(readonly fields: readonly string[]) {
+    super("VALIDATION_ERROR", "Invalid input", 400);
+    this.name = "ValidationError";
+  }
+}
+
+/**
+ * One deliberately generic refusal for operations that must not reveal why (e.g. the identity already exists,
+ * belongs to another organization, or is shared). Reasons go to security events only.
+ */
+export class OperationRefusedError extends AppError {
+  constructor(readonly reason?: string) {
+    super("OPERATION_REFUSED", "This operation cannot be completed", 409);
+    this.name = "OperationRefusedError";
+  }
+}
+
+/** An organization must always keep at least one ACTIVE administrator. */
+export class LastAdminRequiredError extends AppError {
+  constructor() {
+    super(
+      "LAST_ADMIN_REQUIRED",
+      "An organization must keep at least one active administrator",
+      409,
+    );
+    this.name = "LastAdminRequiredError";
+  }
+}
+
+/** Provisioning stopped part-way; the intent is kept so a retry can safely resume. Fail-closed meanwhile. */
+export class ProvisioningIncompleteError extends AppError {
+  constructor() {
+    super(
+      "STAFF_PROVISIONING_INCOMPLETE",
+      "Staff account setup could not be completed. Please retry.",
+      409,
+    );
+    this.name = "ProvisioningIncompleteError";
+  }
+}
+
+/** A password reset stopped part-way; the account is already locked into a forced password change. */
+export class PasswordResetIncompleteError extends AppError {
+  constructor() {
+    super(
+      "PASSWORD_RESET_INCOMPLETE",
+      "The password reset could not be completed. Please retry.",
+      409,
+    );
+    this.name = "PasswordResetIncompleteError";
+  }
+}
+
 /** Maps any error to a safe JSON response. Unknown errors become a generic 500 and are logged by name only. */
 export function toErrorResponse(error: unknown): Response {
   const headers = { "Cache-Control": "no-store" };
   if (error instanceof AppError && error.httpStatus >= 400 && error.httpStatus < 500) {
+    const fields = error instanceof ValidationError ? { fields: error.fields } : {};
     return Response.json(
-      { error: { code: error.code, message: error.message } },
+      { error: { code: error.code, message: error.message, ...fields } },
       { status: error.httpStatus, headers },
     );
   }

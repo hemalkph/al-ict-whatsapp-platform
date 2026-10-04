@@ -5,7 +5,12 @@ import {
   NotFoundError,
   OrganizationSelectionRequiredError,
   PasswordChangeRequiredError,
+  LastAdminRequiredError,
+  OperationRefusedError,
+  PasswordResetIncompleteError,
+  ProvisioningIncompleteError,
   UnauthenticatedError,
+  ValidationError,
   toErrorResponse,
 } from "./http-errors";
 
@@ -18,6 +23,11 @@ describe("authorization errors", () => {
     [new PasswordChangeRequiredError(), 403, "PASSWORD_CHANGE_REQUIRED"],
     [new NotFoundError(), 404, "NOT_FOUND"],
     [new OrganizationSelectionRequiredError(), 409, "ORGANIZATION_SELECTION_REQUIRED"],
+    [new ValidationError(["email"]), 400, "VALIDATION_ERROR"],
+    [new OperationRefusedError("existing_identity"), 409, "OPERATION_REFUSED"],
+    [new LastAdminRequiredError(), 409, "LAST_ADMIN_REQUIRED"],
+    [new ProvisioningIncompleteError(), 409, "STAFF_PROVISIONING_INCOMPLETE"],
+    [new PasswordResetIncompleteError(), 409, "PASSWORD_RESET_INCOMPLETE"],
   ])("%s maps to %i %s", async (error, status, code) => {
     expect(error).toBeInstanceOf(AppError);
     const res = toErrorResponse(error);
@@ -33,6 +43,15 @@ describe("authorization errors", () => {
     );
     const text = JSON.stringify(await res.json());
     expect(text).not.toMatch(/membership|organization|abc|123|SUSPENDED/i);
+  });
+
+  it("keeps the refusal reason out of the response (generic refusal) and lists field names only for validation", async () => {
+    const refused = JSON.stringify(
+      await toErrorResponse(new OperationRefusedError("existing_identity_in_other_org")).json(),
+    );
+    expect(refused).not.toMatch(/existing|identity|other|org/i);
+    const invalid = await toErrorResponse(new ValidationError(["email", "role"])).json();
+    expect(invalid.error.fields).toEqual(["email", "role"]);
   });
 
   it("answers NotFound identically regardless of which resource was requested", async () => {

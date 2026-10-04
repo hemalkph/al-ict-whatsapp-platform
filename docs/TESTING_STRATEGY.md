@@ -12,6 +12,14 @@ Unit and domain-rule tests; database integration tests; API integration tests; M
 
 Unit: permission matrix (every role x permission, explicit expectations), same-origin and redirect-target guards, strict input schemas. Real-PostgreSQL integration: auth table constraints, sign-up disabled over HTTP and server API, provisioning intent uniqueness and cross-organization claim rejection, recovery after a simulated crash between user creation and membership creation, adapter `transaction: true` rollback (no user without credential), email case cannot create duplicate identities, suspended membership denied with a valid session, tenant isolation, privilege-escalation and mass-assignment attempts, database rate limiter (explicitly enabled in tests; it is off outside production). Playwright E2E (login, logout, protected navigation) comes later.
 
+## Staff lifecycle tests
+
+`src/modules/access/staff/*.test.ts`: strict-schema unit tests, plus real-PostgreSQL + real Better Auth tests for create/resume/refuse flows, role and suspension rules, the global session rule, organization-exclusive password reset, mass-assignment rejection, generic-refusal indistinguishability, and concurrency (two- and three-admin races repeated per run). Failure injection uses a second Drizzle instance over the same pool (`serviceDb`) so only the service's own transaction fails.
+
+## Password-reset concurrency tests
+
+`src/modules/access/staff/reset-password.db.test.ts` (real PostgreSQL + Better Auth): concurrent resets of different users (token ownership verified against each token's verification row), concurrent resets of the same user (both complete; last writer wins), and a failure after the token was issued (token never logged/returned, public reset surface closed, old password valid, retry succeeds). Re-run on every Better Auth upgrade.
+
 ## Playwright
 
 `@playwright/test` is installed and configured (`playwright.config.ts`, specs in `./e2e`). There are no E2E specs yet, so CI has no E2E stage and does not install browsers. Add both when real E2E tests exist.
