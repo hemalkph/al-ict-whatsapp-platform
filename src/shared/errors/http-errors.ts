@@ -101,6 +101,18 @@ export class PasswordResetIncompleteError extends AppError {
   }
 }
 
+/** The password was changed but the application flag could not be cleared; the user stays blocked and can retry. */
+export class PasswordChangeIncompleteError extends AppError {
+  constructor() {
+    super(
+      "PASSWORD_CHANGE_INCOMPLETE",
+      "Your password was updated, but the change could not be completed. Change it once more, using the password you just set as the current password.",
+      409,
+    );
+    this.name = "PasswordChangeIncompleteError";
+  }
+}
+
 /** Maps any error to a safe JSON response. Unknown errors become a generic 500 and are logged by name only. */
 export function toErrorResponse(error: unknown): Response {
   const headers = { "Cache-Control": "no-store" };

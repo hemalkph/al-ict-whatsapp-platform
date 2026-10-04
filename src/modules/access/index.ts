@@ -27,3 +27,17 @@ export {
   type StaffDeps,
   type StaffMember,
 } from "./staff";
+export {
+  getPageAccess,
+  loginDestination,
+  pageRedirectFor,
+  type DeniedStatus,
+  type PageAccess,
+} from "./page-access";
+export {
+  changeOwnPassword,
+  getPasswordChangeStatus,
+  type ChangeOwnPasswordResult,
+  type PasswordChangeStatus,
+} from "./password-change";
+export { getAccessSummary, type AccessSummary } from "./summary";

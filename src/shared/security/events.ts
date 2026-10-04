@@ -23,7 +23,17 @@ export type SecurityEventName =
   | "membership.role_changed"
   | "membership.suspended"
   | "membership.reactivated"
-  | "membership.change_refused";
+  | "membership.change_refused"
+  | "auth.login_succeeded"
+  | "auth.logout"
+  | "auth.password_changed"
+  | "auth.password_change_incomplete"
+  | "bootstrap.completed"
+  | "bootstrap.refused"
+  | "bootstrap.incomplete"
+  | "provisioning_recovery.resumed"
+  | "provisioning_recovery.removed"
+  | "provisioning_recovery.refused";
 
 export type SecurityEvent = {
   event: SecurityEventName;

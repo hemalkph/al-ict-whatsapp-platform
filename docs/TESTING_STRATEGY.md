@@ -16,6 +16,10 @@ Unit: permission matrix (every role x permission, explicit expectations), same-o
 
 `src/modules/access/staff/*.test.ts`: strict-schema unit tests, plus real-PostgreSQL + real Better Auth tests for create/resume/refuse flows, role and suspension rules, the global session rule, organization-exclusive password reset, mass-assignment rejection, generic-refusal indistinguishability, and concurrency (two- and three-admin races repeated per run). Failure injection uses a second Drizzle instance over the same pool (`serviceDb`) so only the service's own transaction fails.
 
+## Entrypoint tests
+
+`src/proxy.test.ts` and `page-access.test.ts` (DB-free: proxy behavior, redirect decisions, loop simulation over every user state); real-PostgreSQL: `route.db.test.ts` (public route, closed paths, private-provisioner boundary, login/logout, events, proxy vs real access), `password-change.db.test.ts` (forced change, failure ordering and fail-closed retry), `bootstrap.db.test.ts` and `intent-recovery.db.test.ts` (including real CLI runs through `tsx`, with no secrets in output).
+
 ## Password-reset concurrency tests
 
 `src/modules/access/staff/reset-password.db.test.ts` (real PostgreSQL + Better Auth): concurrent resets of different users (token ownership verified against each token's verification row), concurrent resets of the same user (both complete; last writer wins), and a failure after the token was issued (token never logged/returned, public reset surface closed, old password valid, retry succeeds). Re-run on every Better Auth upgrade.

@@ -2,3 +2,4 @@
 export { getAuth, PUBLIC_DISABLED_PATHS, type PublicAuth } from "./public-instance";
 export { getSession, type SessionProvider } from "./session";
 export { readAuthEnv, type AuthEnv } from "./env";
+export { getAllowedOrigins, handleAuthRequest } from "./handler";

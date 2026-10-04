@@ -89,3 +89,36 @@ export const headersWith = (cookie: string, extra: Record<string, string> = {}) 
 export function serviceDb(t: TestDb) {
   return drizzle(t.pool, { schema });
 }
+
+type GlobalCaches = {
+  __alIctDb?: { $client: { end(): Promise<void> } };
+  __alIctPublicAuth?: unknown;
+  __alIctProvisioningAuth?: unknown;
+};
+const globals = globalThis as unknown as GlobalCaches;
+const ENV_KEYS = ["DATABASE_URL", "BETTER_AUTH_SECRET", "BETTER_AUTH_URL"] as const;
+
+/**
+ * Points the lazy production singletons (getDb/getAuth/getProvisioningAuth, used by the real route handlers) at the
+ * disposable database. Call releaseGlobalAuth() in afterAll BEFORE closing the harness: it ends the pool the
+ * singletons created so the scratch database can be dropped without leaked connections.
+ */
+export function useGlobalAuth(t: TestDb): () => Promise<void> {
+  const previous = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+  process.env.DATABASE_URL = t.url;
+  process.env.BETTER_AUTH_SECRET = TEST_AUTH_ENV.secret;
+  process.env.BETTER_AUTH_URL = TEST_AUTH_ENV.baseURL;
+  delete globals.__alIctDb;
+  delete globals.__alIctPublicAuth;
+  delete globals.__alIctProvisioningAuth;
+  return async () => {
+    await globals.__alIctDb?.$client.end();
+    delete globals.__alIctDb;
+    delete globals.__alIctPublicAuth;
+    delete globals.__alIctProvisioningAuth;
+    for (const k of ENV_KEYS) {
+      if (previous[k] === undefined) delete process.env[k];
+      else process.env[k] = previous[k];
+    }
+  };
+}

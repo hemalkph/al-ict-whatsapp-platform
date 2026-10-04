@@ -28,6 +28,10 @@ docs/          specs and ADRs
 - Cross-cutting security helpers in `src/shared`: HTTP authorization errors and `toErrorResponse`, `emitSecurityEvent`, same-origin check, safe redirect validation.
 - `src/app/**` may not import `@/db` or the private provisioner (ESLint).
 
+## Routes and entrypoints
+
+`src/proxy.ts` (optimistic cookie check), `/api/auth/[...all]` (public Better Auth instance), `/api/account/change-password`, pages `/login`, `/change-password` and the authenticated group `(app)` (landing at `/`). Operator CLIs live in `scripts/` and call `@/modules/access/operator`.
+
 ## Planned modules (not created yet)
 
 staff provisioning and management services, whatsapp (Meta client, webhook intake, signature check), messaging (single outbound service and compliance guard), contacts, conversations, leads, bots (runtime, versions), campaigns, audit. Registrations, payments, attendance later.
