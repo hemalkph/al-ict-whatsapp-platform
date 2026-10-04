@@ -14,6 +14,10 @@ Production deployment is **provider-neutral during Foundation**. No Cloudflare/O
 
 No database or Docker is needed to run, test or build. Optional local PostgreSQL: `docker compose up -d` (see `docker-compose.yml`), or a hosted development database. `DATABASE_URL` (and optionally `DATABASE_MIGRATION_URL`, a direct connection used only by `npm run db:migrate`) are placeholders in `.env.example`.
 
+## Deployment blockers (must be resolved before production exposure)
+
+- **Client IP and rate limiting:** Better Auth's database-backed rate limiter keys on the client IP and silently skips requests that have none. The topology (proxy/CDN/platform) must define a trustworthy client-IP header and platform/WAF rate limiting before the login endpoint is exposed. Proxy headers are not trusted until then.
+
 ## CI
 
 `.github/workflows/ci.yml` has two jobs, neither needs secrets. `verify`: install, lint, typecheck, test, build. `database`: a disposable `postgres:17` service container with test credentials only; runs `db:check`, a schema/migration drift check (`db:generate` must leave `src/db/migrations/` untouched, including untracked files), `db:migrate` from an empty database, then `test:db`.

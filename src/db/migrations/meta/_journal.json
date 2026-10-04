@@ -8,6 +8,13 @@
       "when": 1791050884540,
       "tag": "0000_init_foundation_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791082751622,
+      "tag": "0001_auth_and_access_foundation",
+      "breakpoints": true
     }
   ]
 }

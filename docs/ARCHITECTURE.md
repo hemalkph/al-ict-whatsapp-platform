@@ -20,9 +20,16 @@ docs/          specs and ADRs
 - Files inside a module import their own internals freely.
 - ESLint enforces this for files outside `src/modules` (`no-restricted-imports` on `@/modules/*/*`). Module-to-module deep imports are not lint-enforced yet: this is a convention, reviewed by humans. Do not add clever lint rules; if the rule gets brittle, keep the convention.
 
+## Implemented modules
+
+- `auth` (`src/modules/auth`): the two Better Auth instances built from one shared base configuration. Public API (`@/modules/auth`): `getAuth()` (public instance, the only one that may ever be HTTP-mounted), `getSession()`, `readAuthEnv()`. The private provisioning instance lives in `src/modules/auth/provisioning.ts`, is not exported from the barrel, and is import-restricted by ESLint to the auth and access modules.
+- `access` (`src/modules/access`): fixed roles/permission matrix, `can`/`assertCan`, `requireUser`/`requireAccess`/`requirePermission`, `AccessContext`. Feature modules take an `AccessContext` and scope every query by `ctx.organizationId`.
+- Cross-cutting security helpers in `src/shared`: HTTP authorization errors and `toErrorResponse`, `emitSecurityEvent`, same-origin check, safe redirect validation.
+- `src/app/**` may not import `@/db` or the private provisioner (ESLint).
+
 ## Planned modules (not created yet)
 
-identity (users, memberships, authz), whatsapp (Meta client, webhook intake, signature check), messaging (single outbound service and compliance guard), contacts, conversations, leads, bots (runtime, versions), campaigns, audit. Registrations, payments, attendance later.
+staff provisioning and management services, whatsapp (Meta client, webhook intake, signature check), messaging (single outbound service and compliance guard), contacts, conversations, leads, bots (runtime, versions), campaigns, audit. Registrations, payments, attendance later.
 
 ## Rules
 

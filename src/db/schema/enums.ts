@@ -77,3 +77,7 @@ export const ATTRIBUTION_SOURCE_TYPES = [
 
 // Open-ended: webhook_events.event_type has no CHECK.
 export const WEBHOOK_EVENT_TYPES = ["MESSAGE", "STATUS", "OTHER"] as const;
+
+// Organization membership (Phase 03). Capabilities per role live in application code, not the database.
+export const MEMBERSHIP_ROLES = ["ADMIN", "STAFF", "VIEWER"] as const;
+export const MEMBERSHIP_STATUSES = ["ACTIVE", "SUSPENDED"] as const;

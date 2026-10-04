@@ -6,3 +6,5 @@ export * from "./contacts";
 export * from "./messaging";
 export * from "./leads";
 export * from "./tags";
+export * from "./auth";
+export * from "./access";

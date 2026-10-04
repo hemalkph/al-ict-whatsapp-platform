@@ -1,6 +1,6 @@
 # Database Design
 
-Status: **Phase 02 schema defined in `src/db/schema/` with its first generated migration under review; not yet applied or tested against a database.** Conventions and rationale: [ADR 0011](adr/0011-database-foundation-conventions.md).
+Status: Phase 02 schema is implemented and tested (migration `0000`). Phase 03 adds the authentication/authorization tables (migration `0001`, generated and under review, not yet applied). Conventions: [ADR 0011](adr/0011-database-foundation-conventions.md); auth: [ADR 0012](adr/0012-authentication-and-authorization.md).
 
 ## Direction
 
@@ -20,20 +20,24 @@ organizations, whatsapp_accounts, webhook_requests, webhook_events, contacts, co
 
 Everything tenant-owned carries `organization_id` with composite organization-aware foreign keys; `webhook_events` routing columns are nullable until resolved. No Meta credential is ever stored in a column (`whatsapp_accounts.credential_ref` is only a pointer to server-side configuration).
 
+## Tables in Phase 03 (authentication and access)
+
+- **Better Auth-owned** (`src/db/schema/auth.ts`; shape dictated by the library, regenerate-and-diff on upgrade): `users`, `sessions`, `accounts`, `verifications`, `rate_limits`.
+- **Application-owned** (`src/db/schema/access.ts`): `organization_memberships` (roles ADMIN/STAFF/VIEWER, statuses ACTIVE/SUSPENDED), `user_security_state` (global `password_change_required`), `staff_provisioning_intents` (short-lived provisioning coordinator; no credentials).
+
+Users are global identities; memberships are organization-specific; a user without an ACTIVE membership has no application access. The Drizzle adapter must be wired with `transaction: true` and an explicit schema mapping (see the header of `auth.ts` and ADR 0012).
+
 ## Principles
 
 Paginated, indexed queries; no N+1. Media goes in object storage, never in PostgreSQL BLOBs (object storage is not integrated yet). PII (phone numbers, profile names, message bodies, raw webhook payloads) is minimized, masked in logs, and subject to retention/erasure policy that is decided later.
 
-## Deferred (not in Phase 02)
+## Deferred (not yet in the schema)
 
-users, authentication, memberships, roles/permissions, conversation assignment, internal notes, quick replies and templates, bots, campaigns, offerings/programs, students, batches, payments, attendance, audit logs. Cloudflare R2 remains a future media-storage candidate. Better Auth is provisional (ADR 0010).
+conversation assignment, internal notes, quick replies and templates, bots, campaigns, offerings/programs, students, batches, payments, attendance, audit logs. Cloudflare R2 remains a future media-storage candidate. Authentication is decided in ADR 0012.
 
-## Open decision: roles and permissions
+## Decided: roles and permissions
 
-- **A. Fixed membership role enum.** Simplest; changing role capabilities needs a deploy.
-- **B. Relational roles + permissions.** Most flexible; more tables and admin UI.
-- **C. Fixed roles with permission overrides.** Sensible defaults with per-member exceptions.
-  Decided in the database/security milestone. No ADR yet.
+Fixed roles (ADMIN, STAFF, VIEWER) stored on the membership with the permission matrix defined in application code (see ADR 0012). Relational roles/permissions and per-user overrides are not used.
 
 ## Open decision: assignment history
 

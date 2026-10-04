@@ -1,6 +1,6 @@
 # ADR 0010: Better Auth (provisional)
 
-Status: Proposed
+Status: Superseded by [ADR 0012](0012-authentication-and-authorization.md)
 
 ## Context
 
