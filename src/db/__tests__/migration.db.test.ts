@@ -6,6 +6,7 @@ import { createTestDatabase, type TestDb } from "./helpers";
 
 const EXPECTED_TABLES = [
   "accounts",
+  "contact_bsuids",
   "contact_consents",
   "contact_tags",
   "contacts",

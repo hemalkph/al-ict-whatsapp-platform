@@ -1,0 +1,33 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "messages": [
+              {
+                "from": "15550100123",
+                "id": "wamid.FAKE00000000000000000301",
+                "timestamp": "1790000000",
+                "type": "system",
+                "system": {
+                  "body": "User Test Student changed from 15550100123 to 15550100124",
+                  "wa_id": "15550100124",
+                  "type": "user_changed_number"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

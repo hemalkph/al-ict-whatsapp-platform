@@ -15,6 +15,13 @@
       "when": 1791082751622,
       "tag": "0001_auth_and_access_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791104848428,
+      "tag": "0002_whatsapp_webhook_ingest_and_bsuid_identity",
+      "breakpoints": true
     }
   ]
 }

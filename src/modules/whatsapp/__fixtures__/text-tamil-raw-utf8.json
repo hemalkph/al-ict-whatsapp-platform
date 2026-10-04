@@ -1,0 +1,41 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "சோதனை மாணவர்"
+                },
+                "wa_id": "15550100124",
+                "user_id": "LK.100000000000000002"
+              }
+            ],
+            "messages": [
+              {
+                "from": "15550100124",
+                "from_user_id": "LK.100000000000000002",
+                "id": "wamid.FAKE00000000000000000061",
+                "timestamp": "1790000000",
+                "type": "text",
+                "text": {
+                  "body": "வணக்கம், ICT வகுப்பு பற்றி தெரிந்துகொள்ள வேண்டும்"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

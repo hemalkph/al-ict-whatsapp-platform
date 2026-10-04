@@ -14,6 +14,7 @@ import {
   seedOrg,
   seedTag,
   seedWebhookEvent,
+  seedWebhookRequest,
   seedWorld,
   type TestDb,
 } from "./helpers";
@@ -162,15 +163,12 @@ describe("uniqueness, idempotency and CHECK constraints", () => {
         UNIQUE_VIOLATION,
         "webhook_events_idempotency_key_unique",
       );
-      const [req] = await db
-        .insert(schema.webhookRequests)
-        .values({ rawPayload: {}, payloadSha256: "00" })
-        .returning();
+      const req = await seedWebhookRequest(db);
       const attempt = () =>
         db
           .insert(schema.webhookEvents)
           .values({
-            requestId: req!.id,
+            requestId: req.id,
             eventType: "MESSAGE",
             idempotencyKey: "msg:pn1:wamid.A",
             payload: {},

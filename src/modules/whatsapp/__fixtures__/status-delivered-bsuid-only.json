@@ -1,0 +1,45 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Student",
+                  "username": "test.student"
+                },
+                "user_id": "LK.100000000000000001",
+                "parent_user_id": "LK.ENT.900000000000000001"
+              }
+            ],
+            "statuses": [
+              {
+                "id": "wamid.FAKE00000000000000000200",
+                "status": "delivered",
+                "timestamp": "1790000000",
+                "recipient_user_id": "LK.100000000000000001",
+                "recipient_parent_user_id": "LK.ENT.900000000000000001",
+                "pricing": {
+                  "billable": true,
+                  "pricing_model": "PMP",
+                  "type": "regular",
+                  "category": "marketing"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

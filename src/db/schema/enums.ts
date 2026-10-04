@@ -42,6 +42,7 @@ export const MESSAGE_TYPES = [
   "FLOW",
   "TEMPLATE",
   "SYSTEM",
+  "REACTION",
   "UNKNOWN",
 ] as const;
 
@@ -75,8 +76,17 @@ export const ATTRIBUTION_SOURCE_TYPES = [
   "REFERRAL",
 ] as const;
 
-// Open-ended: webhook_events.event_type has no CHECK.
-export const WEBHOOK_EVENT_TYPES = ["MESSAGE", "STATUS", "OTHER"] as const;
+// Open-ended: webhook_events.event_type has no CHECK. IDENTITY = a user's identifier changed (BSUID / phone change).
+export const WEBHOOK_EVENT_TYPES = ["MESSAGE", "STATUS", "IDENTITY", "OTHER"] as const;
+
+// Outcome of parsing/ingesting one signature-verified delivery (webhook_requests.ingest_status). Only deliveries whose
+// HMAC verified are ever stored. ACCEPTED = the body was understood (it may still have produced zero events).
+export const INGEST_STATUSES = [
+  "ACCEPTED",
+  "UNPARSEABLE", // valid signature, but the bytes are not valid UTF-8 / JSON
+  "UNSUPPORTED_SHAPE", // valid JSON that is not the expected webhook envelope
+  "EVENTS_REJECTED", // understood, but persisting its events failed deterministically (retrying would not help)
+] as const;
 
 // Organization membership (Phase 03). Capabilities per role live in application code, not the database.
 export const MEMBERSHIP_ROLES = ["ADMIN", "STAFF", "VIEWER"] as const;

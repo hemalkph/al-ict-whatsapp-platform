@@ -1,0 +1,67 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Second Sender"
+                },
+                "wa_id": "15550100124",
+                "user_id": "LK.100000000000000002"
+              },
+              {
+                "profile": {
+                  "name": "First Sender"
+                },
+                "wa_id": "15550100123",
+                "user_id": "LK.100000000000000001"
+              }
+            ],
+            "messages": [
+              {
+                "from": "15550100123",
+                "from_user_id": "LK.100000000000000001",
+                "id": "wamid.FAKE00000000000000000050",
+                "timestamp": "1790000000",
+                "type": "text",
+                "text": {
+                  "body": "from the first sender"
+                }
+              },
+              {
+                "from": "15550100124",
+                "from_user_id": "LK.100000000000000002",
+                "id": "wamid.FAKE00000000000000000051",
+                "timestamp": "1790000000",
+                "type": "text",
+                "text": {
+                  "body": "from the second sender"
+                }
+              },
+              {
+                "from_user_id": "LK.100000000000000003",
+                "id": "wamid.FAKE00000000000000000052",
+                "timestamp": "1790000000",
+                "type": "text",
+                "text": {
+                  "body": "from a third sender with NO contacts[] element"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

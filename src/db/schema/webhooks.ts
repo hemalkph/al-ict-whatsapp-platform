@@ -10,24 +10,49 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { createdAt, oneOf, pk, tz } from "./_shared";
-import { WEBHOOK_EVENT_STATUSES } from "./enums";
+import { bytea, createdAt, oneOf, pk, tz } from "./_shared";
+import { INGEST_STATUSES, WEBHOOK_EVENT_STATUSES } from "./enums";
 import { whatsappAccounts } from "./whatsapp";
 
 /**
  * One row per signature-verified HTTP delivery. Delivery-level data only: no organization or account
  * (one delivery can carry several entries/changes). Invalid signatures are rejected before storage.
+ *
+ * `raw_body` is the EXACT byte sequence received (what the HMAC was computed over); it is never re-serialized,
+ * and jsonb could not hold it (jsonb reorders keys and rejects U+0000). Parsed content lives per item in
+ * webhook_events.payload. The body contains personal data: never log it, never return it from an API, and
+ * retention must be decided before production (docs/PRE_PRODUCTION_BLOCKERS.md).
  */
 export const webhookRequests = pgTable(
   "webhook_requests",
   {
     id: pk(),
     receivedAt: tz("received_at").notNull().defaultNow(),
-    rawPayload: jsonb("raw_payload").notNull(),
-    payloadSha256: text("payload_sha256").notNull(), // informational; deliberately not unique
+    rawBody: bytea("raw_body").notNull(),
+    // Lowercase hex SHA-256 of raw_body. Informational; deliberately not unique (Meta redelivers identical bytes).
+    payloadSha256: text("payload_sha256").notNull(),
+    ingestStatus: text("ingest_status", { enum: INGEST_STATUSES }).notNull().default("ACCEPTED"),
+    // Short fixed code (never an exception message). NULL exactly when ingest_status = 'ACCEPTED'.
+    ingestErrorCode: text("ingest_error_code"),
     createdAt: createdAt(),
   },
-  (t) => [index("webhook_requests_received_at_idx").on(t.receivedAt)],
+  (t) => [
+    index("webhook_requests_received_at_idx").on(t.receivedAt),
+    // Operational lookup: deliveries that were stored but not (fully) understood.
+    index("webhook_requests_not_accepted_idx")
+      .on(t.ingestStatus, t.receivedAt)
+      .where(sql`${t.ingestStatus} <> 'ACCEPTED'`),
+    check("webhook_requests_sha256_check", sql`${t.payloadSha256} ~ '^[0-9a-f]{64}$'`),
+    check("webhook_requests_ingest_status_check", oneOf(t.ingestStatus, INGEST_STATUSES)),
+    check(
+      "webhook_requests_ingest_error_check",
+      sql`(${t.ingestStatus} = 'ACCEPTED') = (${t.ingestErrorCode} IS NULL)`,
+    ),
+    check(
+      "webhook_requests_ingest_error_len_check",
+      sql`${t.ingestErrorCode} IS NULL OR char_length(${t.ingestErrorCode}) BETWEEN 1 AND 64`,
+    ),
+  ],
 );
 
 /** One row per normalized item; the PostgreSQL-backed inbox/queue (ADR 0006). */

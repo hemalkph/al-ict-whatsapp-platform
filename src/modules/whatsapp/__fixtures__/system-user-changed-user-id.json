@@ -1,0 +1,35 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "messages": [
+              {
+                "from": "15550100123",
+                "id": "wamid.FAKE00000000000000000300",
+                "timestamp": "1790000000",
+                "type": "system",
+                "system": {
+                  "body": "User Test Student changed from LK.100000000000000001 to LK.100000000000000002",
+                  "wa_id": "15550100124",
+                  "user_id": "LK.100000000000000002",
+                  "parent_user_id": "LK.ENT.900000000000000002",
+                  "type": "user_changed_user_id"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

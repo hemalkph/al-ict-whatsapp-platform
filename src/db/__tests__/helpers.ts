@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
@@ -83,7 +83,12 @@ async function waitForNoSessions(admin: Pool, name: string, waitMs: number) {
 }
 
 export async function createTestDatabase(
-  options: { sessionWaitMs?: number; prefix?: "al_ict_test" | "al_ict_e2e" } = {},
+  options: {
+    sessionWaitMs?: number;
+    prefix?: "al_ict_test" | "al_ict_e2e";
+    /** false = return an EMPTY database with no migrations applied (migration-precondition tests only). */
+    migrate?: boolean;
+  } = {},
 ) {
   assertLocal(ADMIN_URL);
   const name = `${options.prefix ?? "al_ict_test"}_${randomBytes(6).toString("hex")}`;
@@ -96,9 +101,11 @@ export async function createTestDatabase(
   const db = drizzle(pool, { schema });
   let closed: Promise<void> | undefined;
   try {
-    await migrate(db, {
-      migrationsFolder: fileURLToPath(new URL("../migrations", import.meta.url)),
-    });
+    if (options.migrate !== false) {
+      await migrate(db, {
+        migrationsFolder: fileURLToPath(new URL("../migrations", import.meta.url)),
+      });
+    }
   } catch (e) {
     await owned.end();
     await admin.pool.query(`DROP DATABASE IF EXISTS ${name}`);
@@ -244,6 +251,28 @@ export async function seedLead(db: Db, organizationId: string, contactId: string
   return row!;
 }
 
+/** A stored, signature-verified delivery: exact bytes plus the lowercase-hex SHA-256 of those bytes. */
+export async function seedWebhookRequest(
+  db: Db,
+  o: {
+    rawBody?: Buffer;
+    ingestStatus?: (typeof schema.INGEST_STATUSES)[number];
+    ingestErrorCode?: string | null;
+  } = {},
+) {
+  const rawBody = o.rawBody ?? Buffer.from('{"x":1}');
+  const [row] = await db
+    .insert(schema.webhookRequests)
+    .values({
+      rawBody,
+      payloadSha256: createHash("sha256").update(rawBody).digest("hex"),
+      ...(o.ingestStatus ? { ingestStatus: o.ingestStatus } : {}),
+      ...(o.ingestErrorCode !== undefined ? { ingestErrorCode: o.ingestErrorCode } : {}),
+    })
+    .returning();
+  return row!;
+}
+
 export async function seedWebhookEvent(
   db: Db,
   o: {
@@ -254,14 +283,11 @@ export async function seedWebhookEvent(
     receivedAt?: Date;
   } = {},
 ) {
-  const [req] = await db
-    .insert(schema.webhookRequests)
-    .values({ rawPayload: { x: 1 }, payloadSha256: "00" })
-    .returning();
+  const req = await seedWebhookRequest(db);
   const [row] = await db
     .insert(schema.webhookEvents)
     .values({
-      requestId: req!.id,
+      requestId: req.id,
       organizationId: o.organizationId ?? null,
       whatsappAccountId: o.whatsappAccountId ?? null,
       eventType: "MESSAGE",

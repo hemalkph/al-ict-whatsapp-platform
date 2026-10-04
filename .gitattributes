@@ -1,0 +1,2 @@
+# Webhook fixtures are compared and signed byte for byte: never normalize their line endings or contents.
+src/modules/whatsapp/__fixtures__/** -text

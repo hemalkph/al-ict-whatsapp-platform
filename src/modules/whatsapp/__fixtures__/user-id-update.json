@@ -1,0 +1,43 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Student"
+                },
+                "wa_id": "15550100124"
+              }
+            ],
+            "user_id_update": [
+              {
+                "wa_id": "15550100124",
+                "detail": "User id for Test Student has been updated.",
+                "user_id": {
+                  "previous": "LK.100000000000000001",
+                  "current": "LK.100000000000000002"
+                },
+                "parent_user_id": {
+                  "previous": "LK.ENT.900000000000000001",
+                  "current": "LK.ENT.900000000000000002"
+                },
+                "timestamp": "1790000000"
+              }
+            ]
+          },
+          "field": "user_id_update"
+        }
+      ]
+    }
+  ]
+}

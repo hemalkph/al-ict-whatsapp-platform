@@ -26,6 +26,20 @@ Security is a first-class requirement. The authentication and authorization arch
 
 Reporting: this is an internal project; report issues to the repository owner.
 
+## WhatsApp webhook security (Phase 04, decided; not yet implemented)
+
+Decisions: [ADR 0013](adr/0013-whatsapp-webhook-ingestion.md). Evidence and open items: [WHATSAPP_G0_EVIDENCE.md](WHATSAPP_G0_EVIDENCE.md).
+
+- **Signature rule (non-negotiable):** `HMAC-SHA256(META_APP_SECRET, exact received request-body bytes)`, constant-time comparison, performed before parsing or persisting. No alternate representation is ever accepted (no `JSON.stringify`, re-encoded, Unicode-normalized, re-escaped or canonical form, no fallback candidate). A real delivery that fails on its exact bytes is a transport investigation, not a reason to weaken the check.
+- **Verification token** (`hub.verify_token`) compared in constant time; lives only in the server environment; never logged, stored client-side or returned.
+- **No Better Auth in front of the endpoint**; trust = handshake token + signature + a configured `whatsapp_accounts` row. Organization context comes only from that row, never from the payload.
+- **Invalid signatures** are rejected with no database write (a log line with a reason code, never the body or signature). Body cap 4 MiB (Meta documents 3 MB) enforced while streaming; the path is excluded from the Next.js proxy so the body is never buffered or truncated (a proxy silently truncates bodies above its limit).
+- **Raw bodies** are stored as exact bytes (`bytea`) and contain personal data: never logged, never returned by an API, retention required before production. Signed-but-malformed bodies are retained, flagged (`ingest_status`) and acknowledged with 200; only a failure to store them returns 500.
+- **Idempotency** keys are scoped by `phone_number_id`; duplicates and replays collapse. Provider timestamps are stored as facts; a separate bounded effective time drives conversation activity and the customer-service window.
+- **Identity:** BSUIDs are scoped to a Meta Business Portfolio (one organization = one portfolio is an onboarding invariant). Conflicting identity claims fail closed, never merge silently. Human-readable `system.body` text is never parsed.
+- **Secrets blast radius:** Phase 04 holds no Meta access token, so a leak of this milestone's configuration can forge inbound webhooks but cannot send messages.
+- **Logging:** a fixed field whitelist, so bodies, names, phone numbers, BSUIDs, tokens and signatures cannot be logged by construction.
+
 ## Pre-production blockers
 
 What the authentication/authorization phase deliberately does not solve (client-IP propagation, WAF rate limiting, hardening of authenticated password operations, audit findings, multi-organization selection, stale-intent monitoring, email recovery) is tracked in [PRE_PRODUCTION_BLOCKERS.md](PRE_PRODUCTION_BLOCKERS.md). None of them may be treated as done by the green test suites.

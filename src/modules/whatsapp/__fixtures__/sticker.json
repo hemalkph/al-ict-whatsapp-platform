@@ -1,0 +1,43 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Student"
+                },
+                "wa_id": "15550100123"
+              }
+            ],
+            "messages": [
+              {
+                "from": "15550100123",
+                "id": "wamid.FAKE00000000000000000007",
+                "timestamp": "1790000000",
+                "type": "sticker",
+                "sticker": {
+                  "mime_type": "image/webp",
+                  "sha256": "ZmFrZS1zaGEyNTYtZm9yLXRlc3Rpbmctb25seS0wMDU=",
+                  "id": "900000000000005",
+                  "url": "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=FAKE",
+                  "animated": true
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

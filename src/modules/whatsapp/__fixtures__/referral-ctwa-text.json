@@ -1,0 +1,52 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Student"
+                },
+                "wa_id": "15550100123"
+              }
+            ],
+            "messages": [
+              {
+                "referral": {
+                  "source_url": "https://fb.me/FAKE0000",
+                  "source_id": "400000000000001",
+                  "source_type": "ad",
+                  "body": "Join the A/L ICT class",
+                  "headline": "Chat with us",
+                  "media_type": "image",
+                  "image_url": "https://scontent.xx.fbcdn.net/v/FAKE",
+                  "ctwa_clid": "FAKE-ctwa-clid-0000000000000000000000000000000000000001",
+                  "welcome_message": {
+                    "text": "Hi! How can we help?"
+                  }
+                },
+                "from": "15550100123",
+                "id": "wamid.FAKE00000000000000000016",
+                "timestamp": "1790000000",
+                "type": "text",
+                "text": {
+                  "body": "Can I get more info about this?"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

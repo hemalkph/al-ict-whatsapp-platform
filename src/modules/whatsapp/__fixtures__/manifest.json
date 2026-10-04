@@ -1,0 +1,293 @@
+{
+  "retrieved": "2026-10-04",
+  "note": "Every identifier, number, name, id and text in these files is FAKE. Origins: OFFICIAL_EXAMPLE_DERIVED = structure copied from an official Meta example with fake values; DASHBOARD_SAMPLE_DERIVED = none exist (needs a Meta app); SYNTHETIC_EDGE_CASE = built here, not an official example.",
+  "fixtures": [
+    {
+      "file": "text-phone.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/text",
+      "retrieved": "2026-10-04",
+      "notes": "Phone-identified sender (wa_id only; no BSUID fields: pre-BSUID shape)."
+    },
+    {
+      "file": "text-bsuid-only-username.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids/ (13.2 Incoming messages webhooks)",
+      "retrieved": "2026-10-04",
+      "notes": "BSUID-only sender: no wa_id in contacts[], no `from` in messages[]; username and parent BSUID present."
+    },
+    {
+      "file": "image.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/image",
+      "retrieved": "2026-10-04",
+      "notes": "Media message. `url` is a fake placeholder (real ones expire after 5 minutes; media ids from webhooks expire after 7 days)."
+    },
+    {
+      "file": "video.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/video",
+      "retrieved": "2026-10-04",
+      "notes": "Media message."
+    },
+    {
+      "file": "audio-voice.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/audio",
+      "retrieved": "2026-10-04",
+      "notes": "Voice recording (`audio.voice: true`)."
+    },
+    {
+      "file": "document.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/document",
+      "retrieved": "2026-10-04",
+      "notes": "Document with filename."
+    },
+    {
+      "file": "sticker.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/sticker",
+      "retrieved": "2026-10-04",
+      "notes": "Animated sticker."
+    },
+    {
+      "file": "location.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/location",
+      "retrieved": "2026-10-04",
+      "notes": "Coordinates are fake round numbers."
+    },
+    {
+      "file": "contacts-shared.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/contacts",
+      "retrieved": "2026-10-04",
+      "notes": "A shared contact card (personal data in real traffic)."
+    },
+    {
+      "file": "interactive-button-reply.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/interactive",
+      "retrieved": "2026-10-04",
+      "notes": "Reply to one of our interactive messages; `context.id` is that message."
+    },
+    {
+      "file": "interactive-list-reply.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/interactive",
+      "retrieved": "2026-10-04",
+      "notes": "List reply."
+    },
+    {
+      "file": "button-quick-reply.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/button",
+      "retrieved": "2026-10-04",
+      "notes": "Template quick-reply button."
+    },
+    {
+      "file": "reaction.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/reaction",
+      "retrieved": "2026-10-04",
+      "notes": "Contains an emoji (surrogate pair when escaped)."
+    },
+    {
+      "file": "reaction-removed.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/reaction",
+      "retrieved": "2026-10-04",
+      "notes": "Removal: the `emoji` property is absent (documented)."
+    },
+    {
+      "file": "reply-context-product.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/text (Message Business Button example)",
+      "retrieved": "2026-10-04",
+      "notes": "Text message whose context references one of our messages and a product."
+    },
+    {
+      "file": "referral-ctwa-text.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/text (Click to WhatsApp Ad example)",
+      "retrieved": "2026-10-04",
+      "notes": "Click-to-WhatsApp referral on the first message. `ctwa_clid` is omitted entirely for ads in WhatsApp Status (documented)."
+    },
+    {
+      "file": "unsupported-edit.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/unsupported",
+      "retrieved": "2026-10-04",
+      "notes": "`unsupported.type` and errors[] as documented."
+    },
+    {
+      "file": "status-delivered-phone-bsuid.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids/ (13.1 Status messages webhooks, example 1)",
+      "retrieved": "2026-10-04",
+      "notes": "Delivered, recipient addressed by phone number; contacts[] present."
+    },
+    {
+      "file": "status-delivered-bsuid-only.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids/ (13.1 Status messages webhooks, example 2)",
+      "retrieved": "2026-10-04",
+      "notes": "Delivered to a BSUID recipient: no recipient_id, no wa_id."
+    },
+    {
+      "file": "status-failed.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids/ (13.1 Status messages webhooks, example 3)",
+      "retrieved": "2026-10-04",
+      "notes": "Failed status; `contacts` is omitted entirely for failed statuses (documented)."
+    },
+    {
+      "file": "system-user-changed-user-id.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids/ (13.3 System messages webhooks)",
+      "retrieved": "2026-10-04",
+      "notes": "H1: the system item carries only the NEW BSUID (system.user_id); NO previous_user_id exists in the documentation. `system.body` is human-readable text and is NEVER parsed. The official JSON uses the placeholder `<SYSTEM_CHANGE_TYPE>` and the prose names `user_changed_user_id` as the type value. `from` is shown as the user's phone number in the official example."
+    },
+    {
+      "file": "user-id-update.json",
+      "origin": "OFFICIAL_EXAMPLE_DERIVED",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids/ (13.5 user_id_update webhooks)",
+      "retrieved": "2026-10-04",
+      "notes": "H1: documented ONLY on the BSUID page (last updated 2026-06-29) with a structured previous/current pair; the webhooks overview field list omits `user_id_update`, so whether it is subscribable is UNCONFIRMED. No handler may depend on this shape until G0 item H1 is closed."
+    },
+    {
+      "file": "text-phone-and-bsuid.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids/ (12.2 identifier table)",
+      "retrieved": null,
+      "notes": "Composed from the documented property rules (user without username: wa_id and user_id both always present). Not an official example."
+    },
+    {
+      "file": "status-sent.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/statuses (page not retrievable)",
+      "retrieved": null,
+      "notes": "Shape copied from the documented delivered example minus pricing. The sent/read examples are not on any retrievable official page."
+    },
+    {
+      "file": "status-read.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/statuses (page not retrievable)",
+      "retrieved": null,
+      "notes": "Same basis as status-sent."
+    },
+    {
+      "file": "status-played.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/changelog",
+      "retrieved": null,
+      "notes": "`played` (voice message played) is documented ONLY by a changelog sentence (2025-10-08); there is no official JSON."
+    },
+    {
+      "file": "system-user-changed-number-legacy.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/system",
+      "retrieved": null,
+      "notes": "Shape taken from a SUMMARY of the legacy system-message reference (old phone in `from`, new in system.wa_id); the page would not be reproduced verbatim, so this is not an exact official example. It predates BSUIDs."
+    },
+    {
+      "file": "text-reply-context.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/interactive (context object)",
+      "retrieved": null,
+      "notes": "Plain reply: context {from, id} as documented, on a text message."
+    },
+    {
+      "file": "multi-event-request.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "documented array structure (entry[], changes[])",
+      "retrieved": null,
+      "notes": "One HTTP delivery, 2 entries, 3 changes: a message and a status for number 1 plus a message for number 2."
+    },
+    {
+      "file": "same-message-two-numbers.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "documented array structure",
+      "retrieved": null,
+      "notes": "The identical message element on two different phone_number_ids: idempotency keys must not collide."
+    },
+    {
+      "file": "multi-sender-pairing.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "H3: no official multi-sender example exists",
+      "retrieved": null,
+      "notes": "SYNTHETIC. contacts[] is in the REVERSE order of messages[], and the third message has no contact element. Pairing must use from_user_id<->user_id (fallback from<->wa_id), never contacts[0] and never array position."
+    },
+    {
+      "file": "text-sinhala-raw-utf8.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "exact-byte signature tests",
+      "retrieved": null,
+      "notes": "Non-ASCII written as literal UTF-8. WHICH form Meta actually sends is UNVERIFIED (optional live smoke). Signature tests sign each file's OWN bytes; the rule is exact received bytes only. Pair: text-sinhala-escaped.json (same content, \\uXXXX lowercase escapes)."
+    },
+    {
+      "file": "text-sinhala-escaped.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "exact-byte signature tests",
+      "retrieved": null,
+      "notes": "Same JSON value as text-sinhala-raw-utf8.json with every non-ASCII UTF-16 code unit written as a lowercase \\uXXXX escape (different bytes, same meaning). A signature over one MUST NOT verify the other."
+    },
+    {
+      "file": "text-tamil-raw-utf8.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "exact-byte signature tests",
+      "retrieved": null,
+      "notes": "Tamil text and profile name as literal UTF-8."
+    },
+    {
+      "file": "text-with-nul-escape.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "PostgreSQL jsonb/text cannot store U+0000",
+      "retrieved": null,
+      "notes": "A JSON \\u0000 escape inside a message body: the normalizer must strip it before any jsonb/text insert."
+    },
+    {
+      "file": "unknown-type.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "forward compatibility",
+      "retrieved": null,
+      "notes": "A message type this code has never seen: must be stored as UNKNOWN, never fail processing."
+    },
+    {
+      "file": "unsupported-field-change.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "field list: webhooks overview",
+      "retrieved": null,
+      "notes": "A change whose `field` is not `messages`: expected to be stored as an ignored OTHER event."
+    },
+    {
+      "file": "not-an-envelope.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "malformed-shape test",
+      "retrieved": null,
+      "notes": "Valid JSON that is not the webhook envelope (UNSUPPORTED_SHAPE)."
+    },
+    {
+      "file": "empty-entry.json",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "edge case",
+      "retrieved": null,
+      "notes": "Understood envelope with zero events (ACCEPTED, no events)."
+    },
+    {
+      "file": "invalid-json.txt",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "malformed-body test",
+      "retrieved": null,
+      "notes": "Truncated JSON (UNPARSEABLE / invalid_json)."
+    },
+    {
+      "file": "invalid-utf8.bin",
+      "origin": "SYNTHETIC_EDGE_CASE",
+      "source": "malformed-body test",
+      "retrieved": null,
+      "notes": "Bytes 0xFF 0xFE inside a string: not valid UTF-8 (UNPARSEABLE / invalid_utf8). A lossy decoder would silently replace them."
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Student"
+                },
+                "wa_id": "15550100123"
+              }
+            ],
+            "messages": [
+              {
+                "context": {
+                  "from": "15550100001",
+                  "id": "wamid.FAKE00000000000000000101"
+                },
+                "from": "15550100123",
+                "id": "wamid.FAKE00000000000000000011",
+                "timestamp": "1790000000",
+                "type": "interactive",
+                "interactive": {
+                  "type": "list_reply",
+                  "list_reply": {
+                    "id": "batch_evening",
+                    "title": "Evening batch",
+                    "description": "6pm to 8pm"
+                  }
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

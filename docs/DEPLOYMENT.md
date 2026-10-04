@@ -18,6 +18,8 @@ No database or Docker is needed to run, test or build. Optional local PostgreSQL
 
 - **Client IP and rate limiting:** Better Auth's database-backed rate limiter keys on the client IP and silently skips requests that have none. The topology (proxy/CDN/platform) must define a trustworthy client-IP header and platform/WAF rate limiting before the login endpoint is exposed. Proxy headers are not trusted until then.
 
+- **Migration 0002 must be applied before any webhook data exists.** It adds `webhook_requests.raw_body bytea NOT NULL` with no default and no backfill and then drops `raw_payload`, so it fails (safely, atomically, SQLSTATE 23502) if the table already holds a row. Apply `0002` first, then deploy the version that contains the webhook route. If webhook data could already exist, stop and decide its fate; never convert the jsonb into pretend wire bytes. See ADR 0013.
+
 ## CI
 
 `.github/workflows/ci.yml` has two jobs, neither needs secrets. `verify`: install, lint, typecheck, test, build. `database`: a disposable `postgres:17` service container with test credentials only; runs `db:check`, a schema/migration drift check (`db:generate` must leave `src/db/migrations/` untouched, including untracked files), `db:migrate` from an empty database, then `test:db`.

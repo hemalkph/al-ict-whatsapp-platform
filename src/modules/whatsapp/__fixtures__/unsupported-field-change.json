@@ -1,0 +1,17 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "time": 1790000000,
+      "changes": [
+        {
+          "field": "account_alerts",
+          "value": {
+            "opaque": "not a messages payload"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "200000000000001",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550100001",
+              "phone_number_id": "100000000000001"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Student"
+                },
+                "wa_id": "15550100123"
+              }
+            ],
+            "messages": [
+              {
+                "from": "15550100123",
+                "id": "wamid.FAKE00000000000000000008",
+                "timestamp": "1790000000",
+                "type": "location",
+                "location": {
+                  "address": "1 Example Road, Colombo",
+                  "latitude": 6.9,
+                  "longitude": 79.85,
+                  "name": "Test Institute",
+                  "url": "https://example.invalid/"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}
