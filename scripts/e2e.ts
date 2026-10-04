@@ -20,6 +20,7 @@ import { seedE2E } from "./e2e-seed";
 
 const HOST = "127.0.0.1";
 const PORT = process.env.E2E_PORT ?? "3100";
+const CONTROL_PORT = String(Number(PORT) + 1); // harness-only in-flight endpoint (see e2e/server.mjs)
 const BASE_URL = `https://${HOST}:${PORT}`;
 // Test-only, deterministic, and meaningless outside the disposable database: not a real secret.
 const AUTH_SECRET = "e2e-only-better-auth-secret-".padEnd(48, "x");
@@ -80,6 +81,7 @@ async function main(): Promise<number> {
         E2E_TLS_DIR: tlsDir,
         E2E_HOST: HOST,
         E2E_PORT: PORT,
+        E2E_CONTROL_PORT: CONTROL_PORT,
       },
     });
     const tee = (target: NodeJS.WriteStream) => (chunk: Buffer) => {
@@ -100,10 +102,19 @@ async function main(): Promise<number> {
       .filter((line) => line.includes("[WebServer]"));
     mkdirSync("e2e-output", { recursive: true });
     writeFileSync(SERVER_LOG, serverLines.join("\n") + "\n");
-    const bad = serverLines.filter((line) => SERVER_ERROR_PATTERN.test(line));
-    if (bad.length > 0) {
+    // Detection is unchanged (any matching line fails the run). Only the report is richer: each flagged line is shown
+    // with the lines after it, because a stack trace usually follows a line that itself matches nothing.
+    const flagged = serverLines.flatMap((line, index) =>
+      SERVER_ERROR_PATTERN.test(line) ? [index] : [],
+    );
+    if (flagged.length > 0) {
       console.error(`\nThe application server logged errors during the run (see ${SERVER_LOG}):`);
-      for (const line of bad.slice(0, 10)) console.error(`  ${line}`);
+      for (const index of flagged.slice(0, 10)) {
+        console.error(`  ${serverLines[index]}`);
+        for (const next of serverLines.slice(index + 1, index + 4)) {
+          if (!SERVER_ERROR_PATTERN.test(next)) console.error(`  ${next}`);
+        }
+      }
       exitCode = exitCode || 1;
     }
   } finally {

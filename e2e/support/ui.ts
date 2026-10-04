@@ -1,5 +1,18 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import { E2E_PASSWORD } from "./identities";
+import { serverIdle } from "./settle";
+
+/** page.goto after the server has finished the page's earlier requests (navigating away cancels in-flight ones). */
+export async function navigate(page: Page, url: string) {
+  await serverIdle();
+  return page.goto(url);
+}
+
+/** Closes a page or context only after the server has finished every request it received. */
+export async function closeWhenIdle(target: { close(): Promise<void> }) {
+  await serverIdle();
+  await target.close();
+}
 
 /** Signs in through the REAL login form. Does not wait for any particular destination. */
 export async function submitLogin(page: Page, email: string, password: string = E2E_PASSWORD) {
@@ -14,7 +27,7 @@ export async function loginViaUi(
   password: string = E2E_PASSWORD,
   next?: string,
 ) {
-  await page.goto(next === undefined ? "/login" : `/login?next=${encodeURIComponent(next)}`);
+  await navigate(page, next === undefined ? "/login" : `/login?next=${encodeURIComponent(next)}`);
   await submitLogin(page, email, password);
 }
 

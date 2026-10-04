@@ -1,7 +1,7 @@
 import { expect, test } from "./support/fixtures";
 import { E2E_PASSWORD, USERS } from "./support/identities";
 import { membershipOf, userCount, userExists } from "./support/db";
-import { errorCode, loginViaUi, pageFetch, submitLogin } from "./support/ui";
+import { closeWhenIdle, errorCode, loginViaUi, pageFetch, submitLogin } from "./support/ui";
 
 // Representative staff-API checks from a REAL authenticated browser. The 35 route-level integration tests already
 // cover the permutations; this proves cookies, Origin/Sec-Fetch-Site and the production build work together.
@@ -214,7 +214,7 @@ test.describe("same-origin protection", () => {
     expect((await request.allHeaders()).referer).toBe(`${attackerOrigin}/`);
     expect((await request.allHeaders()).cookie).toBeUndefined();
     expect(response.status()).toBe(401);
-    await attacker.close();
+    await closeWhenIdle(attacker);
     await unchanged();
   });
 });

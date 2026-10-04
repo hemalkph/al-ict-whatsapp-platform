@@ -1,6 +1,6 @@
 import { expect, test } from "./support/fixtures";
 import { USERS } from "./support/identities";
-import { loginViaUi } from "./support/ui";
+import { loginViaUi, navigate } from "./support/ui";
 
 // Post-login redirect targets (?next=) come from the URL, so they are attacker-controlled.
 
@@ -58,7 +58,7 @@ test.describe("redirect security", () => {
   }) => {
     await loginViaUi(page, USERS.redirect.email);
     await expect(page.getByRole("heading", { name: "Signed in" })).toBeVisible();
-    await page.goto(`/login?next=${encodeURIComponent("//evil.example")}`);
+    await navigate(page, `/login?next=${encodeURIComponent("//evil.example")}`);
     await expect(page.getByRole("heading", { name: "Signed in" })).toBeVisible();
     expect(new URL(page.url()).origin).toBe(new URL(baseURL!).origin);
   });

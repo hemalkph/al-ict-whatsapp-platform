@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { test as base, expect } from "@playwright/test";
 import { closeDb } from "./db";
+import { serverIdle } from "./settle";
 
 // Every test fails on an uncaught page exception or a browser console error. Failed network requests the tests
 // provoke on purpose (401/403/429 responses) are logged by the browser as console errors and are not application errors.
@@ -29,6 +30,8 @@ export const test = base.extend<{ pageProblems: void }>({
         }
       });
       await run();
+      // The page and context are closed right after this fixture: let the server finish first (see settle.ts).
+      await serverIdle();
       expect(problems, "unexpected browser errors").toEqual([]);
     },
     { auto: true },

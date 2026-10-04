@@ -1,6 +1,6 @@
 import { expect, test } from "./support/fixtures";
 import { USERS } from "./support/identities";
-import { errorCode, loginViaUi, pageFetch, sessionCookie } from "./support/ui";
+import { closeWhenIdle, errorCode, loginViaUi, pageFetch, sessionCookie } from "./support/ui";
 
 // The proxy is an optimistic cookie-PRESENCE check; it never queries PostgreSQL and never authorizes. The probe path
 // /reports does not exist: whether a request reaches routing (404) or is turned away earlier (redirect to /login)
@@ -54,7 +54,7 @@ test.describe("the proxy is not authorization", () => {
     await forgedPage.goto(`${baseURL}/`);
     await expect(forgedPage).toHaveURL(/\/login$/);
     await expect(forgedPage.getByText("Signed in")).toHaveCount(0);
-    await forged.close();
+    await closeWhenIdle(forged);
   });
 
   test("a revoked (stale) real cookie passes the proxy and is rejected by the server", async ({

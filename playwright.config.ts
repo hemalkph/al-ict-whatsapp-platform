@@ -40,6 +40,8 @@ export default defineConfig({
     url: `${baseURL}/api/health`,
     ignoreHTTPSErrors: true,
     reuseExistingServer: false,
+    // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
+    gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
     timeout: 90_000,
     stdout: "pipe",
     stderr: "pipe",
@@ -50,6 +52,7 @@ export default defineConfig({
       BETTER_AUTH_URL: baseURL,
       E2E_HOST: required("E2E_HOST"),
       E2E_PORT: required("E2E_PORT"),
+      E2E_CONTROL_PORT: required("E2E_CONTROL_PORT"),
       E2E_TLS_DIR: required("E2E_TLS_DIR"),
     },
   },

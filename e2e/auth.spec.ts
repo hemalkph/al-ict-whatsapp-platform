@@ -1,7 +1,15 @@
 import { expect, test } from "./support/fixtures";
 import { E2E_NEW_PASSWORD, E2E_PASSWORD, FIRST_ADMIN, ORG_A, USERS } from "./support/identities";
 import { passwordChangeRequired, sessionCount } from "./support/db";
-import { errorCode, loginViaUi, pageFetch, sessionCookie, submitLogin } from "./support/ui";
+import {
+  closeWhenIdle,
+  errorCode,
+  loginViaUi,
+  navigate,
+  pageFetch,
+  sessionCookie,
+  submitLogin,
+} from "./support/ui";
 
 test.describe("logged-out access and invalid login", () => {
   test("a protected page redirects to /login with a safe next destination", async ({
@@ -14,7 +22,7 @@ test.describe("logged-out access and invalid login", () => {
     await expect(page.getByLabel("Email")).toBeVisible();
     expect(await sessionCookie(context)).toBeUndefined();
 
-    await page.goto("/");
+    await navigate(page, "/");
     await expect(page).toHaveURL(/\/login$/);
   });
 
@@ -27,7 +35,7 @@ test.describe("logged-out access and invalid login", () => {
       ["nobody.here@e2e.test", "some-wrong-password-1"], // unknown account
       [USERS.invalidLogin.email, "some-wrong-password-1"], // known account, wrong password
     ] as const) {
-      await page.goto("/login");
+      await navigate(page, "/login");
       await submitLogin(page, email, password);
       const alert = page.locator("p[role=alert]");
       await expect(alert).toBeVisible();
@@ -57,7 +65,7 @@ test.describe.serial("first login and forced password change", () => {
     expect(cookie).toMatchObject({ httpOnly: true, secure: true, sameSite: "Lax" });
     expect(cookie!.name).toMatch(/^__Secure-/);
 
-    await page.goto("/");
+    await navigate(page, "/");
     await expect(page).toHaveURL(/\/change-password$/);
     await expect(page.getByText("Signed in")).toHaveCount(0);
 
@@ -145,10 +153,10 @@ test.describe.serial("first login and forced password change", () => {
     await expect(page.getByRole("heading", { name: "Signed in" })).toBeVisible();
     expect(await sessionCount(FIRST_ADMIN.email)).toBe(1); // every other session was revoked
 
-    await otherPage.goto("/");
+    await navigate(otherPage, "/");
     await expect(otherPage).toHaveURL(/\/login$/);
     await expect(otherPage.getByText("Signed in")).toHaveCount(0);
-    await other.close();
+    await closeWhenIdle(other);
 
     // The gate no longer applies: the staff API is available to the ADMIN.
     expect((await pageFetch(page, "GET", "/api/staff")).status).toBe(200);
@@ -182,12 +190,12 @@ test.describe("logout", () => {
     expect(await sessionCookie(context)).toBeUndefined();
     expect(await sessionCount(logout.email)).toBe(0); // deleted, not just hidden
 
-    await page.goto("/");
+    await navigate(page, "/");
     await expect(page).toHaveURL(/\/login$/);
 
     // Put the previous cookie back, as an attacker holding a copy would.
     await context.addCookies([stale!]);
-    await page.goto("/");
+    await navigate(page, "/");
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByText("Signed in")).toHaveCount(0);
     expect((await context.request.get("/api/staff")).status()).toBe(401);
