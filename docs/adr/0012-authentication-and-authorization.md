@@ -99,6 +99,12 @@ Service functions only (no HTTP routes, UI or CLI yet), in `src/modules/access/s
 - Responses never include passwords, hashes, tokens, provisioning/intent data, or `sessionsRevoked` (omitted because it would reveal whether an identity is active in another organization).
 - Not done here: no UI, no pagination (staff lists are small and organization-bounded).
 
+## Implementation notes (checkpoint 7: real-browser E2E verification)
+
+- Phase 03 is verified in a real browser (Chromium) against the production build, a disposable `al_ict_e2e_*` PostgreSQL database and HTTPS with a throwaway certificate: login, redirects, forced password change, replacement cookie, logout (database session deleted), hostile `next` values, proxy-versus-real-authorization, staff API authorization, same-origin and a cross-site browser request. See `docs/TESTING_STRATEGY.md`.
+- No product code changed. The only change outside tests and tooling is an optional `prefix` on the DB test harness so the E2E database is named `al_ict_e2e_*`.
+- What Phase 03 does **not** solve is listed in `docs/PRE_PRODUCTION_BLOCKERS.md`.
+
 ## Known unresolved issue (must be resolved before production deployment)
 
 `npm audit --omit=dev` reports **4 moderate** findings: `better-auth` declares `drizzle-kit` as an optional peer dependency, so a production-style `npm ci --omit=dev` installs `drizzle-kit` → `@esbuild-kit/esm-loader` → `@esbuild-kit/core-utils` → `esbuild@0.18.20`, which is affected by the esbuild dev-server advisory (GHSA-67mh-4wv8-2f99). No application code imports `drizzle-kit`, but this is not considered harmless: it is recorded as unresolved, with no override or dependency change made yet.

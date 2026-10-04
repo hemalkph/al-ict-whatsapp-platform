@@ -35,5 +35,5 @@ No `.env`, database or Docker is needed to run, test or build. `.env.example` li
 | `npm run lint`                    | ESLint                                      |
 | `npm run typecheck`               | `tsc --noEmit`                              |
 | `npm test`                        | Vitest (unit)                               |
-| `npm run test:e2e`                | Playwright (no specs yet)                   |
+| `npm run test:e2e`                | Browser E2E (Playwright + disposable DB)    |
 | `npm run format` / `format:check` | Prettier                                    |

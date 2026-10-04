@@ -4,3 +4,4 @@ package-lock.json
 playwright-report
 test-results
 coverage
+e2e-output

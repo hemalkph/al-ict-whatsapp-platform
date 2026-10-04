@@ -82,9 +82,11 @@ async function waitForNoSessions(admin: Pool, name: string, waitMs: number) {
   }
 }
 
-export async function createTestDatabase(options: { sessionWaitMs?: number } = {}) {
+export async function createTestDatabase(
+  options: { sessionWaitMs?: number; prefix?: "al_ict_test" | "al_ict_e2e" } = {},
+) {
   assertLocal(ADMIN_URL);
-  const name = `al_ict_test_${randomBytes(6).toString("hex")}`;
+  const name = `${options.prefix ?? "al_ict_test"}_${randomBytes(6).toString("hex")}`;
   const admin = ownedPool(ADMIN_URL, 1);
   await admin.pool.query(`CREATE DATABASE ${name}`);
   const url = new URL(ADMIN_URL);

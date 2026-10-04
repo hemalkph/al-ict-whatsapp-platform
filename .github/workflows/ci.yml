@@ -75,3 +75,57 @@ jobs:
           console.log('migrations applied:', m, 'public tables:', t); await c.end(); if (m < 1 || t < 1) process.exit(1); })().catch((e) => { console.error(e); process.exit(1); })"
       - name: Database integration tests
         run: npm run test:db
+
+  # Real-browser end-to-end job (Chromium). Like `database`, it uses ONLY a disposable PostgreSQL service container
+  # with test credentials. scripts/e2e.ts creates a dedicated al_ict_e2e_* database, migrates and seeds it, serves the
+  # production build over HTTPS with a throwaway certificate, runs Playwright, and drops the database afterwards.
+  # The auth secret and URL are test-only values defined in that script; nothing here is a real secret.
+  e2e:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The harness refuses non-local hosts; this is the service container on localhost.
+      TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium and its system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Production build
+        run: npm run build
+      - name: Browser E2E tests
+        run: npm run test:e2e
+        env:
+          E2E_SKIP_BUILD: "1" # built in the previous step
+      # Traces contain request bodies and cookies (fake test passwords and sessions of a database already dropped);
+      # they are uploaded for failures only and expire quickly.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts
+          path: |
+            playwright-report/
+            test-results/
+            e2e-output/
+          retention-days: 7
+          if-no-files-found: ignore

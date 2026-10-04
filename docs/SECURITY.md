@@ -25,3 +25,7 @@ Security is a first-class requirement. The authentication and authorization arch
 - Least privilege for database roles and API tokens.
 
 Reporting: this is an internal project; report issues to the repository owner.
+
+## Pre-production blockers
+
+What the authentication/authorization phase deliberately does not solve (client-IP propagation, WAF rate limiting, hardening of authenticated password operations, audit findings, multi-organization selection, stale-intent monitoring, email recovery) is tracked in [PRE_PRODUCTION_BLOCKERS.md](PRE_PRODUCTION_BLOCKERS.md). None of them may be treated as done by the green test suites.
