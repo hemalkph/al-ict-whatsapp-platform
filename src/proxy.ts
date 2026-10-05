@@ -7,7 +7,7 @@ import { safeRedirectPath } from "@/shared/security/redirect";
 // and never decides authorization: a forged, stale or revoked cookie passes this proxy and is rejected by the real
 // checks (requireAccess/requirePermission and the service layer) on the server.
 
-const PUBLIC_PATHS = ["/login", "/api/health"];
+const PUBLIC_PATHS = ["/login", "/api/health", "/api/webhooks/whatsapp"];
 const PUBLIC_PREFIXES = ["/api/auth/"];
 
 export function isPublicPath(pathname: string): boolean {
@@ -38,8 +38,10 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Everything except Next.js internals and static files.
+  // Everything except Next.js internals, static files and the Meta webhook. When a proxy runs on a path, Next.js buffers
+  // the request body and silently TRUNCATES it at proxyClientMaxBodySize; a webhook signature is computed over the exact
+  // body bytes, so the webhook must never pass through the proxy at all (it authenticates itself: token + signature).
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|map)$).*)",
+    "/((?!api/webhooks/whatsapp(?:/|$)|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|map)$).*)",
   ],
 };

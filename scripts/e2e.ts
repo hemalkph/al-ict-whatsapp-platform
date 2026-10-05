@@ -24,6 +24,9 @@ const CONTROL_PORT = String(Number(PORT) + 1); // harness-only in-flight endpoin
 const BASE_URL = `https://${HOST}:${PORT}`;
 // Test-only, deterministic, and meaningless outside the disposable database: not a real secret.
 const AUTH_SECRET = "e2e-only-better-auth-secret-".padEnd(48, "x");
+// Test-only webhook secrets (the disposable database holds nothing real; these protect nothing outside this run).
+const META_APP_SECRET = "e2e-only-meta-app-secret-0123456789abcdef";
+const WEBHOOK_VERIFY_TOKEN = "e2e-only-webhook-verify-token-0123456789abcdef";
 const SERVER_LOG = "e2e-output/server.log";
 
 // Lines the application server must never print during a run. Expected 4xx responses are not logged by the app.
@@ -78,6 +81,8 @@ async function main(): Promise<number> {
         E2E_DATABASE_URL: t.url,
         E2E_BASE_URL: BASE_URL,
         E2E_AUTH_SECRET: AUTH_SECRET,
+        E2E_META_APP_SECRET: META_APP_SECRET,
+        E2E_WEBHOOK_VERIFY_TOKEN: WEBHOOK_VERIFY_TOKEN,
         E2E_TLS_DIR: tlsDir,
         E2E_HOST: HOST,
         E2E_PORT: PORT,

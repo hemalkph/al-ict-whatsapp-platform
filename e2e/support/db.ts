@@ -55,3 +55,23 @@ export const userExists = async (email: string) =>
 
 export const userCount = async () =>
   (await one<{ n: number }>("select count(*)::int n from users", [])).n;
+
+/** A stored webhook delivery found by the SHA-256 of its exact bytes (read-only assertions). */
+export const webhookDelivery = async (sha256: string) =>
+  (
+    await getPool().query<{
+      raw_body: Buffer;
+      ingest_status: string;
+      ingest_error_code: string | null;
+      events: number;
+      event_status: string | null;
+      event_reason: string | null;
+    }>(
+      `select r.raw_body, r.ingest_status, r.ingest_error_code,
+              (select count(*)::int from webhook_events e where e.request_id = r.id) as events,
+              (select e.status from webhook_events e where e.request_id = r.id limit 1) as event_status,
+              (select e.last_error from webhook_events e where e.request_id = r.id limit 1) as event_reason
+         from webhook_requests r where r.payload_sha256 = $1`,
+      [sha256],
+    )
+  ).rows;

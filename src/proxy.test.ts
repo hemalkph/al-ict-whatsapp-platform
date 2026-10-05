@@ -1,6 +1,12 @@
 import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
-import { isPublicPath, proxy } from "./proxy";
+import { createRequire } from "node:module";
+import { config, isPublicPath, proxy } from "./proxy";
+
+// Next.js ships this compiled copy without type declarations; it is the library Next uses for `config.matcher`.
+const { pathToRegexp } = createRequire(import.meta.url)("next/dist/compiled/path-to-regexp") as {
+  pathToRegexp: (path: string) => RegExp;
+};
 
 const req = (path: string, cookie?: string) =>
   new NextRequest(`http://localhost:3000${path}`, cookie ? { headers: { cookie } } : undefined);
@@ -72,5 +78,53 @@ describe("proxy.ts (optimistic cookie check only)", () => {
   it("never redirects /login itself (no loop), with or without a cookie", () => {
     expect(proxy(req("/login")).status).toBe(200);
     expect(proxy(req("/login", "better-auth.session_token=x")).status).toBe(200);
+  });
+});
+
+describe("the Meta webhook bypasses the proxy (its body must never be buffered or truncated)", () => {
+  // The same path-to-regexp Next.js uses to turn `config.matcher` into the pattern it matches request paths against.
+  const matcher = pathToRegexp(config.matcher[0]!);
+  const handledByProxy = (path: string) => matcher.test(path);
+
+  it("does not run the proxy on the webhook path at all (no buffering, no truncation, no cookie logic)", () => {
+    expect(handledByProxy("/api/webhooks/whatsapp")).toBe(false);
+    expect(handledByProxy("/api/webhooks/whatsapp/")).toBe(false);
+    expect(handledByProxy("/api/webhooks/whatsapp/anything")).toBe(false);
+  });
+
+  it("still runs the proxy on every other API path and on look-alike paths", () => {
+    for (const path of [
+      "/api/staff",
+      "/api/staff/00000000-0000-4000-8000-000000000001/role",
+      "/api/account/change-password",
+      "/api/auth/sign-in/email",
+      "/api/webhooks",
+      "/api/webhooks/whatsappx",
+      "/api/webhooks/whatsapp-evil",
+      "/api/webhooks/other",
+      "/api/webhookz/whatsapp",
+      "/",
+      "/login",
+    ]) {
+      expect(handledByProxy(path), path).toBe(true);
+    }
+  });
+
+  it("also treats the path as public, so even a direct call needs no session cookie", () => {
+    expect(isPublicPath("/api/webhooks/whatsapp")).toBe(true);
+    expect(proxy(req("/api/webhooks/whatsapp")).status).toBe(200);
+    expect(isPublicPath("/api/webhooks/whatsappx")).toBe(false);
+    expect(isPublicPath("/api/webhooks")).toBe(false);
+  });
+
+  it("keeps other protected API paths protected", async () => {
+    for (const path of [
+      "/api/staff",
+      "/api/staff/x/suspend",
+      "/api/account/change-password",
+      "/api/webhooks/other",
+    ]) {
+      expect(proxy(req(path)).status, path).toBe(401);
+    }
   });
 });

@@ -2,9 +2,9 @@
 
 Official **Meta WhatsApp Business Platform Cloud API only**. Never WhatsApp Web automation, Puppeteer/Chromium/Selenium, whatsapp-web.js, Baileys, QR-linked devices or unofficial clients ([ADR 0002](adr/0002-whatsapp-cloud-api-only.md)).
 
-Phase 04 builds the **inbound** half. Status: checkpoint 1 is done (verification of Meta's current documentation, sanitized fixtures, the schema and migration `0002`, validated against real PostgreSQL on disposable databases and never applied to the developer database). There is **no webhook route, signature code, ingestion, worker or handler yet**. Decisions: [ADR 0013](adr/0013-whatsapp-webhook-ingestion.md). Evidence, with what is unresolved: [WHATSAPP_G0_EVIDENCE.md](WHATSAPP_G0_EVIDENCE.md).
+Phase 04 builds the **inbound** half. Status: checkpoints 1 and 2 are done: Meta documentation verified, fixtures, schema and migration `0002` (checkpoint 1), and the **webhook ingress** (checkpoint 2): `GET`/`POST /api/webhooks/whatsapp`, exact-byte signature verification, raw delivery and per-item event persistence, routing and idempotency. **Nothing processes the stored events yet**: there is no worker, no contact/conversation/message/status handling and no identity handler (those are later checkpoints). Decisions: [ADR 0013](adr/0013-whatsapp-webhook-ingestion.md). Evidence, with what is unresolved: [WHATSAPP_G0_EVIDENCE.md](WHATSAPP_G0_EVIDENCE.md).
 
-## Flow (designed; built in later Phase 04 checkpoints)
+## Flow (ingress implemented; the worker and handlers are not)
 
 ```
 WhatsApp user -> Meta Cloud API -> HTTPS webhook /api/webhooks/whatsapp
@@ -14,11 +14,29 @@ WhatsApp user -> Meta Cloud API -> HTTPS webhook /api/webhooks/whatsapp
 worker (PostgreSQL SKIP LOCKED) -> contacts / conversations / messages / statuses / attribution
 ```
 
-The endpoint is not staff-authenticated (no Better Auth); trust comes from the verification token, the signature and the configured `whatsapp_accounts` row. It does nothing expensive before acknowledging Meta: no contact workflow, no bots, no Meta calls, no media download.
+The endpoint is not staff-authenticated (no Better Auth); trust comes from the verification token, the signature and the configured `whatsapp_accounts` row. `src/proxy.ts` excludes the path (a proxy would buffer and silently truncate the body that the signature covers). It does nothing expensive before acknowledging Meta: no contact workflow, no bots, no Meta calls, no media download.
 
 ## Configuration
 
-Read lazily (build and tests need none), validated with zod like the auth configuration. Planned names: `META_APP_SECRET` (signs every number's webhooks; global to the Meta app), `WHATSAPP_WEBHOOK_VERIFY_TOKEN` (random, at least 32 characters; global to the app; per account only if Meta callback overrides are adopted later). Phase 04 reads **no access token** (nothing calls Meta). Per-number access tokens come later through `whatsapp_accounts.credential_ref` (the name of a server-side secret, never a value in the database). Nothing here is set yet and no Meta app is configured. Local development needs an HTTPS tunnel (Meta requires a valid public certificate).
+Read lazily (build and tests need none), validated with zod like the auth configuration. Names: `META_APP_SECRET` (signs every number's webhooks; global to the Meta app), `WHATSAPP_WEBHOOK_VERIFY_TOKEN` (random, at least 32 characters; global to the app; per account only if Meta callback overrides are adopted later). Phase 04 reads **no access token** (nothing calls Meta). Per-number access tokens come later through `whatsapp_accounts.credential_ref` (the name of a server-side secret, never a value in the database). Nothing real is configured and no Meta app exists yet; tests use fake values. Local development needs an HTTPS tunnel (Meta requires a valid public certificate).
+
+## HTTP outcomes (implemented)
+
+| Request                                                                                                           | Response                                                | Stored                                                                 |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `GET` valid `hub.mode=subscribe` + token + challenge                                                              | 200, `text/plain`, the challenge, `no-store`, `nosniff` | nothing                                                                |
+| `GET` anything else                                                                                               | 403, empty                                              | nothing                                                                |
+| Required setting missing                                                                                          | 500, empty (the log names the key only)                 | nothing                                                                |
+| `POST` missing/malformed/wrong signature                                                                          | 403, empty                                              | nothing                                                                |
+| `POST` declared or streamed body over 4 MiB                                                                       | 413 with `Connection: close`                            | nothing                                                                |
+| `POST` valid signature, invalid UTF-8 / invalid JSON                                                              | 200                                                     | request row `UNPARSEABLE` (`invalid_utf8` / `invalid_json`), no events |
+| `POST` valid signature, JSON that is not a WhatsApp envelope                                                      | 200                                                     | request row `UNSUPPORTED_SHAPE`, no events                             |
+| `POST` valid signature, normal delivery                                                                           | 200                                                     | request row `ACCEPTED` + one event per message/status/other item       |
+| `POST` duplicate delivery or duplicate item                                                                       | 200                                                     | request row kept; duplicate items add no event                         |
+| `POST` valid signature, content that deterministically cannot be stored (SQLSTATE 22/23/54, or very deep nesting) | 200                                                     | request row `EVENTS_REJECTED`, no events                               |
+| `POST` the database is unavailable or the transaction fails otherwise                                             | 500                                                     | nothing (Meta retries)                                                 |
+
+**Event routing** (organization only from the `whatsapp_accounts` row found by `metadata.phone_number_id`): ACTIVE -> `PENDING` with routing; account PENDING -> `UNROUTABLE` hold (`account_pending`); unknown number -> `UNROUTABLE` (`unknown_account`); `entry.id` differing from the account's `waba_id` -> `UNROUTABLE` (`waba_mismatch`, conservative: G0 only supports `entry.id` = WABA id by placeholder semantics); DISABLED -> `IGNORED` (`account_disabled`); archived -> `IGNORED` (`account_archived`). Also `IGNORED`: a `played` or unknown status (`status_not_mirrored`), a change on a field other than `messages` (`unsupported_field`), a group message (`group_unsupported`), and every `system` message (`system_message_pending_h1`, kept untouched for a later reviewed replay: the identity-change delivery is unresolved, G0 item H1). A malformed element is stored `DEAD` (`malformed_event`). Nothing is dropped. **Contact pairing** is per message (`from_user_id` with `contacts[].user_id`, else `from` with `wa_id`; never `contacts[0]`); the matched element, or `null`, and the pairing result are stored with the event.
 
 ## What Meta documents (summary; see the evidence register for sources and gaps)
 

@@ -97,6 +97,18 @@ Recorded only (observation, 2026-10-04): v26.0 (2026-07-29, latest), v25.0 (2026
 - If real or user data could already be in `webhook_requests` anywhere, **stop**: do not run 0002 and do not edit it automatically; decide the data's fate first (it would have to be exported as evidence, not converted).
 - Run order for a deployment: apply `0002` first, then deploy the version that contains the webhook route.
 
+## Implementation notes (checkpoint 2: pure core and HTTP ingress)
+
+Implemented in `src/modules/whatsapp/` behind a two-function public API; the route imports only that. Decisions taken while implementing:
+
+- **Exact bytes only.** `verifyWebhookSignature(body: Uint8Array, header, secret)` has no string or object overload (checked by the compiler in a test), computes exactly one HMAC, and a static test asserts it contains no JSON, normalization, escaping or canonical form. The handler reads `request.body` as bytes through a bounded reader (4 MiB, streamed count; `Content-Length` only as a hint); it never calls `request.json()` or `request.text()`. UTF-8 is decoded with a fatal decoder that keeps a BOM.
+- **Oversize refusals close the connection.** A 413 carries `Connection: close`. Found with a stalling raw client and an E2E run: after answering 413 the server otherwise held the request open until the client left. Covered by a handler test and a real-server E2E test.
+- **Deterministic versus transient** is decided by SQLSTATE (22, 23 and 54 deterministic; also `RangeError` from very deep nesting), inside a savepoint so a deterministic child failure leaves the request row (`EVENTS_REJECTED`, `event_insert_data_error`) and no children, while infrastructure errors roll everything back and answer 500. A normalizer failure (a pure function of the bytes) is stored as `EVENTS_REJECTED` / `normalize_failed`.
+- **System messages are not interpreted** (H1 unresolved): every `system` message becomes an `IGNORED` `OTHER` event (`system_message_pending_h1`) with the raw item preserved. No `IDENTITY` event is ever emitted. `user_id_update` is just an unsupported field.
+- **Canonical JSON** (`src/shared/canonical-json.ts`) is the RFC 8785 Appendix A sample canonicalizer (JSON.stringify for primitives, UTF-16 code-unit key order), refusing non-finite numbers; tested against the official section 3.2.3 example and every Appendix B number row. It is imported only by the idempotency-key module.
+- **Event payload** (`webhook_events.payload`): `{v:1, wabaId, field, metadata, contact, pairing, message}` for messages, `{..., status}` for statuses, `{..., element}` for other items, all NUL-stripped and well-formed.
+- **No `after()`, worker, timer or Meta call** exists in the ingest path (a static test scans for them).
+
 ## Consequences
 
 - Migration `0002` changes `webhook_requests` (drops `raw_payload`, adds `raw_body`, `ingest_status`, `ingest_error_code`), `contacts` (nullable `wa_id`, `username`) and adds `contact_bsuids` (23 tables). `ADD COLUMN raw_body ... NOT NULL` assumes `webhook_requests` is empty, which holds everywhere because nothing writes it yet; on a non-empty table the migration fails safely and atomically (see the precondition section above).

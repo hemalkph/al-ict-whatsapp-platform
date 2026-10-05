@@ -50,6 +50,8 @@ export default defineConfig({
       DATABASE_URL: required("E2E_DATABASE_URL"),
       BETTER_AUTH_SECRET: required("E2E_AUTH_SECRET"),
       BETTER_AUTH_URL: baseURL,
+      META_APP_SECRET: required("E2E_META_APP_SECRET"),
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: required("E2E_WEBHOOK_VERIFY_TOKEN"),
       E2E_HOST: required("E2E_HOST"),
       E2E_PORT: required("E2E_PORT"),
       E2E_CONTROL_PORT: required("E2E_CONTROL_PORT"),

@@ -26,7 +26,7 @@ Security is a first-class requirement. The authentication and authorization arch
 
 Reporting: this is an internal project; report issues to the repository owner.
 
-## WhatsApp webhook security (Phase 04, decided; not yet implemented)
+## WhatsApp webhook security (Phase 04, ingress implemented)
 
 Decisions: [ADR 0013](adr/0013-whatsapp-webhook-ingestion.md). Evidence and open items: [WHATSAPP_G0_EVIDENCE.md](WHATSAPP_G0_EVIDENCE.md).
 
@@ -38,6 +38,8 @@ Decisions: [ADR 0013](adr/0013-whatsapp-webhook-ingestion.md). Evidence and open
 - **Idempotency** keys are scoped by `phone_number_id`; duplicates and replays collapse. Provider timestamps are stored as facts; a separate bounded effective time drives conversation activity and the customer-service window.
 - **Identity:** BSUIDs are scoped to a Meta Business Portfolio (one organization = one portfolio is an onboarding invariant). Conflicting identity claims fail closed, never merge silently. Human-readable `system.body` text is never parsed.
 - **Secrets blast radius:** Phase 04 holds no Meta access token, so a leak of this milestone's configuration can forge inbound webhooks but cannot send messages.
+- **Oversize bodies** are refused with 413 **and `Connection: close`**. Without it the server kept the request open for as long as a client stalled the rest of an upload it had already refused (verified with a stalling raw client: the request stayed in flight until the client left); with it the connection is dropped immediately.
+- **Deterministic versus transient storage failures:** SQLSTATE classes 22 and 23, program-limit errors (54) and absurdly nested JSON keep the request and answer 200; connection loss, deadlocks and timeouts answer 500 so Meta retries. Both are tested.
 - **Logging:** a fixed field whitelist, so bodies, names, phone numbers, BSUIDs, tokens and signatures cannot be logged by construction.
 
 ## Pre-production blockers

@@ -5,7 +5,7 @@
 //
 // Harness-only extras (never part of the application):
 //  - a second listener on 127.0.0.1:E2E_CONTROL_PORT (plain http) whose only endpoint, GET /in-flight, reports how many
-//    requests the application is still handling. The tests wait for it to read 0 before closing a page or abandoning a
+//    requests the application is still answering. The tests wait for it to read 0 before closing a page or abandoning a
 //    navigation: a browser that cancels a request the server is still working on makes Node abort that request, and
 //    Next logs it as `Error: aborted` / `ECONNRESET`. That is a harness ordering problem, so it is fixed here by
 //    ordering, never by filtering the log.
@@ -33,18 +33,16 @@ const app = next({ dev: false, hostname, port });
 await app.prepare();
 const handle = app.getRequestHandler();
 
-// A request is in flight from the moment its headers arrive until BOTH its request stream and its response have closed.
+// A request is in flight from the moment its headers arrive until its RESPONSE has closed (finished, or the client left).
+// Only responses matter here: the abort this guards against happens when a client cancels a request the server is still
+// answering. (The request stream is deliberately not tracked: after an early refusal such as an oversize 413 the
+// connection is dropped and the request stream never emits `close`, which would leak the count.)
 let inFlight = 0;
 const server = createServer(
   { key: readFileSync(join(tlsDir, "key.pem")), cert: readFileSync(join(tlsDir, "cert.pem")) },
   (req, res) => {
     inFlight++;
-    let open = 2;
-    const closed = () => {
-      if (--open === 0) inFlight--;
-    };
-    req.once("close", closed);
-    res.once("close", closed);
+    res.once("close", () => inFlight--);
     if (jitterMs > 0 && req.method === "GET")
       setTimeout(() => handle(req, res), Math.random() * jitterMs);
     else handle(req, res);
