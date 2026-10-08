@@ -5,13 +5,18 @@ import type { NormalizedEvent } from "./normalize";
 // Routing. The organization comes ONLY from the whatsapp_accounts row found through metadata.phone_number_id, never
 // from anything in the body. Existing webhook_events statuses are used; nothing here interprets the event's content.
 //
+// Tenant provenance rule: once ingest matched an account (consistent phone_number_id AND WABA), the event keeps that
+// organization/account for life, even while it is held. Provenance is never erased and never re-derived later.
+//
 //   ACTIVE account                      -> PENDING      routing set
-//   PENDING account (being set up)      -> UNROUTABLE   routing NULL   account_pending   (a hold)
-//   unknown phone_number_id             -> UNROUTABLE   routing NULL   unknown_account
-//   entry.id differs from waba_id       -> UNROUTABLE   routing NULL   waba_mismatch     (conservative hold; G0 only
-//                                                       supports entry.id = WABA id by placeholder semantics)
+//   PENDING account (being set up)      -> UNROUTABLE   routing SET   account_pending   (a hold; released only for
+//                                                       exactly this account when it is activated)
 //   DISABLED account                    -> IGNORED      routing set    account_disabled
 //   archived account                    -> IGNORED      routing set    account_archived
+//   unknown phone_number_id             -> UNROUTABLE   routing NULL   unknown_account   (no proven owner; operator
+//                                                       review and an explicit target account are required)
+//   entry.id differs from waba_id       -> UNROUTABLE   routing NULL   waba_mismatch     (not proven to belong to the
+//                                                       account; operator review and an explicit target)
 //   an event that needs no processing   -> IGNORED      routing set when the account is known and consistent
 //   a malformed element                 -> DEAD         routing NULL
 // Nothing is dropped: held and ignored events keep their payload and reason code.
@@ -89,6 +94,6 @@ export function decideRouting(
   if (!consistent) return unrouted("UNROUTABLE", "waba_mismatch");
   if (account.archivedAt !== null) return routed("IGNORED", "account_archived");
   if (account.status === "DISABLED") return routed("IGNORED", "account_disabled");
-  if (account.status === "PENDING") return unrouted("UNROUTABLE", "account_pending");
+  if (account.status === "PENDING") return routed("UNROUTABLE", "account_pending");
   return routed("PENDING", null);
 }

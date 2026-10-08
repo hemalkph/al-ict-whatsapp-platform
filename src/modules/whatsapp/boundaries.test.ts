@@ -24,6 +24,7 @@ describe("whatsapp module boundaries", () => {
     expect(sources.map((s) => s.file).sort()).toEqual([
       "body.ts",
       "config.ts",
+      "envelope.ts",
       "handler.ts",
       "idempotency.ts",
       "index.ts",
@@ -68,6 +69,12 @@ describe("whatsapp module boundaries", () => {
         /\bsetTimeout\b|\bsetInterval\b|\bsetImmediate\b|\bqueueMicrotask\b|\bafter\s*\(/,
       );
       expect(c, file).not.toMatch(/next\/server|claimWebhookEvents|worker|processWebhook/i);
+    }
+  });
+
+  it("never imports the queue/worker core: the ingest path stays store-and-acknowledge", () => {
+    for (const { file, text } of sources) {
+      expect(code(text), file).not.toMatch(/from\s+"\.\/queue|webhook-queue|requeue/);
     }
   });
 

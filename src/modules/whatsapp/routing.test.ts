@@ -38,11 +38,11 @@ describe("decideRouting (organization comes only from the account row)", () => {
 
   it.each([
     [
-      "a PENDING account is held",
+      "a PENDING account is held WITH its tenant provenance",
       account({ status: "PENDING" }),
       "UNROUTABLE",
       "account_pending",
-      false,
+      true,
     ],
     [
       "a DISABLED account is ignored",

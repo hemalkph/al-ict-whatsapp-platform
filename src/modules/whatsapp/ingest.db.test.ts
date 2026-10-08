@@ -306,14 +306,14 @@ describe("webhook ingest (route -> PostgreSQL)", () => {
   describe("routing by phone_number_id", () => {
     const post1 = () => post(fixture("text-phone.json"));
 
-    it("holds an event for a PENDING account (UNROUTABLE, no routing)", async () => {
-      await account({ status: "PENDING" });
+    it("holds an event for a PENDING account (UNROUTABLE) and KEEPS its tenant provenance", async () => {
+      const acc = await account({ status: "PENDING" });
       await post1();
       expect((await events())[0]).toMatchObject({
         status: "UNROUTABLE",
         last_error: "account_pending",
-        organization_id: null,
-        whatsapp_account_id: null,
+        organization_id: acc.organizationId,
+        whatsapp_account_id: acc.id,
       });
     });
 

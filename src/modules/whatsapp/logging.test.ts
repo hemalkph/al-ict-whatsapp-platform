@@ -23,6 +23,13 @@ const ALLOWED = new Set([
   "count_held",
   "count_ignored",
   "count_dead",
+  "webhook_event_id",
+  "attempt",
+  "count_claimed",
+  "count_processed",
+  "count_failed",
+  "count_lease_lost",
+  "count_unrecorded",
 ]);
 
 describe("webhook logging writes only a fixed set of fields", () => {
@@ -109,12 +116,57 @@ describe("webhook logging writes only a fixed set of fields", () => {
     expect(JSON.parse(lines[1]!).reason).toBe("malformed_header");
   });
 
-  it("uses info for success, warn for denials and failures, and error only for a failed ingest", () => {
+  it("uses info for success, warn for denials and failures, and error only for a failed ingest or a dead event", () => {
     emitWebhookLog({ event: "webhook.request_accepted", outcome: "success" });
     emitWebhookLog({ event: "webhook.signature_invalid", outcome: "denied" });
     emitWebhookLog({ event: "webhook.events_rejected", outcome: "failure" });
     emitWebhookLog({ event: "webhook.ingest_failed", outcome: "failure" });
-    expect(lines.map((line) => JSON.parse(line).level)).toEqual(["info", "warn", "warn", "error"]);
+    emitWebhookLog({ event: "webhook.event_dead", outcome: "failure" });
+    emitWebhookLog({ event: "webhook.event_failed", outcome: "failure" });
+    emitWebhookLog({ event: "webhook.event_held", outcome: "denied" });
+    emitWebhookLog({ event: "webhook.event_processed", outcome: "success" });
+    expect(lines.map((line) => JSON.parse(line).level)).toEqual([
+      "info",
+      "warn",
+      "warn",
+      "error",
+      "error",
+      "warn",
+      "warn",
+      "info",
+    ]);
+  });
+
+  it("writes the worker fields (event id, attempt, batch counts) and only those", () => {
+    emitWebhookLog({
+      event: "webhook.batch_completed",
+      outcome: "success",
+      webhookEventId: "11111111-1111-1111-1111-111111111111",
+      attempt: 3,
+      counts: {
+        claimed: 5,
+        processed: 3,
+        failed: 1,
+        dead: 1,
+        held: 0,
+        ignored: 0,
+        leaseLost: 0,
+        unrecorded: 0,
+      },
+    });
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    for (const key of Object.keys(parsed)) expect(ALLOWED.has(key), key).toBe(true);
+    expect(parsed).toMatchObject({
+      webhook_event: "webhook.batch_completed",
+      webhook_event_id: "11111111-1111-1111-1111-111111111111",
+      attempt: 3,
+      count_claimed: 5,
+      count_processed: 3,
+      count_failed: 1,
+      count_dead: 1,
+      count_lease_lost: 0,
+      count_unrecorded: 0,
+    });
   });
 });
 

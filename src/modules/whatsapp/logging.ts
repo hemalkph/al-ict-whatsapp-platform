@@ -13,7 +13,15 @@ export type WebhookLogEvent =
   | "webhook.request_unprocessable"
   | "webhook.request_accepted"
   | "webhook.events_rejected"
-  | "webhook.ingest_failed";
+  | "webhook.ingest_failed"
+  | "webhook.event_processed"
+  | "webhook.event_failed"
+  | "webhook.event_dead"
+  | "webhook.event_held"
+  | "webhook.event_ignored"
+  | "webhook.event_lease_lost"
+  | "webhook.event_unrecorded"
+  | "webhook.batch_completed";
 
 export type WebhookCounts = {
   events?: number;
@@ -23,12 +31,19 @@ export type WebhookCounts = {
   held?: number;
   ignored?: number;
   dead?: number;
+  claimed?: number;
+  processed?: number;
+  failed?: number;
+  leaseLost?: number;
+  unrecorded?: number;
 };
 
 export type WebhookLog = {
   event: WebhookLogEvent;
   outcome: "success" | "denied" | "failure";
   requestId?: string;
+  webhookEventId?: string;
+  attempt?: number;
   organizationId?: string;
   whatsappAccountId?: string;
   eventType?: string;
@@ -47,6 +62,8 @@ export function emitWebhookLog(e: WebhookLog): void {
     webhook_event: e.event,
     outcome: e.outcome,
     request_id: e.requestId,
+    webhook_event_id: e.webhookEventId,
+    attempt: e.attempt,
     organization_id: e.organizationId,
     whatsapp_account_id: e.whatsappAccountId,
     event_type: e.eventType,
@@ -62,8 +79,14 @@ export function emitWebhookLog(e: WebhookLog): void {
     count_held: counts.held,
     count_ignored: counts.ignored,
     count_dead: counts.dead,
+    count_claimed: counts.claimed,
+    count_processed: counts.processed,
+    count_failed: counts.failed,
+    count_lease_lost: counts.leaseLost,
+    count_unrecorded: counts.unrecorded,
   };
-  if (e.event === "webhook.ingest_failed") logger.error("webhook", context);
+  if (e.event === "webhook.ingest_failed" || e.event === "webhook.event_dead")
+    logger.error("webhook", context);
   else if (e.outcome === "success") logger.info("webhook", context);
   else logger.warn("webhook", context);
 }
