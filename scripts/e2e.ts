@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestDatabase } from "@/db/__tests__/helpers";
 import { seedE2E } from "./e2e-seed";
+import { SERVER_ERROR_PATTERN, flaggedServerLines } from "./e2e-log";
 
 // Browser E2E orchestrator (`npm run test:e2e [-- <playwright args>]`).
 //
@@ -28,10 +29,6 @@ const AUTH_SECRET = "e2e-only-better-auth-secret-".padEnd(48, "x");
 const META_APP_SECRET = "e2e-only-meta-app-secret-0123456789abcdef";
 const WEBHOOK_VERIFY_TOKEN = "e2e-only-webhook-verify-token-0123456789abcdef";
 const SERVER_LOG = "e2e-output/server.log";
-
-// Lines the application server must never print during a run. Expected 4xx responses are not logged by the app.
-const SERVER_ERROR_PATTERN =
-  /unhandled|uncaught|TypeError|ReferenceError|RangeError|⨯|\bERROR\b|57P01|ECONNRESET/i;
 
 function run(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): number {
   return spawnSync(command, args, { stdio: "inherit", env }).status ?? 1;
@@ -109,9 +106,7 @@ async function main(): Promise<number> {
     writeFileSync(SERVER_LOG, serverLines.join("\n") + "\n");
     // Detection is unchanged (any matching line fails the run). Only the report is richer: each flagged line is shown
     // with the lines after it, because a stack trace usually follows a line that itself matches nothing.
-    const flagged = serverLines.flatMap((line, index) =>
-      SERVER_ERROR_PATTERN.test(line) ? [index] : [],
-    );
+    const flagged = flaggedServerLines(serverLines);
     if (flagged.length > 0) {
       console.error(`\nThe application server logged errors during the run (see ${SERVER_LOG}):`);
       for (const index of flagged.slice(0, 10)) {

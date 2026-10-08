@@ -188,32 +188,52 @@ test.describe("same-origin protection", () => {
     }
     await unchanged();
 
-    // A real cross-site page in the same browser. `localhost` and `127.0.0.1` are different sites, and the session
-    // cookie is host-only, so SameSite=Lax keeps it off this cross-site POST: the request is turned away as
-    // unauthenticated before it can mutate anything. (A public origin such as evil.example cannot be used here:
-    // Chromium blocks public-to-loopback requests itself, which would prove nothing about the application.)
+    // A real cross-site page in the same browser, submitting the classic CSRF form (a top-level cross-site POST
+    // navigation). `localhost` and `127.0.0.1` are different sites, and the session cookie is host-only and
+    // SameSite=Lax, which keeps it off a cross-site POST: the request is turned away as unauthenticated before it can
+    // mutate anything. (A public origin such as evil.example cannot be used here: Chromium blocks public-to-loopback
+    // requests itself, which would prove nothing about the application.)
+    //
+    // This is a form navigation on purpose, not fetch(..., { mode: "no-cors" }): Chromium cancels an opaque cross-origin
+    // response as soon as it sees its headers (net::ERR_ABORTED) and closes the connection, so that variant raced the
+    // server finishing its response and, on a slow runner, made Next.js log `Error: aborted` (ECONNRESET) for a request
+    // whose body it never read. A navigation is never cancelled, and the test waits for the whole response.
     const attackerOrigin = `https://localhost:${new URL(baseURL!).port}`;
     const attacker = await context.newPage();
     await attacker.goto(`${attackerOrigin}/login`);
-    const answered = attacker.waitForResponse((r) => r.url().endsWith(url));
+    const answered = attacker.waitForResponse(
+      (r) => r.url().endsWith(url) && r.request().method() === "POST",
+    );
     await attacker.evaluate(
       ({ target }) => {
-        void fetch(target, {
-          method: "POST",
-          mode: "no-cors",
-          credentials: "include",
-          headers: { "content-type": "text/plain" },
-          body: "{}",
-        });
+        const form = document.createElement("form");
+        form.method = "POST";
+        form.action = target;
+        form.enctype = "text/plain";
+        const field = document.createElement("input");
+        field.type = "hidden";
+        field.name = "csrf";
+        field.value = "attempt";
+        form.append(field);
+        document.body.append(form);
+        form.submit();
       },
       { target: `${baseURL}${url}` },
     );
     const response = await answered;
     const request = response.request();
-    // Playwright does not expose Origin / Sec-Fetch-* here; the referer proves the request came from the other site.
-    expect((await request.allHeaders()).referer).toBe(`${attackerOrigin}/`);
-    expect((await request.allHeaders()).cookie).toBeUndefined();
+    const sent = await request.allHeaders();
+    // The browser's own statements that this was a genuinely different site (not an inference): a top-level form
+    // navigation whose Origin is the attacker's site, never the application's.
+    expect(attackerOrigin).not.toBe(new URL(baseURL!).origin);
+    expect(sent["sec-fetch-site"]).toBe("cross-site");
+    expect(sent["sec-fetch-mode"]).toBe("navigate");
+    expect(sent["origin"]).toBe(attackerOrigin);
+    expect(sent["referer"]).toBe(`${attackerOrigin}/`);
+    // SameSite=Lax kept the real session off this request, and the server turned it away as unauthenticated.
+    expect(sent["cookie"]).toBeUndefined();
     expect(response.status()).toBe(401);
+    await response.finished(); // the complete response has arrived: nothing is still being sent when the page closes
     await closeWhenIdle(attacker);
     await unchanged();
   });
