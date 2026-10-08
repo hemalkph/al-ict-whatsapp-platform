@@ -24,6 +24,8 @@ const ALLOWED = new Set([
   "count_ignored",
   "count_dead",
   "webhook_event_id",
+  "contact_id",
+  "other_contact_id",
   "attempt",
   "count_claimed",
   "count_processed",

@@ -21,7 +21,8 @@ export type WebhookLogEvent =
   | "webhook.event_ignored"
   | "webhook.event_lease_lost"
   | "webhook.event_unrecorded"
-  | "webhook.batch_completed";
+  | "webhook.batch_completed"
+  | "webhook.contact_identity_conflict";
 
 export type WebhookCounts = {
   events?: number;
@@ -43,6 +44,9 @@ export type WebhookLog = {
   outcome: "success" | "denied" | "failure";
   requestId?: string;
   webhookEventId?: string;
+  /** Internal contact ids only. Never a phone number, BSUID or name. */
+  contactId?: string;
+  otherContactId?: string;
   attempt?: number;
   organizationId?: string;
   whatsappAccountId?: string;
@@ -63,6 +67,8 @@ export function emitWebhookLog(e: WebhookLog): void {
     outcome: e.outcome,
     request_id: e.requestId,
     webhook_event_id: e.webhookEventId,
+    contact_id: e.contactId,
+    other_contact_id: e.otherContactId,
     attempt: e.attempt,
     organization_id: e.organizationId,
     whatsapp_account_id: e.whatsappAccountId,

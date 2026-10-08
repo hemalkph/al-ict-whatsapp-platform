@@ -35,6 +35,7 @@ describe("whatsapp module boundaries", () => {
       "routing.ts",
       "sanitize.ts",
       "signature.ts",
+      "time.ts",
       "verification.ts",
     ]);
   });
