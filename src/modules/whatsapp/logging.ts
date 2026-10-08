@@ -24,7 +24,8 @@ export type WebhookLogEvent =
   | "webhook.batch_completed"
   | "webhook.contact_identity_conflict"
   | "webhook.message_duplicate"
-  | "webhook.timestamp_anomaly";
+  | "webhook.timestamp_anomaly"
+  | "webhook.status_observation";
 
 export type WebhookCounts = {
   events?: number;

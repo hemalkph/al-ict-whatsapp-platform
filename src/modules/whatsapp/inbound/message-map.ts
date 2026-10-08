@@ -1,6 +1,9 @@
 import { PermanentWebhookError } from "../queue/errors";
 import { isRecord } from "../parse";
 import { sanitizeJson, sanitizeString } from "../sanitize";
+import { parseProviderTimestamp } from "../time";
+
+export { parseProviderTimestamp };
 
 // Turns the stored, normalized MESSAGE event into what the database needs: validated, sanitized and bounded. Pure (no
 // database, no clock). Only documented provider fields are read, each into a whitelist, so nothing unbounded or
@@ -120,17 +123,6 @@ const finiteNumber = (value: unknown, min: number, max: number): number | null =
   typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
     ? value
     : null;
-
-/** Epoch seconds (string or number) -> Date, or null when it is not a positive integer inside the Date range. */
-export function parseProviderTimestamp(value: unknown): Date | null {
-  let seconds: number;
-  if (typeof value === "number") seconds = value;
-  else if (typeof value === "string" && /^\d{1,13}$/.test(value)) seconds = Number(value);
-  else return null;
-  if (!Number.isSafeInteger(seconds) || seconds <= 0) return null;
-  const date = new Date(seconds * 1000);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
 
 function readMedia(
   kind: "image" | "video" | "audio" | "document" | "sticker",

@@ -61,9 +61,15 @@ async function applyToMessage(
 export async function recordMessageStatus(
   tx: DbExecutor,
   input: StatusEventInput,
-): Promise<{ duplicate: boolean; messageId: string | null; cacheUpdated: boolean }> {
+): Promise<{
+  duplicate: boolean;
+  messageId: string | null;
+  cacheUpdated: boolean;
+  /** The wamid belongs to an INBOUND message: the event is kept (unlinked) but that message is never touched. */
+  inboundMatch: boolean;
+}> {
   const [message] = await tx
-    .select({ id: messages.id })
+    .select({ id: messages.id, direction: messages.direction })
     .from(messages)
     .where(
       and(
@@ -72,7 +78,10 @@ export async function recordMessageStatus(
         eq(messages.wamid, input.wamid),
       ),
     );
-  const messageId = message?.id ?? null;
+  // A status describes the delivery of a message WE sent. An inbound message with the same wamid is never linked to it
+  // and its (absent) delivery status is never written.
+  const inboundMatch = message !== undefined && message.direction !== "OUTBOUND";
+  const messageId = message && !inboundMatch ? message.id : null;
 
   const inserted = await tx
     .insert(messageStatusEvents)
@@ -89,10 +98,11 @@ export async function recordMessageStatus(
     })
     .onConflictDoNothing()
     .returning({ id: messageStatusEvents.id });
-  if (inserted.length === 0) return { duplicate: true, messageId, cacheUpdated: false };
+  if (inserted.length === 0)
+    return { duplicate: true, messageId, cacheUpdated: false, inboundMatch };
 
   const cacheUpdated = messageId ? await applyToMessage(tx, messageId, input) : false;
-  return { duplicate: false, messageId, cacheUpdated };
+  return { duplicate: false, messageId, cacheUpdated, inboundMatch };
 }
 
 /**
@@ -103,6 +113,12 @@ export async function resolveStatusEventsForMessage(
   tx: DbExecutor,
   message: { id: string; organizationId: string; whatsappAccountId: string; wamid: string },
 ): Promise<void> {
+  // Only a message we sent can carry delivery statuses.
+  const [owner] = await tx
+    .select({ direction: messages.direction })
+    .from(messages)
+    .where(and(eq(messages.organizationId, message.organizationId), eq(messages.id, message.id)));
+  if (owner?.direction !== "OUTBOUND") return;
   await tx
     .update(messageStatusEvents)
     .set({ messageId: message.id })
