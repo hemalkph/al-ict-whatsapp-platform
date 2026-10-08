@@ -357,7 +357,7 @@ describe("identity resolution: concurrency, locking and the worker transaction",
       expect(await held(await sendTo({ bsuid: "LK.LOCK2" }))).toBe(1);
       expect(await held(await sendTo({ from: "15550800003" }))).toBe(1);
       const after = await t.pool.query(
-        "select count(*)::int n from pg_locks where locktype = 'advisory'",
+        "select count(*)::int n from pg_locks where locktype = 'advisory' and database = (select oid from pg_database where datname = current_database())",
       );
       expect(after.rows[0].n).toBe(0);
     });

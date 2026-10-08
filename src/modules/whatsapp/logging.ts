@@ -22,7 +22,9 @@ export type WebhookLogEvent =
   | "webhook.event_lease_lost"
   | "webhook.event_unrecorded"
   | "webhook.batch_completed"
-  | "webhook.contact_identity_conflict";
+  | "webhook.contact_identity_conflict"
+  | "webhook.message_duplicate"
+  | "webhook.timestamp_anomaly";
 
 export type WebhookCounts = {
   events?: number;
