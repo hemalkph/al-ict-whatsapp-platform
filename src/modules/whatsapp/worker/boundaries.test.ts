@@ -113,12 +113,17 @@ describe("worker boundaries", () => {
 
   it("uses a bounded, owned pool and never loops without a wait or a stop check", () => {
     const client = code(read(join(repo, "src/db/client.ts")));
+    const guarded = client.slice(
+      client.indexOf("function guardedPool"),
+      client.indexOf("export type WorkerDatabase"),
+    );
+    expect(guarded).toContain("connectionTimeoutMillis");
+    expect(guarded).toContain('pool.on("error"');
+    expect(guarded).toContain('pool.on("connect"');
+    expect(guarded).toContain("new GuardedPool(");
     const worker = client.slice(client.indexOf("export function createWorkerDatabase"));
-    expect(worker).toContain("connectionTimeoutMillis");
     expect(worker).toContain("max: options.maxConnections");
-    expect(worker).toContain('pool.on("error"');
-    expect(worker).toContain('pool.on("connect"');
-    expect(worker).toContain("new WorkerPool(");
+    expect(worker.match(/guardedPool\(/g)).toHaveLength(2); // the worker pool and the shared getDb() pool
     expect(client).toContain("super.connect().then(releaseWhenConnectionEnds)"); // drizzle begin-outside-try leak guard
     expect(source("run.ts")).toContain("maxConnections: config.concurrency + 2");
     for (const { file, text } of sources)

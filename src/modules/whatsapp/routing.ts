@@ -57,7 +57,16 @@ export const lookupAccounts: AccountLookup = async (db, phoneNumberIds) => {
       archivedAt: schema.whatsappAccounts.archivedAt,
     })
     .from(schema.whatsappAccounts)
-    .where(inArray(schema.whatsappAccounts.phoneNumberId, [...phoneNumberIds]));
+    .where(inArray(schema.whatsappAccounts.phoneNumberId, [...phoneNumberIds]))
+    // The account state this read observes must stay true until the transaction that inserts the events commits, because
+    // operator activation releases `account_pending` events with a scan that can only see COMMITTED rows. FOR SHARE blocks
+    // any change of the account row (activate, disable, archive: they take FOR UPDATE) until this transaction ends, and a
+    // transition that already holds the lock is waited for, after which the NEW state is read. Rows are locked in id order
+    // (the lock step sits above the sort), so a delivery touching several accounts always locks them in the same order and
+    // can never deadlock with another delivery. Nothing slow runs while the locks are held: signature verification, parsing
+    // and normalization are finished before the transaction starts. Callers must pass the transaction that inserts the events.
+    .orderBy(schema.whatsappAccounts.id)
+    .for("share");
   for (const row of rows) found.set(row.phoneNumberId, row);
   return found;
 };

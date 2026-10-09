@@ -27,6 +27,7 @@ describe("whatsapp module boundaries", () => {
       "envelope.ts",
       "handler.ts",
       "idempotency.ts",
+      "identifiers.ts",
       "index.ts",
       "ingest.ts",
       "logging.ts",
@@ -76,7 +77,8 @@ describe("whatsapp module boundaries", () => {
 
   it("never imports the queue/worker core: the ingest path stays store-and-acknowledge", () => {
     for (const { file, text } of sources) {
-      expect(code(text), file).not.toMatch(/from\s+"\.\/queue|webhook-queue|requeue/);
+      const c = code(text).replace(/"(worker|operator)\.[a-z_]+"/g, ""); // log event labels are not imports
+      expect(c, file).not.toMatch(/from\s+"\.\/queue|webhook-queue|requeue/);
     }
   });
 

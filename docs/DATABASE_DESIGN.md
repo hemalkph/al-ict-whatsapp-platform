@@ -16,7 +16,7 @@ Next.js → Drizzle ORM (node-postgres, isolated in `src/db/client.ts`) → stan
 
 ## Tables in Phase 02
 
-(Phase 04 migration `0002` adds `contact_bsuids`, see below.) organizations, whatsapp_accounts, webhook_requests, webhook_events, contacts, contact_consents, conversations, messages, message_status_events, message_attachments, leads, lead_attributions, tags, contact_tags.
+(Phase 04 migration `0002` adds `contact_bsuids`, see below; migration `0003` adds a partial unique index on `lead_attributions (organization_id, message_id) WHERE message_id IS NOT NULL`, so a message has at most one attribution row.) organizations, whatsapp_accounts, webhook_requests, webhook_events, contacts, contact_consents, conversations, messages, message_status_events, message_attachments, leads, lead_attributions, tags, contact_tags.
 
 Everything tenant-owned carries `organization_id` with composite organization-aware foreign keys; `webhook_events` routing columns are nullable until resolved. No Meta credential is ever stored in a column (`whatsapp_accounts.credential_ref` is only a pointer to server-side configuration).
 

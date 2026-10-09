@@ -8,6 +8,7 @@ import { deferred, expireLeases, insertEvent, makeFailedDue, until } from "../qu
 import { handleMessageStatus } from "../status/handler";
 import { seedMessage, statusBytes } from "../status/testing";
 import { EXIT_FATAL, EXIT_REFUSED, EXIT_STOPPED, runWorker, type RunOptions } from "./run";
+import { disableAccount } from "../operator/accounts";
 import { TEST_APP_SECRET, postSigned } from "./testing";
 
 // The worker loop on REAL PostgreSQL, run in-process with the real handlers (and, for fault injection, wrapped ones).
@@ -346,7 +347,7 @@ describe("whatsapp worker on PostgreSQL", () => {
       expect(await domain()).toEqual({ contacts: 0, conversations: 0, messages: 0, history: 0 });
     });
 
-    it("an account disabled WHILE the worker runs: the in-flight event is refused (rolled back), the rest are ignored; nothing is processed", async () => {
+    it("an account disabled BEFORE the handler's own account check: that event is refused (rolled back) and the rest are ignored; nothing is processed", async () => {
       const { account } = await tenant(t.db);
       for (let i = 0; i < 6; i++)
         await post(deliveryBytes({ id: `wamid.E3${i}`, bsuid: `LK.E3${i}` }).bytes);
@@ -387,6 +388,46 @@ describe("whatsapp worker on PostgreSQL", () => {
       expect((await rows("select distinct last_error from webhook_events"))[0].last_error).toBe(
         "account_disabled",
       );
+    });
+
+    it("the operator's disable WAITS for a handler transaction that already wrote rows for the account and never cancels it", async () => {
+      const { account } = await tenant(t.db);
+      await post(deliveryBytes({ id: "wamid.E40", bsuid: "LK.E40" }).bytes);
+      const passedCheck = deferred();
+      const hold = deferred();
+      const handlers: WebhookHandlerRegistry = {
+        MESSAGE: async (tx, e, c) => {
+          await handleInboundMessage(tx, e, c); // the account check and every domain write are done...
+          passedCheck.resolve();
+          await hold.promise; // ...and the transaction is still open
+        },
+      };
+      const w = start({ handlers, env: { WHATSAPP_WORKER_CONCURRENCY: "1" } });
+      await passedCheck.promise;
+      // The command locks the account row FOR UPDATE; the open handler transaction holds a FOR KEY SHARE lock on it through
+      // the foreign keys of the rows it inserted, so the command waits. It does not cancel the transaction.
+      let disabled = false;
+      const disabling = disableAccount(t.db, account.id, { apply: true }).then((r) => {
+        disabled = true;
+        return r;
+      });
+      await until(
+        async () =>
+          (
+            await rows(
+              "select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+            )
+          ).length > 0,
+      );
+      expect(disabled).toBe(false);
+      expect((await byWamid("wamid.E40")).status).toBe("PROCESSING");
+      hold.resolve(); // the in-flight handler commits
+      expect(await disabling).toMatchObject({ ok: true, account: { status: "DISABLED" } });
+      await until(async () => (await byWamid("wamid.E40")).status === "PROCESSED");
+      await w.stop();
+      // the in-flight event was written although the account was disabled meanwhile; the disable did not cancel it
+      expect(await count("messages")).toBe(1);
+      expect((await rows("select status from whatsapp_accounts"))[0].status).toBe("DISABLED");
     });
   });
 

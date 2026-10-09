@@ -72,6 +72,8 @@ export type ProcessDeps = {
   leaseSeconds: number;
   handlerTimeoutMs: number;
   statementTimeoutMs: number;
+  /** Test seam only: runs between the first account read and the decision to hold (to reproduce an interleaving). */
+  afterAccountRead?: () => Promise<void>;
 };
 
 export type EventOutcome =
@@ -153,21 +155,44 @@ async function resolve(
 
   if (event.organizationId === null || event.whatsappAccountId === null)
     return dead("missing_routing");
-  const [account] = await db
-    .select({
-      status: schema.whatsappAccounts.status,
-      archivedAt: schema.whatsappAccounts.archivedAt,
-    })
-    .from(schema.whatsappAccounts)
-    .where(eq(schema.whatsappAccounts.id, event.whatsappAccountId));
+  const readAccount = (executor: DbExecutor, lock: boolean) => {
+    const query = executor
+      .select({
+        status: schema.whatsappAccounts.status,
+        archivedAt: schema.whatsappAccounts.archivedAt,
+      })
+      .from(schema.whatsappAccounts)
+      .where(eq(schema.whatsappAccounts.id, event.whatsappAccountId!));
+    return lock ? query.for("share") : query;
+  };
+  const [account] = await readAccount(db, false);
   if (!account) return dead("account_missing");
+  await deps.afterAccountRead?.();
 
   // A hold is not a handler attempt: holdWebhookEvent gives the claim's attempt back.
-  const gate = accountGate(account);
-  if (gate) {
-    const held = await holdWebhookEvent(db, { ...fence, ...gate });
-    if (!held) return lost;
-    return { outcome: gate.status === "UNROUTABLE" ? "held" : "ignored", reason: gate.reason };
+  //
+  // The fast path above is a plain read. An event may only be HELD on a read that stays true until the hold commits: operator
+  // activation releases `account_pending` holds with a scan that sees committed rows only, so an event held from a stale
+  // PENDING reading, after the scan, would stay held under an ACTIVE account for ever. The hold is therefore decided again
+  // under FOR SHARE (activation, disable and archive take FOR UPDATE and wait for this short transaction, or are waited
+  // for and their new state is read), and written in the same transaction.
+  if (accountGate(account)) {
+    const held = await db.transaction(async (tx) => {
+      const [current] = await readAccount(tx, true);
+      if (!current) return { kind: "missing" as const };
+      const gate = accountGate(current);
+      if (!gate) return { kind: "open" as const };
+      return { kind: "held" as const, gate, ok: await holdWebhookEvent(tx, { ...fence, ...gate }) };
+    });
+    if (held.kind === "missing") return dead("account_missing");
+    if (held.kind === "held") {
+      if (!held.ok) return lost;
+      return {
+        outcome: held.gate.status === "UNROUTABLE" ? "held" : "ignored",
+        reason: held.gate.reason,
+      };
+    }
+    // the account became usable while we waited: carry on to the handler
   }
 
   const handler = isKind(event.eventType) ? handlers[event.eventType] : undefined;

@@ -19,7 +19,10 @@
     "test:db": "vitest run --config vitest.db.config.mts",
     "auth:bootstrap-admin": "tsx --env-file-if-exists=.env.local scripts/auth-bootstrap-admin.ts",
     "auth:intents": "tsx --env-file-if-exists=.env.local scripts/auth-intents.ts",
-    "whatsapp:worker": "tsx --env-file-if-exists=.env.local scripts/whatsapp-worker.ts"
+    "whatsapp:worker": "tsx --env-file-if-exists=.env.local scripts/whatsapp-worker.ts",
+    "whatsapp:accounts": "tsx --env-file-if-exists=.env.local scripts/whatsapp-accounts.ts",
+    "whatsapp:events": "tsx --env-file-if-exists=.env.local scripts/whatsapp-events.ts",
+    "whatsapp:status": "tsx --env-file-if-exists=.env.local scripts/whatsapp-status.ts"
   },
   "dependencies": {
     "@better-auth/drizzle-adapter": "1.7.7",

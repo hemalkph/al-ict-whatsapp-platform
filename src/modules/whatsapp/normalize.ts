@@ -1,3 +1,4 @@
+import { IDENTIFIER_LIMITS, isIntactIdentifier } from "./identifiers";
 import { malformedKey, messageKey, otherKey, scopeOf, statusKey } from "./idempotency";
 import { isRecord, type Envelope } from "./parse";
 import { sanitizeJson } from "./sanitize";
@@ -27,14 +28,53 @@ export type NormalizedEvent = {
 const MIRRORED_STATUSES = new Set(["sent", "delivered", "read", "failed"]);
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
-/** Non-empty bounded text without control characters, else null. */
+/**
+ * Non-empty bounded text without control characters and with well-formed Unicode, else null. Used for every identifier that
+ * becomes a routing or idempotency key (WABA id, phone_number_id, wamid, status word): a lone surrogate would otherwise
+ * be silently turned into U+FFFD by the storage layer, producing a key that is not the one the provider sent.
+ */
 function text(value: unknown, max: number): string | null {
   return typeof value === "string" &&
     value.length > 0 &&
     value.length <= max &&
-    !CONTROL.test(value)
+    !CONTROL.test(value) &&
+    value.isWellFormed()
     ? value
     : null;
+}
+
+const MEDIA_TYPES = new Set(["image", "video", "audio", "document", "sticker"]);
+
+/**
+ * The identifiers of a message that the handlers later use as KEYS (exact, within their bounds, never cut or cleaned): the sender (BSUID and phone-based id, also on the
+ * paired contact element), the reply target, the reaction target and the media id. The stored payload is cleaned
+ * (lossy), so an identifier with a NUL or a lone surrogate would be stored as a DIFFERENT, valid-looking identifier, and
+ * could even equal another contact's. The check runs here, on the parsed values before any cleaning.
+ */
+function identifiersIntact(
+  message: Record<string, unknown>,
+  contact: Record<string, unknown> | null,
+): boolean {
+  const context = isRecord(message.context) ? message.context : null;
+  const reaction = isRecord(message.reaction) ? message.reaction : null;
+  const body =
+    typeof message.type === "string" &&
+    MEDIA_TYPES.has(message.type) &&
+    isRecord(message[message.type])
+      ? (message[message.type] as Record<string, unknown>)
+      : null;
+  const L = IDENTIFIER_LIMITS;
+  return (
+    [
+      [message.from, L.sender],
+      [message.from_user_id, L.sender],
+      [contact?.user_id, L.sender],
+      [contact?.wa_id, L.sender],
+      [context?.id, L.wamid],
+      [reaction?.message_id, L.wamid],
+      [body?.id, L.mediaRef],
+    ] as const
+  ).every(([value, max]) => isIntactIdentifier(value, max));
 }
 
 function timestampText(value: unknown): string | null {
@@ -130,7 +170,14 @@ function normalizeMessage(ctx: Context, message: unknown, contacts: unknown): No
   if (message.type === "system") return other(ctx, message, "system_message_pending_h1");
 
   const { contact, pairing } = pairContact(message, contacts);
-  const payload = eventPayload(ctx, { contact, pairing, message });
+  const intact = identifiersIntact(message, contact);
+  // The marker is only ever added to an event whose identifiers were altered by cleaning; ordinary payloads are unchanged.
+  const payload = eventPayload(ctx, {
+    contact,
+    pairing,
+    message,
+    ...(intact ? {} : { identifierIntegrity: "altered" }),
+  });
   const grouped = typeof message.group_id === "string" && message.group_id !== "";
   return {
     eventType: "MESSAGE",

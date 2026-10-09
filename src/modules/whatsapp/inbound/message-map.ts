@@ -1,4 +1,5 @@
 import { PermanentWebhookError } from "../queue/errors";
+import { IDENTIFIER_LIMITS, isIntactIdentifier } from "../identifiers";
 import { isRecord } from "../parse";
 import { sanitizeJson, sanitizeString } from "../sanitize";
 import { parseProviderTimestamp } from "../time";
@@ -15,16 +16,16 @@ export { parseProviderTimestamp };
 // with `invalid_message`, an unusable timestamp with `invalid_timestamp`.
 
 export const LIMITS = {
-  wamid: 512,
+  wamid: IDENTIFIER_LIMITS.wamid,
   text: 4096,
   caption: 2048,
   filename: 255,
   mimeType: 127,
-  mediaId: 255,
+  mediaId: IDENTIFIER_LIMITS.mediaRef,
   sha256: 128,
   title: 256,
   description: 1024,
-  buttonId: 512,
+  buttonId: IDENTIFIER_LIMITS.buttonId,
   buttonPayload: 512,
   locationName: 512,
   locationAddress: 1024,
@@ -112,6 +113,17 @@ function bounded(
   return cut === "" && !options.keepEmpty ? null : cut;
 }
 
+/**
+ * A provider identifier (an opaque key), accepted EXACTLY as sent or rejected: absent -> null; present but over its bound,
+ * empty, not a string, containing a NUL / control character or malformed Unicode -> a permanent failure. Unlike `bounded`
+ * it never cleans or cuts, because a cut identifier is another identifier (a different parent message, media or contact).
+ */
+function identifier(value: unknown, max: number): string | null {
+  if (value === undefined || value === null) return null;
+  if (!isIntactIdentifier(value, max)) return fail("invalid_provider_identifier");
+  return value as string;
+}
+
 /** Drops keys whose value is null/undefined so stored JSON only holds what the provider actually supplied. */
 function defined<T extends Record<string, unknown>>(object: T): Record<string, unknown> {
   return Object.fromEntries(
@@ -130,7 +142,7 @@ function readMedia(
 ) {
   const raw = message[kind];
   if (!isRecord(raw)) return { media: null, content: null, caption: null };
-  const id = bounded(raw.id, LIMITS.mediaId);
+  const id = identifier(raw.id, LIMITS.mediaId);
   const mimeType = bounded(raw.mime_type, LIMITS.mimeType);
   const filename = bounded(raw.filename, LIMITS.filename);
   const sha256 = bounded(raw.sha256, LIMITS.sha256);
@@ -206,13 +218,13 @@ function readContext(message: Record<string, unknown>) {
       typeof context.frequently_forwarded === "boolean" ? context.frequently_forwarded : null,
     referred_product: product
       ? defined({
-          catalog_id: bounded(product.catalog_id, LIMITS.mediaId),
-          product_retailer_id: bounded(product.product_retailer_id, LIMITS.mediaId),
+          catalog_id: identifier(product.catalog_id, LIMITS.mediaId),
+          product_retailer_id: identifier(product.product_retailer_id, LIMITS.mediaId),
         })
       : null,
   });
   return {
-    replyToWamid: bounded(context.id, LIMITS.wamid),
+    replyToWamid: identifier(context.id, LIMITS.wamid),
     extra: Object.keys(extra).length > 0 ? extra : null,
   };
 }
@@ -263,13 +275,13 @@ export function readReferral(raw: unknown): Referral | null {
   const video = bounded(raw.video_url, LIMITS.url);
   return {
     sourceType: sourceTypeRaw === "ad" ? "META_AD" : "REFERRAL",
-    sourceId: bounded(raw.source_id, 255),
+    sourceId: identifier(raw.source_id, IDENTIFIER_LIMITS.referralSourceId),
     sourceUrl: bounded(raw.source_url, LIMITS.url),
     headline: bounded(raw.headline, LIMITS.referralShort),
     body: bounded(raw.body, LIMITS.referralBody),
     mediaType: bounded(raw.media_type, 32),
     mediaUrl: image ?? video,
-    ctwaClid: bounded(raw.ctwa_clid, LIMITS.referralShort),
+    ctwaClid: identifier(raw.ctwa_clid, IDENTIFIER_LIMITS.ctwaClid),
     providerData: Object.keys(providerData).length > 0 ? providerData : null,
   };
 }
@@ -339,7 +351,7 @@ function mapType(message: Record<string, unknown>, rawType: string) {
           body: title,
           content: defined({
             subtype,
-            id: bounded(reply.id, LIMITS.buttonId),
+            id: identifier(reply.id, LIMITS.buttonId),
             title,
             description:
               subtype === "list_reply" ? bounded(reply.description, LIMITS.description) : null,
@@ -378,7 +390,7 @@ function mapType(message: Record<string, unknown>, rawType: string) {
         // an absent emoji is a removed reaction (documented): it is stored as absent, not as an empty string
         content: defined({
           emoji: bounded(reaction.emoji, LIMITS.emoji),
-          target_wamid: bounded(reaction.message_id, LIMITS.wamid),
+          target_wamid: identifier(reaction.message_id, LIMITS.wamid),
         }),
         media: null,
       };
@@ -410,7 +422,8 @@ function mapType(message: Record<string, unknown>, rawType: string) {
 export function mapInboundMessage(payload: unknown): InboundMessage {
   if (!isRecord(payload) || !isRecord(payload.message)) return fail("invalid_event_payload");
   const message = payload.message;
-  const wamid = bounded(message.id, LIMITS.wamid);
+  // an absent or empty id is "no usable id" (invalid_message); a present id is accepted exactly or rejected
+  const wamid = message.id === "" ? null : identifier(message.id, LIMITS.wamid);
   const rawType = typeof message.type === "string" ? message.type : null;
   if (wamid === null || rawType === null || rawType === "") return fail("invalid_message");
   // System notifications (identity changes among them) are never ordinary chat messages and are not interpreted here.

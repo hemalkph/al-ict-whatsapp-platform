@@ -4,14 +4,16 @@ Prepared 2026-10-09 (Asia/Colombo) from the full retrieved history of **WhatsApp
 
 ## 1. Read this first: exact handoff state
 
-**Checkpoint 5A: implemented and tested according to Claude's latest report; NOT YET COMMITTED OR PUSHED.** Review that working-tree change before authorizing another checkpoint. Do not assume a new GitHub CI run exists for it.
+> **Status update added after this handoff was written (the text below is the historical handoff state, preserved).** Checkpoint 5A was later committed as `4bfe677` (`add opt-in WhatsApp webhook worker`). Work after it, an operator batch (account / held-event / DEAD-event / health commands, `docs/RUNBOOK_WHATSAPP.md`, a guard for the shared `getDb()` pool) and an independent-review correction batch (account-activation race fix, identifier-integrity validation, operator stdout/stderr contract, payload-reveal and disable semantics documentation), existed only as uncommitted working-tree changes when this note was written. Git state changes; always inspect `git log`, `git status` and CI locally instead of trusting any state recorded in this file. Where the text below says "current", "uncommitted" or "not yet committed", read it as "at the 5A handoff".
+
+**Checkpoint 5A (historical handoff state): implemented and tested according to Claude's latest report; NOT YET COMMITTED OR PUSHED.** Review that working-tree change before authorizing another checkpoint. Do not assume a new GitHub CI run exists for it.
 
 - A standalone, explicitly enabled WhatsApp webhook worker has been implemented. It is **disabled by default**, has not been deployed or supervised, and does not start automatically in the application or CI.
 - Its registry contains exactly **MESSAGE and STATUS**. There is no IDENTITY handler and no OTHER no-op handler.
 - The repository development database `al_ict_whatsapp` reportedly still has **zero tables**. Successful migration and database tests used disposable databases. Schema files and passing tests do not mean the development database has been initialized.
 - Migrations reportedly end at **0002**. Checkpoints 2, 3, 4A, 4B, 4C and 5A did not require another migration.
 - No outbound messaging, real Meta API calls, live number connection, production deployment, media downloader, shared inbox, bot engine, campaigns, or student/payment workflows have been completed in this history.
-- Checkpoint 5A introduced a worker-specific mitigation for a Drizzle transaction-start connection leak. The shared `getDb()` pool remains affected by the known limitation.
+- Checkpoint 5A introduced a worker-specific mitigation for a Drizzle transaction-start connection leak. (Historical: at the 5A handoff the shared `getDb()` pool remained affected; the later operator batch applied the same guard and error handling to it.)
 - The user explicitly requires agents to **stop for review and not stage, commit or push automatically**. Provide instructions for the user to perform Git actions after approval.
 
 ### Evidence labels used in this document
@@ -271,7 +273,7 @@ Report: **550 unit / 636 DB ×12 / 44 E2E**, normal/delayed/jitter repetitions, 
 
 Report: **575 unit (37 files), 693 DB (29 files) ×12, 44 E2E** with repetitions, 11 mutation variants caught; all checks green, no migration. The 5A report explicitly refers to **already-committed 4C code**, establishing historical 4C commit evidence. Its exact commit, push and remote CI status are not independently known here.
 
-### Checkpoint 5A — standalone worker (current uncommitted work)
+### Checkpoint 5A — standalone worker (uncommitted at the handoff; later committed as `4bfe677`)
 
 Implemented `scripts/whatsapp-worker.ts` and `src/modules/whatsapp/worker/` (config, frozen registry, loop, run, policy, errors, public/test entrypoints and seven test files), plus `src/db/__tests__/worker-pool.db.test.ts`.
 
@@ -397,7 +399,7 @@ Counts are snapshots from reports, not current independent measurements. Some re
 - **database:** PostgreSQL 17 service, pinned Node/npm install, db:check, generate/drift check (including untracked migration files), migrate from empty, confirm migration/table state, real PostgreSQL tests.
 - **e2e:** PostgreSQL 17 + Chromium/system dependencies, production build, disposable migrated/seeded DB, browser tests, failure-only artifacts (seven-day retention reported).
 
-CI uses fake secrets/data, no Meta credentials or calls. Successful local YAML simulation is not a hosted CI pass. Earlier checkpoints progressed through reported hosted-green gates; **5A has not been pushed, so its hosted CI remains pending**.
+CI uses fake secrets/data, no Meta credentials or calls. Successful local YAML simulation is not a hosted CI pass. Earlier checkpoints progressed through reported hosted-green gates; **5A had not been pushed at the handoff, so its hosted CI was pending then; check the hosted result for the actual commit**.
 
 DB harness uses a separate local scratch DB per file, migration SQL, and cleanup, with non-local-host refusal. E2E uses `al_ict_e2e_*`, ignores normal DATABASE_URL, drops in finally (including failure/Ctrl-C), and fails if cleanup fails. Test outputs/report folders are ignored. Test-server HTTPS uses throwaway cert and production env so real Secure/__Secure- cookies are exercised. E2E retries were zero because rerunning stateful tests against already-mutated DB would be misleading. Fake session cookies/passwords can appear in failure traces; production secrets must not.
 
@@ -448,7 +450,7 @@ Other constraints: conservative groups/system/unsupported handling; no service-w
 
 ## 10. Prioritized next actions and collaboration gates
 
-### Immediate: review and checkpoint 5A
+### Immediate: review and checkpoint 5A (historical gate; 5A was reviewed and committed, see the status update in section 1)
 
 1. Open the real local repo. Read AGENTS.md/CLAUDE.md, this file, ADR 0013, security/testing/blocker docs. Inspect branch, HEAD, working tree and full 5A diff; confirm no unrelated edits or secrets. This document does not replace code review.
 2. Review enablement/schema fail-closed startup, exact MESSAGE/STATUS registry, claim stopSignal, pool ownership/reaper, outage/shutdown behavior, same-transaction writes/fencing, log whitelist and the small 4C test fix.
@@ -488,7 +490,7 @@ Confirm that path on your Mac; it is the reported historical path. This handoff 
 
 Start the local project chat with:
 
-> Read PROJECT_CONTEXT.md, AGENTS.md and CLAUDE.md, then inspect the current repository and the uncommitted Checkpoint 5A diff. Treat historical test results as reports until verified locally. Review 5A and report current status and blockers. Do not modify code, stage, commit, push, apply migrations, start the worker or configure live Meta until the next scoped task is authorized.
+> (Historical starting prompt for the 5A handoff.) Read PROJECT_CONTEXT.md, AGENTS.md and CLAUDE.md, then inspect the current repository and the uncommitted Checkpoint 5A diff. Treat historical test results as reports until verified locally. Review 5A and report current status and blockers. Do not modify code, stage, commit, push, apply migrations, start the worker or configure live Meta until the next scoped task is authorized.
 
 After later work, update this document with exact reviewed commit/CI evidence and current blockers. Keep historical decisions and superseded-policy warnings; never erase the distinction between tested, committed, deployed and live-verified.
 

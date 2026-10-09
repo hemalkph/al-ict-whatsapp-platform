@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createWorkerDatabase } from "../client";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createWorkerDatabase, getDb } from "../client";
 import { createTestDatabase, type TestDb } from "./helpers";
 
 // The worker's own connection pool, against real PostgreSQL: bounded, named, survives dead connections, and never keeps a
@@ -108,5 +108,42 @@ describe("worker database pool", () => {
     await waitFor(() => w.pool.totalCount === 0, 4000);
     expect((await w.db.execute<{ ok: number }>(sql`select 1 as ok`)).rows[0]!.ok).toBe(1);
     await w.close();
+  });
+
+  it("the shared getDb() pool survives a killed idle connection instead of crashing the process, and recovers a begin-time death", async () => {
+    vi.stubEnv("DATABASE_URL", t.url);
+    const g = globalThis as unknown as { __alIctDb?: unknown };
+    delete g.__alIctDb;
+    const warn = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const db = getDb();
+      const sql = (await import("drizzle-orm")).sql;
+      const pid = (await db.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`)).rows[0]!
+        .pid;
+      await killBackend(pid); // an idle client dies: without an 'error' handler this is an uncaught exception
+      await waitFor(() =>
+        warn.mock.calls.some((c) => String(c[0]).includes("database pool error")),
+      );
+      expect((await db.execute<{ ok: number }>(sql`select 1 as ok`)).rows[0]!.ok).toBe(1);
+      const pool = (db as unknown as { $client: Pool }).$client;
+      const connect = pool.connect.bind(pool) as () => Promise<import("pg").PoolClient>;
+      let first = true;
+      (pool as unknown as { connect: typeof connect }).connect = async () => {
+        const client = await connect();
+        if (first) {
+          first = false;
+          await killBackend((client as unknown as { processID: number }).processID);
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return client;
+      };
+      await expect(db.transaction(async () => undefined)).rejects.toThrow();
+      await waitFor(() => pool.idleCount === pool.totalCount, 4000); // nothing stays checked out
+      await pool.end();
+    } finally {
+      delete g.__alIctDb;
+      warn.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 });

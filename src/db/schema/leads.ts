@@ -1,4 +1,15 @@
-import { check, foreignKey, index, jsonb, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import {
+  check,
+  foreignKey,
+  index,
+  jsonb,
+  pgTable,
+  text,
+  unique,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { contacts } from "./contacts";
 import { createdAt, oneOf, pk, tz, updatedAt } from "./_shared";
 import { ATTRIBUTION_SOURCE_TYPES, LEAD_STATUSES } from "./enums";
@@ -80,6 +91,11 @@ export const leadAttributions = pgTable(
       t.contactId,
       t.receivedAt.desc().nullsFirst(),
     ),
+    // One referring inbound message carries at most one attribution touch. A database guarantee, so that a bug or a second
+    // writer cannot duplicate it. Rows without a message (message_id NULL) are unconstrained by this index.
+    uniqueIndex("lead_attributions_org_message_uidx")
+      .on(t.organizationId, t.messageId)
+      .where(sql`${t.messageId} IS NOT NULL`),
     index("lead_attributions_source_idx").on(t.organizationId, t.sourceType, t.sourceId),
     check("lead_attributions_source_type_check", oneOf(t.sourceType, ATTRIBUTION_SOURCE_TYPES)),
   ],

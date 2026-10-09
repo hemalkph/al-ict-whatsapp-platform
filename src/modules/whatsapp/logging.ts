@@ -32,7 +32,15 @@ export type WebhookLogEvent =
   | "worker.stats"
   | "worker.database_unavailable"
   | "worker.database_recovered"
-  | "worker.fatal";
+  | "worker.fatal"
+  | "operator.account_registered"
+  | "operator.account_activated"
+  | "operator.account_enabled"
+  | "operator.account_disabled"
+  | "operator.account_archived"
+  | "operator.events_requeued"
+  | "operator.payload_revealed"
+  | "operator.payload_reveal_refused";
 
 export type WebhookCounts = {
   events?: number;

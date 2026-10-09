@@ -12,6 +12,8 @@ import {
   reopenIfNewer,
 } from "@/db/ops/inbound-message";
 import { resolveInboundContact } from "../identity";
+import { isRecord } from "../parse";
+import { PermanentWebhookError } from "../queue/errors";
 import { emitWebhookLog } from "../logging";
 import type { WebhookHandler, WebhookHandlerRegistry } from "../queue/process";
 import { FUTURE_SKEW_MS, effectiveActivityTime } from "../time";
@@ -41,6 +43,10 @@ class DuplicateMessage extends Error {
 const STALE_MS = 8 * 24 * 60 * 60 * 1000;
 
 export const handleInboundMessage: WebhookHandler = async (tx, event) => {
+  // A sender / reply / media identifier that the ingest-time cleaning had to alter (a NUL or lone surrogate) is no longer
+  // the identifier the provider sent, and might equal another contact's. Nothing is resolved or written from it.
+  if (isRecord(event.payload) && event.payload.identifierIntegrity === "altered")
+    throw new PermanentWebhookError("invalid_provider_identifier");
   const message = mapInboundMessage(event.payload);
   const org = event.organizationId;
   const accountId = event.whatsappAccountId;
@@ -176,8 +182,9 @@ export const handleInboundMessage: WebhookHandler = async (tx, event) => {
 };
 
 /**
- * The handler registry for the MESSAGE event type. NOT wired into any production path: nothing in the application starts
- * a worker (there is no `whatsapp:worker` command). Tests and explicit non-production invocations pass it to
- * processWebhookBatch({ handlers }). STATUS, IDENTITY and OTHER events stay unclaimed until their own handlers exist.
+ * The handler registry for the MESSAGE event type alone (tests compose it with others). Production uses the fixed MESSAGE +
+ * STATUS registry of the worker module, run only by the opt-in `npm run whatsapp:worker` (disabled unless
+ * WHATSAPP_WORKER_ENABLED=true; nothing in the web application starts it). IDENTITY and OTHER events have no handler and
+ * stay unclaimed.
  */
 export const inboundMessageHandlers: WebhookHandlerRegistry = { MESSAGE: handleInboundMessage };

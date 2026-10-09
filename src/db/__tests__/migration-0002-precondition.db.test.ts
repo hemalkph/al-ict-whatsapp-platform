@@ -13,6 +13,9 @@ import { createTestDatabase, pgError, type TestDb } from "./helpers";
 // These tests prove both halves of that assumption with the real drizzle migrator.
 
 const FULL = fileURLToPath(new URL("../migrations", import.meta.url));
+const TOTAL = (
+  JSON.parse(readFileSync(join(FULL, "meta/_journal.json"), "utf8")) as { entries: unknown[] }
+).entries.length;
 const TAG_0002 = "0002_whatsapp_webhook_ingest_and_bsuid_identity";
 
 /** A copy of the migrations folder whose journal stops before 0002 (the schema every database had before Phase 04). */
@@ -22,8 +25,10 @@ function folderBefore0002(): string {
   const journal = JSON.parse(readFileSync(join(FULL, "meta/_journal.json"), "utf8")) as {
     entries: Array<{ tag: string }>;
   };
-  const kept = journal.entries.filter((e) => e.tag !== TAG_0002);
-  expect(kept).toHaveLength(journal.entries.length - 1); // exactly 0002 is withheld
+  // everything BEFORE 0002 is kept; 0002 and every later migration is withheld
+  const at = journal.entries.findIndex((e) => e.tag === TAG_0002);
+  expect(at).toBeGreaterThan(0);
+  const kept = journal.entries.slice(0, at);
   writeFileSync(
     join(dir, "meta/_journal.json"),
     JSON.stringify({ ...journal, entries: kept }, null, 2),
@@ -72,9 +77,9 @@ describe("migration 0002 precondition: webhook_requests must be empty", () => {
         "payload_sha256",
         "created_at",
       ]);
-      await migrate(t.db, { migrationsFolder: FULL }); // applies 0002 only
+      await migrate(t.db, { migrationsFolder: FULL }); // applies 0002 and every later migration
       expect(await tableCount(t)).toBe(23);
-      expect(await recorded(t)).toBe(3);
+      expect(await recorded(t)).toBe(TOTAL);
       const cols = await columns(t, "webhook_requests");
       expect(cols).toContain("raw_body");
       expect(cols).not.toContain("raw_payload");
@@ -136,7 +141,7 @@ describe("migration 0002 precondition: webhook_requests must be empty", () => {
       await t.pool.query("delete from webhook_requests"); // an operator decision, never done by the migration
       await migrate(t.db, { migrationsFolder: FULL });
       expect(await tableCount(t)).toBe(23);
-      expect(await recorded(t)).toBe(3);
+      expect(await recorded(t)).toBe(TOTAL);
     } finally {
       await t.close();
     }

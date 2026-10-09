@@ -1,5 +1,6 @@
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool, type PoolClient } from "pg";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { logger } from "@/shared/logging/logger";
 import * as schema from "./schema";
 
 // The ONLY runtime import of `pg` in the application (enforced by ESLint). Swapping the driver or
@@ -36,7 +37,7 @@ function releaseWhenConnectionEnds(client: PoolClient): PoolClient {
   return client;
 }
 
-class WorkerPool extends Pool {
+class GuardedPool extends Pool {
   // Only the promise form (the one drizzle's transaction() uses) is guarded; the callback form is pg-pool's own.
   override connect(): Promise<PoolClient>;
   override connect(
@@ -58,6 +59,25 @@ class WorkerPool extends Pool {
   }
 }
 
+/**
+ * A pool that survives dead connections: bounded connect time, TCP keepalive, the begin-leak guard above, and an 'error'
+ * handler on the pool (idle clients) and on every client (checked-out clients). Without those handlers Node treats a
+ * connection that dies as an uncaught exception and ends the whole process. The failure still reaches the caller as a
+ * rejected query (or at COMMIT), so nothing is hidden by handling the event.
+ */
+function guardedPool(config: PoolConfig, onError: (error: unknown) => void): Pool {
+  const pool = new GuardedPool({
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 30_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+    ...config,
+  });
+  pool.on("error", onError);
+  pool.on("connect", (client) => client.on("error", () => undefined));
+  return pool;
+}
+
 export type WorkerDatabase = { db: Database; close: () => Promise<void> };
 
 /**
@@ -73,20 +93,14 @@ export function createWorkerDatabase(
     onPoolError: (error: unknown) => void;
   },
 ): WorkerDatabase {
-  const pool = new WorkerPool({
-    connectionString: url,
-    max: options.maxConnections,
-    application_name: options.applicationName,
-    connectionTimeoutMillis: 10_000,
-    idleTimeoutMillis: 30_000,
-    keepAlive: true,
-    keepAliveInitialDelayMillis: 10_000,
-  });
-  pool.on("error", options.onPoolError); // idle clients
-  // A connection that dies while a client is checked out (e.g. between the statements of a transaction) emits 'error' on
-  // that client. Without a listener Node treats it as an uncaught exception and kills the whole process. The failure still
-  // reaches the caller as a rejected query (or at COMMIT), so nothing is hidden by handling the event here.
-  pool.on("connect", (client) => client.on("error", () => undefined));
+  const pool = guardedPool(
+    {
+      connectionString: url,
+      max: options.maxConnections,
+      application_name: options.applicationName,
+    },
+    options.onPoolError,
+  );
   return { db: drizzle(pool, { schema }), close: () => pool.end() };
 }
 
@@ -97,7 +111,12 @@ export function getDb(): Database {
       throw new Error("DATABASE_URL is not set. Copy .env.example to .env.local and configure it.");
     }
     // Cached on globalThis so Next.js dev hot reloads do not leak connection pools.
-    globalForDb.__alIctDb = drizzle(new Pool({ connectionString: url }), { schema });
+    globalForDb.__alIctDb = drizzle(
+      guardedPool({ connectionString: url }, () =>
+        logger.warn("database pool error", { reason: "idle_client_error" }),
+      ),
+      { schema },
+    );
   }
   return globalForDb.__alIctDb;
 }

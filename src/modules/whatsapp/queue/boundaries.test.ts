@@ -99,10 +99,23 @@ describe("queue core boundaries", () => {
       .filter((f) => /\.tsx?$/.test(f))
       .map((f) => ({ file: `scripts/${f}`, text: code(read(join(repo, "scripts", f))) }));
     expect(files.length).toBeGreaterThan(20); // the scan really covers the application
+    // The single, deliberate exception: the operator account module (activate / enable / disable / archive). Its one UPDATE
+    // may set status, archived_at and updated_at and nothing else, so organization, phone_number_id and WABA stay write-once.
+    const OPERATOR = "modules/whatsapp/operator/accounts.ts";
     for (const { file, text } of [...files, ...scripts]) {
+      if (file === OPERATOR) continue;
       expect(text, file).not.toMatch(/update\(\s*(schema\.)?whatsappAccounts\s*\)/);
       expect(text, file).not.toMatch(/UPDATE\s+("?public"?\.)?"?whatsapp_accounts"?/i);
     }
+    const operator = files.find((f) => f.file === OPERATOR)!.text;
+    expect(operator.match(/\.update\(/g)).toHaveLength(1);
+    expect(operator).not.toMatch(/UPDATE\s+("?public"?\.)?"?whatsapp_accounts"?/i);
+    const set = /\.update\(schema\.whatsappAccounts\)\s*\.set\(\{([\s\S]*?)\}\)\s*\.where/.exec(
+      operator,
+    );
+    expect(set).not.toBeNull();
+    const keys = [...set![1]!.matchAll(/(?:^|[\s,{])(\w+):/gm)].map((m) => m[1]);
+    expect([...new Set(keys)].sort()).toEqual(["archivedAt", "status", "updatedAt"]);
   });
 
   it("is wired only into the opt-in worker script: no other command, no route, not re-exported by the public API", () => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { logger } from "./logger";
+import { logToStderr, logger } from "./logger";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -16,5 +16,17 @@ describe("logger", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     logger.error("boom");
     expect(spy).toHaveBeenCalledOnce();
+  });
+
+  // keep last: logToStderr() is process-wide by design (command-line tools call it once at start-up)
+  it("logToStderr() moves every level to stderr and leaves stdout untouched", () => {
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    logToStderr();
+    logger.info("a");
+    logger.warn("b");
+    logger.error("c");
+    expect(out).not.toHaveBeenCalled();
+    expect(err).toHaveBeenCalledTimes(3);
   });
 });

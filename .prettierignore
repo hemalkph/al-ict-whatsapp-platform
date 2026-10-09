@@ -6,3 +6,4 @@ test-results
 coverage
 e2e-output
 src/modules/whatsapp/__fixtures__
+PROJECT_CONTEXT.md
