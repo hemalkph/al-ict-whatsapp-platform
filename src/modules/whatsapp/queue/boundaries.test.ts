@@ -105,13 +105,20 @@ describe("queue core boundaries", () => {
     }
   });
 
-  it("is not wired into the application: no worker command, no route, not re-exported by the public API", () => {
+  it("is wired only into the opt-in worker script: no other command, no route, not re-exported by the public API", () => {
     const pkg = JSON.parse(read(join(repo, "package.json"))) as { scripts: Record<string, string> };
     for (const [name, command] of Object.entries(pkg.scripts)) {
+      if (name === "whatsapp:worker") {
+        // the single, explicit entry point (it refuses to start unless WHATSAPP_WORKER_ENABLED=true)
+        expect(command).toBe("tsx --env-file-if-exists=.env.local scripts/whatsapp-worker.ts");
+        continue;
+      }
       expect(name, name).not.toMatch(/worker|queue/i);
       expect(command, name).not.toMatch(/worker|queue/i);
     }
-    expect(readdirSync(join(repo, "scripts")).filter((f) => /worker|queue/i.test(f))).toEqual([]);
+    expect(readdirSync(join(repo, "scripts")).filter((f) => /worker|queue/i.test(f))).toEqual([
+      "whatsapp-worker.ts",
+    ]);
     for (const dir of ["src/app", "src/proxy.ts"]) {
       const target = join(repo, dir);
       if (!existsSync(target)) continue;

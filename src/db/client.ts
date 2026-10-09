@@ -1,5 +1,5 @@
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import * as schema from "./schema";
 
 // The ONLY runtime import of `pg` in the application (enforced by ESLint). Swapping the driver or
@@ -9,6 +9,86 @@ import * as schema from "./schema";
 export type Database = NodePgDatabase<typeof schema>;
 
 const globalForDb = globalThis as unknown as { __alIctDb?: Database };
+
+/**
+ * drizzle-orm 0.45.3 runs `begin` OUTSIDE the try/finally that releases the pooled client (node-postgres session
+ * `transaction()`): if the connection dies exactly then, the client is never released, its pool slot is lost for good and
+ * `pool.end()` never resolves. A long-running worker meets dead connections (database restarts, failovers), so its pool
+ * makes the release unconditional for a client whose connection has ended: one second after `end`, a still-held client is
+ * released as broken (so the pool discards it). A normal release afterwards is a harmless no-op.
+ */
+function releaseWhenConnectionEnds(client: PoolClient): PoolClient {
+  const release = client.release;
+  let released = false;
+  let timer: NodeJS.Timeout | undefined;
+  const onEnd = () => {
+    if (!released) timer = setTimeout(() => finish(new Error("connection_lost")), 1000).unref();
+  };
+  const finish = (error?: Error | boolean) => {
+    if (released) return; // pg-pool throws on a double release; ours is silent
+    released = true;
+    clearTimeout(timer);
+    client.off("end", onEnd);
+    release.call(client, error);
+  };
+  client.once("end", onEnd);
+  client.release = finish;
+  return client;
+}
+
+class WorkerPool extends Pool {
+  // Only the promise form (the one drizzle's transaction() uses) is guarded; the callback form is pg-pool's own.
+  override connect(): Promise<PoolClient>;
+  override connect(
+    callback: (
+      err: Error | undefined,
+      client: PoolClient | undefined,
+      done: (release?: Error | boolean) => void,
+    ) => void,
+  ): void;
+  override connect(
+    callback?: (
+      err: Error | undefined,
+      client: PoolClient | undefined,
+      done: (release?: Error | boolean) => void,
+    ) => void,
+  ): Promise<PoolClient> | void {
+    if (callback) return super.connect(callback);
+    return super.connect().then(releaseWhenConnectionEnds);
+  }
+}
+
+export type WorkerDatabase = { db: Database; close: () => Promise<void> };
+
+/**
+ * A pool OWNED by one long-running process (the WhatsApp worker); never cached globally. Unlike getDb() it bounds the
+ * connect attempt (pg's default is to wait forever), names the sessions, and surfaces idle-client errors through a
+ * callback instead of letting an unhandled pool 'error' event crash the process. Nothing connects until the first query.
+ */
+export function createWorkerDatabase(
+  url: string,
+  options: {
+    maxConnections: number;
+    applicationName: string;
+    onPoolError: (error: unknown) => void;
+  },
+): WorkerDatabase {
+  const pool = new WorkerPool({
+    connectionString: url,
+    max: options.maxConnections,
+    application_name: options.applicationName,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 30_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+  });
+  pool.on("error", options.onPoolError); // idle clients
+  // A connection that dies while a client is checked out (e.g. between the statements of a transaction) emits 'error' on
+  // that client. Without a listener Node treats it as an uncaught exception and kills the whole process. The failure still
+  // reaches the caller as a rejected query (or at COMMIT), so nothing is hidden by handling the event here.
+  pool.on("connect", (client) => client.on("error", () => undefined));
+  return { db: drizzle(pool, { schema }), close: () => pool.end() };
+}
 
 export function getDb(): Database {
   if (!globalForDb.__alIctDb) {

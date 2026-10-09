@@ -698,15 +698,12 @@ describe("STATUS handler", () => {
       const future = Math.floor(Date.now() / 1000) + 365 * 86_400;
       await deliverStatus(t.db, { id: "wamid.FUT2", status: "delivered", timestamp: future });
       await processBoth(t.db);
-      await deliverStatus(t.db, {
-        id: "wamid.FUT2",
-        status: "read",
-        timestamp: epoch(minutesAgo(1)),
-      });
+      const readAt = epoch(minutesAgo(1)); // computed ONCE: a second call could cross a second boundary
+      await deliverStatus(t.db, { id: "wamid.FUT2", status: "read", timestamp: readAt });
       await processBoth(t.db);
       expect(await messageRow(message.id)).toMatchObject({
         latest_status: "READ",
-        latest_status_at: ts(epoch(minutesAgo(1))),
+        latest_status_at: ts(readAt),
       });
     });
 

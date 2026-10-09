@@ -25,7 +25,14 @@ export type WebhookLogEvent =
   | "webhook.contact_identity_conflict"
   | "webhook.message_duplicate"
   | "webhook.timestamp_anomaly"
-  | "webhook.status_observation";
+  | "webhook.status_observation"
+  | "worker.started"
+  | "worker.stopping"
+  | "worker.stopped"
+  | "worker.stats"
+  | "worker.database_unavailable"
+  | "worker.database_recovered"
+  | "worker.fatal";
 
 export type WebhookCounts = {
   events?: number;
@@ -40,6 +47,11 @@ export type WebhookCounts = {
   failed?: number;
   leaseLost?: number;
   unrecorded?: number;
+  /** Worker queue-depth gauges (counts and seconds only). */
+  processing?: number;
+  expiredLeases?: number;
+  oldestDueSeconds?: number;
+  consecutiveFailures?: number;
 };
 
 export type WebhookLog = {
@@ -93,8 +105,16 @@ export function emitWebhookLog(e: WebhookLog): void {
     count_failed: counts.failed,
     count_lease_lost: counts.leaseLost,
     count_unrecorded: counts.unrecorded,
+    count_processing: counts.processing,
+    count_expired_leases: counts.expiredLeases,
+    oldest_due_seconds: counts.oldestDueSeconds,
+    consecutive_failures: counts.consecutiveFailures,
   };
-  if (e.event === "webhook.ingest_failed" || e.event === "webhook.event_dead")
+  if (
+    e.event === "webhook.ingest_failed" ||
+    e.event === "webhook.event_dead" ||
+    e.event === "worker.fatal"
+  )
     logger.error("webhook", context);
   else if (e.outcome === "success") logger.info("webhook", context);
   else logger.warn("webhook", context);

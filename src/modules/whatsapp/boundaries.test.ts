@@ -65,7 +65,8 @@ describe("whatsapp module boundaries", () => {
 
   it("does no background or deferred work (no timers, no after(), no worker, no queue claim)", () => {
     for (const { file, text } of sources) {
-      const c = code(text);
+      // the shared fixed-field logger names the worker's lifecycle events ("worker.started"); that is a label, not worker code
+      const c = code(text).replace(/"worker\.[a-z_]+"/g, "");
       expect(c, file).not.toMatch(
         /\bsetTimeout\b|\bsetInterval\b|\bsetImmediate\b|\bqueueMicrotask\b|\bafter\s*\(/,
       );

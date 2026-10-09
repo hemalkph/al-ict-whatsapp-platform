@@ -263,6 +263,8 @@ export type ProcessBatchOptions = Partial<ProcessDeps> & {
   batchSize?: number;
   /** Maximum handlers running at once (default 2). */
   concurrency?: number;
+  /** Once aborted no further event is claimed; events already claimed run to their outcome. */
+  stopSignal?: AbortSignal;
 };
 
 function bounded(name: string, value: number, max: number): number {
@@ -308,7 +310,7 @@ export async function processWebhookBatch(
   const started = performance.now();
   let budget = batchSize;
   const lane = async () => {
-    while (budget > 0) {
+    while (budget > 0 && !options.stopSignal?.aborted) {
       budget--;
       const lockOwner = deps.newLockOwner();
       const [event] = await claimWebhookEventRows(db, {

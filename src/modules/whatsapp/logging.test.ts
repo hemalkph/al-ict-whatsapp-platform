@@ -32,6 +32,10 @@ const ALLOWED = new Set([
   "count_failed",
   "count_lease_lost",
   "count_unrecorded",
+  "count_processing",
+  "count_expired_leases",
+  "oldest_due_seconds",
+  "consecutive_failures",
 ]);
 
 describe("webhook logging writes only a fixed set of fields", () => {

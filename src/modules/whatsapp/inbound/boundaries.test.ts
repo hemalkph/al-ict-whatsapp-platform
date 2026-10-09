@@ -144,6 +144,7 @@ describe("inbound message handler boundaries", () => {
     for (const f of app) expect(read(join(repo, "src/app", f)), f).not.toMatch(/whatsapp\/inbound/);
     const pkg = JSON.parse(read(join(repo, "package.json"))) as { scripts: Record<string, string> };
     for (const [name, command] of Object.entries(pkg.scripts)) {
+      if (name === "whatsapp:worker") continue; // the opt-in worker script (its own boundary test pins it)
       expect(name, name).not.toMatch(/worker/i);
       expect(command, name).not.toMatch(/worker|inbound/i);
     }
