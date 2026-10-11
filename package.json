@@ -22,7 +22,9 @@
     "whatsapp:worker": "tsx --env-file-if-exists=.env.local scripts/whatsapp-worker.ts",
     "whatsapp:accounts": "tsx --env-file-if-exists=.env.local scripts/whatsapp-accounts.ts",
     "whatsapp:events": "tsx --env-file-if-exists=.env.local scripts/whatsapp-events.ts",
-    "whatsapp:status": "tsx --env-file-if-exists=.env.local scripts/whatsapp-status.ts"
+    "whatsapp:status": "tsx --env-file-if-exists=.env.local scripts/whatsapp-status.ts",
+    "whatsapp:outbound": "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound.ts",
+    "whatsapp:outbound-worker": "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts"
   },
   "dependencies": {
     "@better-auth/drizzle-adapter": "1.7.7",

@@ -83,8 +83,12 @@ Safe local procedure (the developer database `al_ict_whatsapp` currently has **z
 
 Limits: `WHATSAPP_WORKER_BATCH_SIZE` (1 to 100, default 20), `WHATSAPP_WORKER_CONCURRENCY` (1 to 8, default 2). Held (`UNROUTABLE`), ignored, `DEAD` and `OTHER`/`IDENTITY` events are never processed by the worker and nothing requeues them automatically; reactivating a WhatsApp account does not release its held events. Logs are JSON lines with fixed fields (counts, internal ids, short reason codes) and never contain message text, phone numbers, BSUIDs, secrets or the database URL.
 
+## Outbound (Phase 05)
+
+Staff queue a message with `POST /api/conversations/{conversationId}/messages` (`{idempotencyKey, message: {type: "text", body, replyToMessageId?}}` or `{idempotencyKey, message: {type: "template", templateId, parameters}}`; the conversation id comes only from the URL), receiving `201` (new) or `200` (replay of the same key and payload); `409` for the same key with a different payload; `GET /api/outbound-requests/{id}` returns the safe status view. Nothing is sent by the request. The opt-in outbound worker sends; both `WHATSAPP_OUTBOUND_ENABLED=true` and `WHATSAPP_LIVE_SEND_ENABLED=true` are required, plus `WHATSAPP_GRAPH_API_VERSION` and the account's token variable. Configuration and evidence: [WHATSAPP_OUTBOUND_EVIDENCE.md](WHATSAPP_OUTBOUND_EVIDENCE.md); operations: [RUNBOOK_WHATSAPP.md](RUNBOOK_WHATSAPP.md) section 7.
+
 ## Design targets that remain for later phases
 
-- Outbound: all sends go through one messaging service and compliance guard; retries for transient failures with exponential backoff; rate-limit handling. A BSUID-only contact must be addressed through the BSUID recipient path.
+- Outbound: all sends go through one messaging service and compliance guard; automatic retries only for failures that happened before any request byte left the process (an answer that came back from Meta, including a rate limit, is never retried: it is UNKNOWN_OUTCOME for operator review); application-side pacing. A BSUID-only contact must be addressed through the BSUID recipient path.
 - Compliance guard (policy as configuration/domain logic): rolling customer-service window from the latest inbound user message (Meta: opened by a user message or call, 24 hours; the window must be computed from `conversations.last_inbound_at`, never from `messages.occurred_at`), marketing consent with timestamp and source, opt-out, campaign suppression, audience safety, rate and budget controls, quality monitoring, human handover, full auditability. Exact window rules are Meta policy to be re-checked against current documentation when implemented; do not hardcode them across the codebase.
 - Track sent/delivered/read/failed per message.

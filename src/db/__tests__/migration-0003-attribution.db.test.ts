@@ -26,6 +26,8 @@ const INDEX = "lead_attributions_org_message_uidx";
 const journal = JSON.parse(readFileSync(join(FULL, "meta/_journal.json"), "utf8")) as {
   entries: Array<{ tag: string }>;
 };
+// Migrations recorded on a database that stops just before 0003 (later migrations, such as 0004, are not part of it).
+const BEFORE_0003 = journal.entries.findIndex((e) => e.tag === TAG_0003);
 
 /** A copy of the migrations folder that stops before 0003 (what every database had until now). */
 function folderBefore0003(): string {
@@ -228,7 +230,7 @@ describe("migration 0003: applying it to a database that already has data", () =
       await attribute(t, { org: w.org.id, contact: w.contact.id, message: m2.id });
       await attribute(t, { org: w.org.id, contact: w.contact.id, message: null });
       await attribute(t, { org: w.org.id, contact: w.contact.id, message: null });
-      expect(await recorded(t)).toBe(journal.entries.length - 1);
+      expect(await recorded(t)).toBe(BEFORE_0003);
       await migrate(t.db, { migrationsFolder: FULL });
       expect(await recorded(t)).toBe(journal.entries.length);
       expect(await indexDef(t)).toMatch(/UNIQUE/);
@@ -288,7 +290,7 @@ describe("migration 0003: applying it to a database that already has data", () =
 
       expect(await snapshot()).toEqual(before); // every historical row is still there, unchanged
       expect(await indexDef(t)).toBeUndefined();
-      expect(await recorded(t)).toBe(journal.entries.length - 1); // 0003 is not recorded as applied
+      expect(await recorded(t)).toBe(BEFORE_0003); // 0003 is not recorded as applied
 
       // the operator resolves the duplicates BY HAND (here: keep the earliest touch), then retries
       await t.pool.query("delete from lead_attributions where id = any($1)", [[ids[1], ids[2]]]);

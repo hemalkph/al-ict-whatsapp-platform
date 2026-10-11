@@ -9,6 +9,7 @@ const ALLOWED = new Set([
   "webhook_event",
   "outcome",
   "request_id",
+  "outbound_request_id",
   "organization_id",
   "whatsapp_account_id",
   "event_type",

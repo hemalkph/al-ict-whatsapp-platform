@@ -29,6 +29,13 @@
       "when": 1791525205846,
       "tag": "0003_lead_attribution_message_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791555307068,
+      "tag": "0004_outbound_requests_and_templates",
+      "breakpoints": true
     }
   ]
 }

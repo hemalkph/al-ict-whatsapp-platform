@@ -38,6 +38,13 @@ Reasons and decisions: [ADR 0013](adr/0013-whatsapp-webhook-ingestion.md); evide
 - **Retention note:** the Phase 02 provenance FKs `messages.source_webhook_event_id` and `message_status_events.webhook_event_id` are composite `NO ACTION`: a retention job must null them before deleting events (unchanged). `webhook_events` held for an inactive account (`UNROUTABLE`) must be exempt from pruning.
 - **Constants only (no SQL):** `WEBHOOK_EVENT_TYPES` gains `IDENTITY`, `MESSAGE_TYPES` gains `REACTION`, new `INGEST_STATUSES`.
 
+## Phase 05 schema changes (migration `0004`, additive; 25 tables in total)
+
+- **`whatsapp_templates`:** a local registry of templates an operator attests are approved in Meta (`PENDING_ATTESTATION | APPROVED | DISABLED`), unique per `(organization, account, name, language)`; name charset CHECK; nothing here is verified with Meta.
+- **`outbound_requests`:** one row per send request. Composite organization-aware FKs to the account, the conversation, the pre-created OUTBOUND `messages` row, the requesting membership and (for templates) the template. `UNIQUE (organization, account, membership, idempotency_key)` and `UNIQUE (organization, message_id)`; CHECKs for the lifecycle (which columns must be set in which state), the template/text split, code lengths, key shape and fingerprint (`^[0-9a-f]{64}$`). Holds a recipient _kind and id_ snapshot, never a token (`credential_ref` is only a name).
+- **`outbound_requests_guard()` trigger (hand-written in 0004):** `BEFORE UPDATE`; immutable request columns, and only legal transitions (`QUEUED → SENDING|HELD`, `SENDING → QUEUED|ACCEPTED|REJECTED|UNKNOWN_OUTCOME|HELD`); terminal states cannot change. This is what makes "an unknown outcome is never retried" a database fact, not only application code.
+- `messages` gets no new columns: the OUTBOUND row is created at request time with `wamid NULL` and `client_request_id = request id`; acceptance sets the wamid.
+
 ## Principles
 
 Paginated, indexed queries; no N+1. Media goes in object storage, never in PostgreSQL BLOBs (object storage is not integrated yet). PII (phone numbers, profile names, message bodies, raw webhook payloads) is minimized, masked in logs, and subject to retention/erasure policy that is decided later.

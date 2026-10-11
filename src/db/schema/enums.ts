@@ -91,3 +91,21 @@ export const INGEST_STATUSES = [
 // Organization membership (Phase 03). Capabilities per role live in application code, not the database.
 export const MEMBERSHIP_ROLES = ["ADMIN", "STAFF", "VIEWER"] as const;
 export const MEMBERSHIP_STATUSES = ["ACTIVE", "SUSPENDED"] as const;
+
+// Outbound messaging (Phase 05). Lifecycle of ONE staff-requested send. HELD / ACCEPTED / REJECTED / UNKNOWN_OUTCOME are
+// terminal: UNKNOWN_OUTCOME in particular is never retried automatically, because the request may already have reached
+// Meta (a retry could send the customer a duplicate message).
+export const OUTBOUND_REQUEST_STATES = [
+  "QUEUED", // ready to be claimed by the dispatcher
+  "SENDING", // claimed; the HTTP request may have been (or be about to be) transmitted
+  "ACCEPTED", // Meta returned a wamid (acceptance, not delivery)
+  "REJECTED", // Meta conclusively refused it
+  "HELD", // not sent, and will not be: a policy check failed (window, consent, recipient, deadline). A new request is needed
+  "UNKNOWN_OUTCOME", // may or may not have been sent: manual reconciliation, never an automatic resend
+] as const;
+export const OUTBOUND_MESSAGE_TYPES = ["TEXT", "TEMPLATE"] as const;
+export const RECIPIENT_KINDS = ["PHONE", "BSUID"] as const;
+export const TEMPLATE_CATEGORIES = ["UTILITY", "MARKETING", "AUTHENTICATION"] as const;
+// PENDING_ATTESTATION: registered, never confirmed approved. APPROVED: an operator attested, in the Meta dashboard, that this
+// exact template (name + language) is approved for this WhatsApp account. The platform never calls Meta to verify it.
+export const TEMPLATE_STATUSES = ["PENDING_ATTESTATION", "APPROVED", "DISABLED"] as const;

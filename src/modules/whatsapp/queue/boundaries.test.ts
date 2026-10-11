@@ -126,10 +126,18 @@ describe("queue core boundaries", () => {
         expect(command).toBe("tsx --env-file-if-exists=.env.local scripts/whatsapp-worker.ts");
         continue;
       }
+      if (name === "whatsapp:outbound-worker") {
+        // the OUTBOUND worker (Phase 05): a separate, opt-in process with its own boundary test (messaging/boundaries.test.ts)
+        expect(command).toBe(
+          "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
+        );
+        continue;
+      }
       expect(name, name).not.toMatch(/worker|queue/i);
       expect(command, name).not.toMatch(/worker|queue/i);
     }
     expect(readdirSync(join(repo, "scripts")).filter((f) => /worker|queue/i.test(f))).toEqual([
+      "whatsapp-outbound-worker.ts",
       "whatsapp-worker.ts",
     ]);
     for (const dir of ["src/app", "src/proxy.ts"]) {

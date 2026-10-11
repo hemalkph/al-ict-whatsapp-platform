@@ -171,6 +171,11 @@ describe("worker boundaries", () => {
       Object.entries(pkg.scripts).filter(([n, c]) => /worker/i.test(n) || /worker/i.test(c)),
     ).toEqual([
       ["whatsapp:worker", "tsx --env-file-if-exists=.env.local scripts/whatsapp-worker.ts"],
+      // the Phase 05 outbound worker: a different process with its own gates and boundary test
+      [
+        "whatsapp:outbound-worker",
+        "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
+      ],
     ]);
     for (const hook of [
       "preinstall",

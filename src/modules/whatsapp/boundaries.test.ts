@@ -67,7 +67,7 @@ describe("whatsapp module boundaries", () => {
   it("does no background or deferred work (no timers, no after(), no worker, no queue claim)", () => {
     for (const { file, text } of sources) {
       // the shared fixed-field logger names the worker's lifecycle events ("worker.started"); that is a label, not worker code
-      const c = code(text).replace(/"worker\.[a-z_]+"/g, "");
+      const c = code(text).replace(/"(worker|outbound)\.[a-z_]+"/g, "");
       expect(c, file).not.toMatch(
         /\bsetTimeout\b|\bsetInterval\b|\bsetImmediate\b|\bqueueMicrotask\b|\bafter\s*\(/,
       );
@@ -77,7 +77,7 @@ describe("whatsapp module boundaries", () => {
 
   it("never imports the queue/worker core: the ingest path stays store-and-acknowledge", () => {
     for (const { file, text } of sources) {
-      const c = code(text).replace(/"(worker|operator)\.[a-z_]+"/g, ""); // log event labels are not imports
+      const c = code(text).replace(/"(worker|operator|outbound)\.[a-z_]+"/g, ""); // log event labels are not imports
       expect(c, file).not.toMatch(/from\s+"\.\/queue|webhook-queue|requeue/);
     }
   });

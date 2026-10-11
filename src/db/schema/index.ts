@@ -8,3 +8,4 @@ export * from "./leads";
 export * from "./tags";
 export * from "./auth";
 export * from "./access";
+export * from "./outbound";

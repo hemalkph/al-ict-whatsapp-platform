@@ -40,7 +40,19 @@ export type WebhookLogEvent =
   | "operator.account_archived"
   | "operator.events_requeued"
   | "operator.payload_revealed"
-  | "operator.payload_reveal_refused";
+  | "operator.payload_reveal_refused"
+  | "outbound.created"
+  | "outbound.held"
+  | "outbound.sending"
+  | "outbound.accepted"
+  | "outbound.rejected"
+  | "outbound.retry_scheduled"
+  | "outbound.unknown_outcome"
+  | "outbound.recovered_unknown"
+  | "outbound.worker_started"
+  | "outbound.worker_stopped"
+  | "outbound.worker_fatal"
+  | "outbound.worker_database_unavailable";
 
 export type WebhookCounts = {
   events?: number;
@@ -66,6 +78,8 @@ export type WebhookLog = {
   event: WebhookLogEvent;
   outcome: "success" | "denied" | "failure";
   requestId?: string;
+  /** Internal outbound request id (a uuid); never a recipient, body or provider id. */
+  outboundRequestId?: string;
   webhookEventId?: string;
   /** Internal contact ids only. Never a phone number, BSUID or name. */
   contactId?: string;
@@ -89,6 +103,7 @@ export function emitWebhookLog(e: WebhookLog): void {
     webhook_event: e.event,
     outcome: e.outcome,
     request_id: e.requestId,
+    outbound_request_id: e.outboundRequestId,
     webhook_event_id: e.webhookEventId,
     contact_id: e.contactId,
     other_contact_id: e.otherContactId,
@@ -121,7 +136,8 @@ export function emitWebhookLog(e: WebhookLog): void {
   if (
     e.event === "webhook.ingest_failed" ||
     e.event === "webhook.event_dead" ||
-    e.event === "worker.fatal"
+    e.event === "worker.fatal" ||
+    e.event === "outbound.worker_fatal"
   )
     logger.error("webhook", context);
   else if (e.outcome === "success") logger.info("webhook", context);

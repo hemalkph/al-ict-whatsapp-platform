@@ -18,6 +18,7 @@ const EXPECTED_TABLES = [
   "messages",
   "organization_memberships",
   "organizations",
+  "outbound_requests",
   "rate_limits",
   "sessions",
   "staff_provisioning_intents",
@@ -28,6 +29,7 @@ const EXPECTED_TABLES = [
   "webhook_events",
   "webhook_requests",
   "whatsapp_accounts",
+  "whatsapp_templates",
 ];
 
 describe("migration from empty", () => {

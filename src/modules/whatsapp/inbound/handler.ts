@@ -26,8 +26,8 @@ import { mapInboundMessage } from "./message-map";
 //   map + validate  ->  account ready?  ->  lock this logical message  ->  already stored? (then it does NOTHING)
 //   ->  [savepoint] resolve contact -> conversation -> message -> activity / reopen -> attachment -> reply links -> referral
 //
-// Duplicate safety. The advisory lock on (organization, account, wamid) serializes two workers handling the same
-// message, and the existence check runs BEFORE any write, so a duplicate creates no contact, conversation, activity
+// Duplicate safety. The advisory lock on (organization, account, wamid) (plus the reply parent's, see below) serializes two
+// workers handling the same message, and the existence check runs BEFORE any write, so a duplicate creates no contact, conversation, activity
 // change, reopen, attachment, link or attribution. If the message insert nevertheless reports a conflict (a writer that
 // does not take the lock), the savepoint rolls every provisional write back and the event completes as a duplicate.
 //
@@ -81,9 +81,16 @@ export const handleInboundMessage: WebhookHandler = async (tx, event) => {
     });
   }
 
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`wa-message:${org}:${accountId}:${message.wamid}`}, 0))`,
-  );
+  // The lock on this logical message, and, for a reply, on the message it answers: an outbound message is given its wamid
+  // under that same lock (the outbound module), so either this handler sees the parent's wamid, or the outbound
+  // acceptance runs after this transaction commits and back-resolves this reply. Keys are taken in sorted order so two
+  // handlers can never wait on each other.
+  const keys = [message.wamid, ...(message.replyToWamid ? [message.replyToWamid] : [])]
+    .map((wamid) => `wa-message:${org}:${accountId}:${wamid}`)
+    .filter((key, i, all) => all.indexOf(key) === i)
+    .sort();
+  for (const key of keys)
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
   const duplicate = () =>
     emitWebhookLog({
       event: "webhook.message_duplicate",

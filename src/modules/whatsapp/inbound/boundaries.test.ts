@@ -89,7 +89,13 @@ describe("inbound message handler boundaries", () => {
     before(handler, "insertInboundMessage(", "backResolveReplies(");
     before(handler, "insertInboundMessage(", "insertAttributionOnce(");
     expect(handler).toContain("if (!messageId) throw new DuplicateMessage()");
-    expect(handler).toContain("wa-message:${org}:${accountId}:${message.wamid}");
+    // the lock key is the shared per-message namespace; a reply also locks the wamid it answers (the outbound module stores a
+    // wamid under that same lock and then back-resolves earlier replies), keys taken in sorted order so waits cannot cycle
+    expect(handler).toContain("`wa-message:${org}:${accountId}:${wamid}`");
+    expect(handler).toContain(
+      "[message.wamid, ...(message.replyToWamid ? [message.replyToWamid] : [])]",
+    );
+    expect(handler).toMatch(/\.sort\(\);\s*for \(const key of keys\)/);
   });
 
   it("uses the shared effective-time function for derived activity and never rewrites the provider time", () => {
@@ -144,7 +150,7 @@ describe("inbound message handler boundaries", () => {
     for (const f of app) expect(read(join(repo, "src/app", f)), f).not.toMatch(/whatsapp\/inbound/);
     const pkg = JSON.parse(read(join(repo, "package.json"))) as { scripts: Record<string, string> };
     for (const [name, command] of Object.entries(pkg.scripts)) {
-      if (name === "whatsapp:worker") continue; // the opt-in worker script (its own boundary test pins it)
+      if (name === "whatsapp:worker" || name === "whatsapp:outbound-worker") continue; // the opt-in worker scripts (their own boundary tests pin them)
       expect(name, name).not.toMatch(/worker/i);
       expect(command, name).not.toMatch(/worker|inbound/i);
     }
