@@ -12,6 +12,7 @@ export type SecurityEventName =
   | "access.password_change_required"
   | "access.permission_denied"
   | "access.cross_origin_rejected"
+  | "access.actor_changed"
   | "auth.session_denied"
   | "auth.login_failed"
   | "staff.created"

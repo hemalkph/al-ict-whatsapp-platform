@@ -4,7 +4,7 @@ Internal WhatsApp management platform for an A/L ICT education class: shared inb
 
 ## Current stage
 
-**Foundation only.** There are no WhatsApp features, database schema or authentication yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Backend and staff inbox implemented; not deployed.** The database schema, staff authentication, the inbound WhatsApp pipeline, secure outbound messaging (queue only, real sending is off by default) and the staff inbox at `/inbox` exist. There is no live Meta connection, bot, campaign or student workflow, and nothing is production-ready. See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/PRE_PRODUCTION_BLOCKERS.md](docs/PRE_PRODUCTION_BLOCKERS.md).
 
 ## Architecture
 
@@ -25,7 +25,7 @@ npm ci
 npm run dev   # http://localhost:3000, health: /api/health
 ```
 
-No `.env`, database or Docker is needed to run, test or build. `.env.example` lists reserved names only. Optional local PostgreSQL: `docker compose up -d`.
+Building and the unit tests need no `.env`, database or Docker. Using the app (`/login`, `/inbox`) and `npm run test:db` / `npm run test:e2e` need PostgreSQL (`docker compose up -d`; the tests create and drop their own disposable databases and never touch your development database). `.env.example` lists the variables, including the inbox polling intervals (`INBOX_POLL_LIST_MS`, `INBOX_POLL_CHAT_MS`, optional). The staff inbox is at `/inbox` after signing in; it can queue replies only when `WHATSAPP_OUTBOUND_ENABLED=true`, and nothing is sent to WhatsApp unless the separate outbound worker is also enabled (see [docs/RUNBOOK_WHATSAPP.md](docs/RUNBOOK_WHATSAPP.md)).
 
 ## Scripts
 

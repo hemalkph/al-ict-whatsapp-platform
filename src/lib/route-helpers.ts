@@ -1,4 +1,9 @@
-import { requireAccess, type AccessContext } from "@/modules/access";
+import {
+  EXPECTED_ACTOR_HEADER,
+  assertExpectedActor,
+  requireAccess,
+  type AccessContext,
+} from "@/modules/access";
 import { getAllowedOrigins } from "@/modules/auth";
 import { ValidationError, toErrorResponse } from "@/shared/errors/http-errors";
 import { assertSameOrigin } from "@/shared/security/same-origin";
@@ -57,6 +62,10 @@ export async function handleApi(
   try {
     if (options.mutation) assertSameOrigin(request, getAllowedOrigins());
     const ctx = await requireAccess(request.headers);
+    // A client that states who it believes it is (a tab that may have outlived its session) is refused before anything runs
+    // if the authenticated actor differs. Never authorization: see modules/access/expected-actor.ts.
+    const expectedActor = request.headers.get(EXPECTED_ACTOR_HEADER);
+    if (expectedActor !== null) assertExpectedActor(ctx, expectedActor);
     const body = options.body
       ? await readJsonBody(request, options.body === "optional")
       : undefined;

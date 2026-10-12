@@ -25,6 +25,8 @@ export const CONSENT_SOURCES = [
 ] as const;
 
 export const CONVERSATION_STATUSES = ["OPEN", "PENDING", "RESOLVED"] as const;
+// Append-only workflow history (Phase 06): who changed a conversation's assignee or status, from what to what.
+export const CONVERSATION_EVENT_KINDS = ["ASSIGNMENT", "STATUS"] as const;
 
 export const MESSAGE_DIRECTIONS = ["INBOUND", "OUTBOUND"] as const;
 // Open-ended: unknown Meta types map to UNKNOWN; deliberately NOT a CHECK constraint.

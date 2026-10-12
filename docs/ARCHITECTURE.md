@@ -32,15 +32,19 @@ docs/          specs and ADRs
 
 ## Routes and entrypoints
 
-`src/proxy.ts` (optimistic cookie check), `/api/auth/[...all]` (public Better Auth instance), `/api/account/change-password`, pages `/login`, `/change-password` and the authenticated group `(app)` (landing at `/`). Operator CLIs live in `scripts/`: the auth ones call `@/modules/access/operator`, the WhatsApp ones call `@/modules/whatsapp/operator` (accounts, held and DEAD events, health) and `@/modules/whatsapp/worker` (the opt-in worker, `scripts/whatsapp-worker.ts`). The webhook endpoint is `/api/webhooks/whatsapp` (excluded from the proxy).
+`src/proxy.ts` (optimistic cookie check), `/api/auth/[...all]` (public Better Auth instance), `/api/account/change-password`, pages `/login`, `/change-password` and the authenticated group `(app)` (landing at `/`, the staff inbox at `/inbox`). Operator CLIs live in `scripts/`: the auth ones call `@/modules/access/operator`, the WhatsApp ones call `@/modules/whatsapp/operator` (accounts, held and DEAD events, health) and `@/modules/whatsapp/worker` (the opt-in worker, `scripts/whatsapp-worker.ts`). The webhook endpoint is `/api/webhooks/whatsapp` (excluded from the proxy).
 
 ## Outbound messaging (Phase 05, backend only)
 
 `src/modules/messaging` is a separate module from `src/modules/whatsapp` (the inbound module does not import it; a static test pins this). Public API: `submitOutboundMessage`, `getOutboundRequest` and two error classes. Two staff routes call it (`POST /api/conversations/{id}/messages`, `GET /api/outbound-requests/{id}`); they only queue and read. Sending happens in the opt-in `npm run whatsapp:outbound-worker` process (claim → SENDING → one HTTP request in `meta-transport.ts` → fenced record). `src/modules/messaging/meta-transport.ts` holds the only `fetch` to Meta in server code. See [ADR 0014](adr/0014-whatsapp-outbound-messaging.md).
 
+## Staff inbox (Phase 06)
+
+`src/modules/inbox` (public API `@/modules/inbox`) owns every inbox query and rule: the conversation list, conversation detail and contact panel, the message timeline, status and assignment changes (compare-and-set under the conversation row lock), per-staff seen state, internal notes, contact tags and quick replies. It takes only `@/modules/access` (authorization) and the read-only `getReplyReadiness` from `@/modules/messaging`; it has no network, transport or outbound-service import and cannot send (static tests). The other modules do not import it. Thirteen thin routes under `src/app/api/inbox/**` call it through `handleApi` (same-origin on mutations, `requireAccess`, safe errors). The page `/inbox` (`src/app/(app)/inbox/`) is a server component that renders the first page of data and hands over to a client component (`inbox-app.tsx`, with the list, timeline, composer, quick-reply picker and details panel); filters and the open conversation live in the URL. Replies use the Phase 05 endpoint only. Bounded polling refreshes the screen (no realtime service). See [ADR 0015](adr/0015-staff-inbox.md).
+
 ## Planned modules (not created yet)
 
-a Meta Graph client (outbound sends, media download), messaging (single outbound service and compliance guard), conversation / inbox services and UI, leads, bots (runtime, versions), campaigns, audit. (Webhook intake, signature check, the queue, the inbound handlers and the operator tools already exist inside `whatsapp`; contacts, conversations and messages are written by its handlers but have no service or UI layer yet.) Registrations, payments, attendance later.
+a Meta Graph client (outbound sends, media download), messaging (single outbound service and compliance guard), leads, bots (runtime, versions), campaigns, audit. (Webhook intake, signature check, the queue, the inbound handlers and the operator tools already exist inside `whatsapp`; contacts, conversations and messages are written by its handlers but have no service or UI layer yet.) Registrations, payments, attendance later.
 
 ## Rules
 

@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { organizationMemberships } from "./access";
 import { contacts } from "./contacts";
 import { createdAt, oneOf, pk, tz, updatedAt } from "./_shared";
 import {
@@ -37,6 +38,10 @@ export const conversations = pgTable(
     lastInboundAt: tz("last_inbound_at"),
     lastOutboundAt: tz("last_outbound_at"),
     resolvedAt: tz("resolved_at"),
+    // Phase 06: the ONE current assignee (an ACTIVE staff membership of the same organization at assignment time) or none.
+    // A later suspension does not clear it; the history (conversation_events) keeps every change.
+    assignedMembershipId: uuid("assigned_membership_id"),
+    assignedAt: tz("assigned_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -72,7 +77,31 @@ export const conversations = pgTable(
       t.id.desc().nullsFirst(),
     ),
     index("conversations_org_contact_idx").on(t.organizationId, t.contactId),
+    foreignKey({
+      name: "conversations_org_assignee_fk",
+      columns: [t.organizationId, t.assignedMembershipId],
+      foreignColumns: [organizationMemberships.organizationId, organizationMemberships.id],
+    }),
+    // "All" and "Unassigned" inbox views order by activity across statuses.
+    index("conversations_org_activity_idx").on(
+      t.organizationId,
+      t.lastMessageAt.desc().nullsFirst(),
+      t.id.desc().nullsFirst(),
+    ),
+    // "Assigned to me".
+    index("conversations_assignee_idx")
+      .on(
+        t.organizationId,
+        t.assignedMembershipId,
+        t.lastMessageAt.desc().nullsFirst(),
+        t.id.desc().nullsFirst(),
+      )
+      .where(sql`${t.assignedMembershipId} IS NOT NULL`),
     check("conversations_status_check", oneOf(t.status, CONVERSATION_STATUSES)),
+    check(
+      "conversations_assignment_check",
+      sql`(${t.assignedMembershipId} IS NULL) = (${t.assignedAt} IS NULL)`,
+    ),
   ],
 );
 
@@ -138,6 +167,10 @@ export const messages = pgTable(
       t.occurredAt.desc().nullsFirst(),
       t.id.desc().nullsFirst(),
     ),
+    // Unread counts and the "Unread" filter look only at inbound messages of a conversation.
+    index("messages_inbound_conversation_idx")
+      .on(t.organizationId, t.conversationId, t.id)
+      .where(sql`${t.direction} = 'INBOUND'`),
     check("messages_direction_check", oneOf(t.direction, MESSAGE_DIRECTIONS)),
     check(
       "messages_latest_status_check",

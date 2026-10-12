@@ -208,17 +208,42 @@ describe("migration 0003: applying it to a database that already has data", () =
     expect(await indexDef(t)).toBeUndefined(); // the pre-0003 schema has no such index
     return t;
   }
+  // Raw SQL on purpose: this database has the schema of its time (before 0003, and so before every later column), and the
+  // Drizzle helpers always name the CURRENT schema's columns (for example the ones 0005 added to conversations).
   async function seedPair(t: TestDb) {
-    const w = await seedWorld(t.db);
-    const mk = (wamid: string) =>
-      seedMessage(t.db, {
-        organizationId: w.org.id,
-        conversationId: w.conversation.id,
-        whatsappAccountId: w.account.id,
-        wamid,
-        direction: "INBOUND",
-      });
-    return { ...w, mk };
+    const q = (sql: string, params: unknown[]) => t.pool.query(sql, params);
+    const uniq = Math.random().toString(36).slice(2, 10);
+    const org = (
+      await q("insert into organizations (name, slug) values ('Org', $1) returning id", [
+        `org-${uniq}`,
+      ])
+    ).rows[0] as { id: string };
+    const account = (
+      await q(
+        "insert into whatsapp_accounts (organization_id, waba_id, phone_number_id, display_phone_number, status) values ($1,$2,$3,'+94 77 000 0003','ACTIVE') returning id",
+        [org.id, `2${uniq}`.padEnd(15, "0"), `1${uniq}`.padEnd(15, "0")],
+      )
+    ).rows[0] as { id: string };
+    const contact = (
+      await q(
+        "insert into contacts (organization_id, wa_id, first_seen_at, last_seen_at) values ($1,$2, now(), now()) returning id",
+        [org.id, `wa-${uniq}`],
+      )
+    ).rows[0] as { id: string };
+    const conversation = (
+      await q(
+        "insert into conversations (organization_id, whatsapp_account_id, contact_id, last_message_at) values ($1,$2,$3, now()) returning id",
+        [org.id, account.id, contact.id],
+      )
+    ).rows[0] as { id: string };
+    const mk = async (wamid: string) =>
+      (
+        await q(
+          "insert into messages (organization_id, conversation_id, whatsapp_account_id, direction, type, body, occurred_at, wamid) values ($1,$2,$3,'INBOUND','TEXT','m', now(), $4) returning id",
+          [org.id, conversation.id, account.id, wamid],
+        )
+      ).rows[0] as { id: string };
+    return { org, account, contact, conversation, mk };
   }
 
   it("G: applies to a disposable migrated database that holds clean attribution data, and keeps that data", async () => {

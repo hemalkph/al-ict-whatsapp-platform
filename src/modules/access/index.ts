@@ -27,6 +27,7 @@ export {
   type StaffDeps,
   type StaffMember,
 } from "./staff";
+export { revalidateActor } from "./staff/guards";
 export {
   getPageAccess,
   loginDestination,
@@ -41,3 +42,9 @@ export {
   type PasswordChangeStatus,
 } from "./password-change";
 export { getAccessSummary, type AccessSummary } from "./summary";
+export {
+  EXPECTED_ACTOR_HEADER,
+  assertExpectedActor,
+  parseExpectedActor,
+  type ExpectedActor,
+} from "./expected-actor";

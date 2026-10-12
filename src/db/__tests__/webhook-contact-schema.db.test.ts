@@ -357,11 +357,11 @@ describe("Phase 04 schema (migration 0002)", () => {
         ).rows.map((r) => [r.indexname, r.indexdef as string]),
       );
 
-    it("has exactly 25 tables", async () => {
+    it("has exactly 29 tables", async () => {
       const r = await t.pool.query(
         "select count(*)::int n from information_schema.tables where table_schema = 'public'",
       );
-      expect(r.rows[0].n).toBe(25);
+      expect(r.rows[0].n).toBe(29);
     });
 
     it("webhook_requests: bytea raw_body NOT NULL, text sha256 NOT NULL, ACCEPTED default, nullable error code, four CHECKs, partial index", async () => {

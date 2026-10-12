@@ -28,6 +28,17 @@ export class PasswordChangeRequiredError extends AppError {
 }
 
 /**
+ * The browser asserted which authenticated actor it believes it is acting as (X-Expected-Actor), and the server-side session
+ * is someone else (another user, membership or organization). Nothing was done. The message is fixed and reveals no identity.
+ */
+export class ActorChangedError extends AppError {
+  constructor() {
+    super("ACTOR_CHANGED", "The signed-in account has changed", 409);
+    this.name = "ActorChangedError";
+  }
+}
+
+/**
  * The resource does not exist WITHIN THE CALLER'S ORGANIZATION. Also the answer for another
  * organization's ids, so existence elsewhere is never revealed.
  */

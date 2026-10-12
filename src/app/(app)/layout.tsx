@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requestHeaders } from "@/lib/request-headers";
 import { getPageAccess, pageRedirectFor } from "@/modules/access";
@@ -12,8 +13,21 @@ export default async function AuthenticatedLayout({ children }: { children: Reac
   if (access.status !== "ok") redirect(pageRedirectFor(access.status));
   return (
     <div className="flex min-h-full flex-col">
-      <header className="flex items-center justify-between border-b border-zinc-200 px-6 py-3">
-        <span className="text-sm font-medium">A/L ICT WhatsApp Platform</span>
+      <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-zinc-200 px-4 sm:px-6">
+        <nav aria-label="Main" className="flex items-center gap-4">
+          <Link
+            href="/"
+            className="text-sm font-medium focus-visible:outline-2 focus-visible:outline-emerald-700"
+          >
+            A/L ICT WhatsApp Platform
+          </Link>
+          <Link
+            href="/inbox"
+            className="rounded px-2 py-1 text-sm text-zinc-700 hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-700"
+          >
+            Inbox
+          </Link>
+        </nav>
         <SignOutButton />
       </header>
       <div className="flex flex-1 flex-col">{children}</div>

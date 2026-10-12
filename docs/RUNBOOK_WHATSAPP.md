@@ -208,3 +208,16 @@ Steps for a request in UNKNOWN_OUTCOME: (1) `inspect <id>` for the time and `fai
 - `message_status_events` and `webhook_events` / `webhook_requests` (delivery statuses and inbound replies, as for Phase 04).
 
 Deleting or anonymising a message therefore means handling **both** `messages` and `outbound_requests.payload` (the fingerprint is a one-way hash but is derived from the content). No deletion job exists and none may be added before a policy is approved; whatever is added must keep `SENDING` and `UNKNOWN_OUTCOME` requests until they are resolved. `whatsapp:outbound` prints none of this content.
+
+## 8. The staff inbox (Phase 06)
+
+Staff use `/inbox` after signing in. What an operator needs to know:
+
+- **Nothing in the inbox sends by itself.** A reply is queued through the Phase 05 endpoint; it is sent only by the separate outbound worker, and only when both gates are on (section 7). With `WHATSAPP_OUTBOUND_ENABLED` off the composer says sending is switched off and is disabled.
+- **What staff see for a reply:** Queued (not sent yet), Sending, Accepted by WhatsApp (not yet delivered), Sent / Delivered / Read / Failed (from WhatsApp's own status reports), Rejected, Not sent (with the reason) or **Outcome unknown**. For an unknown outcome the screen warns that the message may have been sent and offers no resend; follow section 7 (verify in WhatsApp Business Manager, stop the original worker, and only then decide).
+- **Closed 24-hour window:** the composer explains it and will not queue a reply; switching to a template does not help under the current rule (blocker 44). The customer has to write first.
+- **Assignment and suspended staff:** suspending a staff member does not unassign their conversations. The inbox shows the assignee as inactive; a colleague can reassign or unassign. Use the "Assigned to me" and "Unassigned" filters to find them.
+- **Unread** is per staff member and internal; it is not a WhatsApp read receipt and nothing is sent to the customer when someone opens a conversation.
+- **Notes** are internal, append-only (they cannot be edited or deleted from the application) and contain personal data: treat them like the messages for retention and access decisions (blocker 45).
+- **Refresh interval:** the screen polls (15 s list, 5 s open conversation by default; `INBOX_POLL_LIST_MS` / `INBOX_POLL_CHAT_MS`). A message can appear a few seconds late. If staff report the inbox is slow, raise the intervals before anything else.
+- **Applying migration 0005** (additive: two columns on `conversations`, four tables, a trigger function and two triggers, a few indexes) is a normal `npm run db:migrate` to a database that has 0000-0004. It has been validated on disposable databases only and has not been applied to any persistent database.

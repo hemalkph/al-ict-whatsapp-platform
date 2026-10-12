@@ -45,6 +45,7 @@ describe("outbound boundaries", () => {
       "meta-transport.ts",
       "operator.ts",
       "policy.ts",
+      "readiness.ts",
       "schemas.ts",
       "submit.ts",
       "transport.ts",
@@ -400,11 +401,15 @@ describe("outbound boundaries", () => {
         (f) =>
           /modules\/messaging/.test(read(join(repo, f))) && !f.startsWith("src/modules/messaging/"),
       );
+      // Besides the two staff routes and the two operator scripts: the inbox reads the read-only reply readiness (detail.ts,
+      // pinned by src/modules/inbox/boundaries.test.ts) and the disposable-database E2E seed uses the real submission path.
       expect(importers.sort()).toEqual([
+        "scripts/e2e-seed.ts",
         "scripts/whatsapp-outbound-worker.ts",
         "scripts/whatsapp-outbound.ts",
         "src/app/api/conversations/[conversationId]/messages/route.ts",
         "src/app/api/outbound-requests/[requestId]/route.ts",
+        "src/modules/inbox/detail.ts",
       ]);
       for (const f of importers.filter((x) => x.startsWith("src/app/")))
         expect(read(join(repo, f))).toMatch(/from "@\/modules\/messaging";/);
@@ -416,6 +421,7 @@ describe("outbound boundaries", () => {
   type SubmitDeps,
   type SubmitResult,
 } from "./submit";
+export { getReplyReadiness, type ReplyReadiness } from "./readiness";
 export { IdempotencyConflictError, OutboundRefusedError } from "./errors";`,
       );
     });
@@ -423,7 +429,8 @@ export { IdempotencyConflictError, OutboundRefusedError } from "./errors";`,
     it("the proxy and the public API list contain no outbound entry; there is no unauthenticated send path", () => {
       expect(read(join(repo, "src/proxy.ts"))).not.toMatch(/outbound|conversations/);
       const routes = walk("src/app").filter(
-        (f) => f.endsWith("route.ts") && /outbound|messages|send/i.test(f),
+        (f) =>
+          f.endsWith("route.ts") && /outbound|messages|send/i.test(f) && !f.includes("/api/inbox/"),
       );
       expect(routes.sort()).toEqual([
         "src/app/api/conversations/[conversationId]/messages/route.ts",
@@ -468,9 +475,25 @@ export { IdempotencyConflictError, OutboundRefusedError } from "./errors";`,
           /WHATSAPP_OUTBOUND_ENABLED|WHATSAPP_LIVE_SEND_ENABLED|outbound-worker|META_ACCESS/,
         );
       for (const f of ["scripts/e2e.ts", "playwright.config.ts", "e2e/server.mjs"])
-        expect(read(join(repo, f)), f).not.toMatch(
-          /WHATSAPP_OUTBOUND_ENABLED|WHATSAPP_LIVE_SEND_ENABLED/,
-        );
+        expect(code(read(join(repo, f))), f).not.toMatch(/WHATSAPP_LIVE_SEND_ENABLED/);
+      // The E2E app may QUEUE (outbound enabled, no worker, no credential) so the inbox composer can be tested. The environment of
+      // BOTH servers is built in one place that sets every gate explicitly: live sending and BSUID sending are always "false",
+      // and the harness scripts never set a gate themselves. A second server with outbound OFF covers the disabled state.
+      for (const f of ["scripts/e2e.ts", "e2e/server.mjs"])
+        expect(read(join(repo, f)), f).not.toMatch(/WHATSAPP_OUTBOUND_ENABLED/);
+      const serverEnvSource = code(read(join(repo, "e2e/support/server-env.ts")));
+      expect(serverEnvSource).toContain('WHATSAPP_LIVE_SEND_ENABLED: "false"');
+      expect(serverEnvSource).toContain('WHATSAPP_BSUID_RECIPIENT_ENABLED: "false"');
+      expect(serverEnvSource).not.toMatch(/(LIVE_SEND|BSUID_RECIPIENT)_ENABLED: "true"/);
+      expect(serverEnvSource).toContain(
+        'WHATSAPP_OUTBOUND_ENABLED: options.outboundEnabled ? "true" : "false"',
+      );
+      const playwrightConfig = code(read(join(repo, "playwright.config.ts")));
+      expect(playwrightConfig.match(/outboundEnabled: (true|false)/g)).toEqual([
+        "outboundEnabled: true",
+        "outboundEnabled: false",
+      ]);
+      expect(playwrightConfig.match(/env: serverEnv\(/g)).toHaveLength(2); // no server has an ad-hoc env of its own
       const script = code(read(join(repo, "scripts/whatsapp-outbound-worker.ts")));
       expect(script).toMatch(/\["SIGTERM", "SIGINT"\]/);
       expect(script).not.toMatch(/WHATSAPP_OUTBOUND_ENABLED|WHATSAPP_LIVE_SEND_ENABLED/); // the gates live in the worker and the transport

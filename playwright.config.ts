@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { serverEnv } from "./e2e/support/server-env";
 
 // Browser E2E (Chromium only). Run through `npm run test:e2e`: scripts/e2e.ts creates the disposable database,
 // seeds it, builds the app and passes the E2E_* values used below. Running `playwright test` directly is not
@@ -11,6 +12,13 @@ function required(name: string): string {
 }
 
 const baseURL = required("E2E_BASE_URL");
+// A SECOND application server with outbound messaging switched OFF (the platform default), on the next two ports, serving the
+// same database. It exists so the inbox's "sending is switched off" state is tested in a real browser without ever weakening
+// the gate: the gate is read from the environment only, so the only honest way to see it off is a server that has it off.
+const offPort = Number(required("E2E_PORT")) + 2;
+const offControlPort = Number(required("E2E_PORT")) + 3;
+const offBaseURL = `https://${required("E2E_HOST")}:${offPort}`;
+const offSpec = /inbox-outbound-off\.spec\.ts/;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -34,28 +42,50 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  webServer: {
-    command: "node e2e/server.mjs",
-    url: `${baseURL}/api/health`,
-    ignoreHTTPSErrors: true,
-    reuseExistingServer: false,
-    // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
-    gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
-    timeout: 90_000,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      NODE_ENV: "production",
-      DATABASE_URL: required("E2E_DATABASE_URL"),
-      BETTER_AUTH_SECRET: required("E2E_AUTH_SECRET"),
-      BETTER_AUTH_URL: baseURL,
-      META_APP_SECRET: required("E2E_META_APP_SECRET"),
-      WHATSAPP_WEBHOOK_VERIFY_TOKEN: required("E2E_WEBHOOK_VERIFY_TOKEN"),
-      E2E_HOST: required("E2E_HOST"),
-      E2E_PORT: required("E2E_PORT"),
-      E2E_CONTROL_PORT: required("E2E_CONTROL_PORT"),
-      E2E_TLS_DIR: required("E2E_TLS_DIR"),
+  projects: [
+    { name: "chromium", testIgnore: offSpec, use: { ...devices["Desktop Chrome"] } },
+    {
+      name: "chromium-outbound-off",
+      testMatch: offSpec,
+      use: { ...devices["Desktop Chrome"], baseURL: offBaseURL },
     },
-  },
+  ],
+  webServer: [
+    {
+      command: "node e2e/server.mjs",
+      url: `${baseURL}/api/health`,
+      ignoreHTTPSErrors: true,
+      reuseExistingServer: false,
+      // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
+      gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
+      timeout: 90_000,
+      stdout: "pipe",
+      stderr: "pipe",
+      // Explicit and complete (see e2e/support/server-env.ts): nothing about sending or credentials comes from the shell.
+      env: serverEnv(process.env, {
+        outboundEnabled: true,
+        baseURL,
+        port: required("E2E_PORT"),
+        controlPort: required("E2E_CONTROL_PORT"),
+      }),
+    },
+    {
+      command: "node e2e/server.mjs",
+      url: `${offBaseURL}/api/health`,
+      ignoreHTTPSErrors: true,
+      reuseExistingServer: false,
+      // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
+      gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
+      timeout: 90_000,
+      stdout: "pipe",
+      stderr: "pipe",
+      // Outbound messaging is OFF here (the platform default): the inbox must show that and nothing may be queued.
+      env: serverEnv(process.env, {
+        outboundEnabled: false,
+        baseURL: offBaseURL,
+        port: String(offPort),
+        controlPort: String(offControlPort),
+      }),
+    },
+  ],
 });

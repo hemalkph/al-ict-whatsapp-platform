@@ -20,4 +20,4 @@ Ad → WhatsApp message → Meta webhook → create/update contact → save ad r
 
 ## Current stage
 
-Foundation only. See ROADMAP.md.
+The backend for inbound and outbound WhatsApp messaging and the staff inbox are implemented; nothing is deployed and no live Meta account is connected. Leads, bots, campaigns and student workflows are not built. See ROADMAP.md and PRE_PRODUCTION_BLOCKERS.md.

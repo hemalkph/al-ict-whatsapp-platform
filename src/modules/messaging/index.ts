@@ -7,4 +7,5 @@ export {
   type SubmitDeps,
   type SubmitResult,
 } from "./submit";
+export { getReplyReadiness, type ReplyReadiness } from "./readiness";
 export { IdempotencyConflictError, OutboundRefusedError } from "./errors";

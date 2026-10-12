@@ -36,6 +36,13 @@
       "when": 1791555307068,
       "tag": "0004_outbound_requests_and_templates",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791734426065,
+      "tag": "0005_staff_inbox_workflow",
+      "breakpoints": true
     }
   ]
 }
