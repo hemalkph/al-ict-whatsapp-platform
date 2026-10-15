@@ -67,6 +67,55 @@ export const LEAD_STATUSES = [
   "INVALID",
 ] as const;
 
+// Lead lifecycle groups (ADR 0016). Every value is one of LEAD_STATUSES; the groups partition it.
+// OPEN: the lead is being worked. At most one open lead per contact (partial unique index).
+export const OPEN_LEAD_STATUSES = [
+  "NEW",
+  "QUALIFIED",
+  "INTERESTED",
+  "REGISTRATION_STARTED",
+  "REGISTERED",
+  "PAID",
+] as const satisfies readonly (typeof LEAD_STATUSES)[number][];
+export const CLOSED_LEAD_STATUSES = [
+  "CONVERTED",
+  "NOT_INTERESTED",
+  "NO_RESPONSE",
+  "INVALID",
+] as const satisfies readonly (typeof LEAD_STATUSES)[number][];
+// The only statuses a staff member may set in Phase 07, and the only ones lead history can record as a status change.
+export const STAFF_SETTABLE_LEAD_STATUSES = [
+  "NEW",
+  "QUALIFIED",
+  "INTERESTED",
+  "NOT_INTERESTED",
+  "NO_RESPONSE",
+  "INVALID",
+] as const satisfies readonly (typeof LEAD_STATUSES)[number][];
+// Reserved for the later registration and payment workflow (roadmap item 8). Nothing in Phase 07 sets them.
+export const RESERVED_LEAD_STATUSES = [
+  "REGISTRATION_STARTED",
+  "REGISTERED",
+  "PAID",
+  "CONVERTED",
+] as const satisfies readonly (typeof LEAD_STATUSES)[number][];
+
+export const LEAD_EVENT_KINDS = ["CREATED", "STATUS", "TOUCH_LINKED"] as const;
+// How a lead came to exist: a staff member created it, or a confirmed Meta ad referral did (the reconciler).
+export const LEAD_ORIGINS = ["MANUAL", "AD_REFERRAL"] as const;
+
+// Durable outcome of considering one attribution touch for automatic lead handling (lead_reconcile_decisions).
+// SKIPPED_* and PARKED are terminal; RETRY is waiting for its next attempt.
+export const LEAD_RECONCILE_DECISIONS = [
+  "SKIPPED_STALE", // older than the freshness window when first considered
+  "SKIPPED_BEFORE_CYCLE", // not newer than the contact's latest lead-cycle boundary
+  "SKIPPED_CONVERTED", // the contact has a CONVERTED lead: no automatic lead
+  "SKIPPED_ARCHIVED", // the contact is archived
+  "RETRY", // a transient failure; attempts 1..4, due at next_attempt_at
+  "PARKED", // the fifth failure: needs an operator
+] as const;
+export const LEAD_RECONCILE_MAX_ATTEMPTS = 5;
+
 export const ATTRIBUTION_SOURCE_TYPES = [
   "META_AD",
   "FACEBOOK_AD",

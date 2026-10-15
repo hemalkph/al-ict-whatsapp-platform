@@ -124,7 +124,7 @@ describe("migration 0005: applying it to a database that already has conversatio
           "select count(*)::int n from information_schema.tables where table_schema = 'public'",
         )
       ).rows[0].n;
-      expect(tables).toBe(29);
+      expect(tables).toBe(31); // 0006 adds lead_events and lead_reconcile_decisions
       expect((await q("select count(*)::int n from drizzle.__drizzle_migrations")).rows[0].n).toBe(
         journal.entries.length,
       );
