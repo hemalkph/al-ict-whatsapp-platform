@@ -74,7 +74,7 @@ Account onboarding (`npm run whatsapp:accounts`), held-event release and DEAD-ev
 
 The worker (`npm run whatsapp:worker`) claims already-stored webhook events and runs the MESSAGE and STATUS handlers. It makes no request to Meta and needs no Meta app, number, subscription or credential. It is **disabled unless `WHATSAPP_WORKER_ENABLED=true`** is set explicitly, and it refuses to run against a database that has not been migrated (it never migrates or creates anything).
 
-Safe local procedure (the developer database `al_ict_whatsapp` currently has **zero tables** and must be migrated deliberately by you; this project's tooling never does it silently):
+Safe local procedure (the developer database `al_ict_whatsapp` is migrated only deliberately by you, and this project's tooling never does it silently; its last known state is in `DATABASE_DESIGN.md`, "Where the migrations have been applied"):
 
 1. Use a disposable local PostgreSQL database for experiments. Create it yourself, point `DATABASE_URL` at it in `.env.local`, and apply the committed migrations with `npm run db:migrate` (only when you decide to).
 2. Put events in the queue: send signed requests to a local `next dev` server's `/api/webhooks/whatsapp` (needs `META_APP_SECRET`; sign sanitized fixtures from `src/modules/whatsapp/__fixtures__/` with the same secret), or run the automated tests, which do this against throw-away databases and are the supported way to exercise the worker.

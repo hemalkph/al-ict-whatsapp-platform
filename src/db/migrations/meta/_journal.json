@@ -43,6 +43,13 @@
       "when": 1791734426065,
       "tag": "0005_staff_inbox_workflow",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791786873175,
+      "tag": "0006_leads_lifecycle_and_attribution_integrity",
+      "breakpoints": true
     }
   ]
 }

@@ -14,6 +14,8 @@ const EXPECTED_TABLES = [
   "conversation_notes",
   "conversations",
   "lead_attributions",
+  "lead_events",
+  "lead_reconcile_decisions",
   "leads",
   "message_attachments",
   "message_reads",

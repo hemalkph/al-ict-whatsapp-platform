@@ -24,7 +24,8 @@
     "whatsapp:events": "tsx --env-file-if-exists=.env.local scripts/whatsapp-events.ts",
     "whatsapp:status": "tsx --env-file-if-exists=.env.local scripts/whatsapp-status.ts",
     "whatsapp:outbound": "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound.ts",
-    "whatsapp:outbound-worker": "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts"
+    "whatsapp:outbound-worker": "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
+    "leads:reconcile": "tsx --env-file-if-exists=.env.local scripts/leads-reconcile.ts"
   },
   "dependencies": {
     "@better-auth/drizzle-adapter": "1.7.7",

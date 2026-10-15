@@ -3,6 +3,7 @@ import { schema } from "../index";
 import {
   CHECK_VIOLATION,
   FK_VIOLATION,
+  UNIQUE_VIOLATION,
   createTestDatabase,
   expectPgError,
   seedAccount,
@@ -347,34 +348,52 @@ describe("tenant isolation (composite organization-aware FKs)", () => {
   });
 
   describe("lead attribution", () => {
-    it("rejects an attribution for contact B referencing a lead of contact A", async () => {
+    // From migration 0006 a touch is inserted unlinked and linked afterwards (once), so the lead/contact foreign key is
+    // exercised by the link, not by the insert. The full link rules are in leads-schema.db.test.ts.
+    it("rejects linking an attribution of contact B to a lead of contact A", async () => {
       const a = await seedWorld(db);
       const contactB = await seedContact(db, a.org.id); // same org, different contact
       const leadA = await seedLead(db, a.org.id, a.contact.id);
-      await expectPgError(
-        db.insert(schema.leadAttributions).values({
+      const conversationB = await seedConversation(db, {
+        organizationId: a.org.id,
+        whatsappAccountId: a.account.id,
+        contactId: contactB.id,
+      });
+      const msg = await seedMessage(db, {
+        organizationId: a.org.id,
+        conversationId: conversationB.id,
+        whatsappAccountId: a.account.id,
+        direction: "INBOUND",
+      });
+      const [touch] = await db
+        .insert(schema.leadAttributions)
+        .values({
           organizationId: a.org.id,
           contactId: contactB.id,
-          leadId: leadA.id,
+          messageId: msg.id,
           sourceType: "META_AD",
-          receivedAt: T0,
-        }),
+          receivedAt: new Date(),
+        })
+        .returning();
+      await expectPgError(
+        t.pool.query("update lead_attributions set lead_id = $1 where id = $2", [
+          leadA.id,
+          touch!.id,
+        ]),
         FK_VIOLATION,
         "lead_attributions_org_lead_contact_fk",
       );
     });
 
-    it("accepts matching contact/lead, a NULL lead, and rejects a cross-organization message", async () => {
+    it("accepts an unlinked attribution and rejects a cross-organization message", async () => {
       const a = await seedWorld(db);
       const b = await seedWorld(db);
-      const lead = await seedLead(db, a.org.id, a.contact.id);
       const base = {
         organizationId: a.org.id,
         contactId: a.contact.id,
         sourceType: "META_AD" as const,
         receivedAt: T0,
       };
-      await db.insert(schema.leadAttributions).values({ ...base, leadId: lead.id });
       await db.insert(schema.leadAttributions).values({ ...base, leadId: null });
       const foreignMsg = await seedMessage(db, {
         organizationId: b.org.id,
@@ -388,11 +407,22 @@ describe("tenant isolation (composite organization-aware FKs)", () => {
       );
     });
 
-    it("allows multiple leads for one contact", async () => {
+    it("allows several leads for one contact over time, but only one open lead (ADR 0016)", async () => {
       const a = await seedWorld(db);
+      for (const status of ["NOT_INTERESTED", "NO_RESPONSE"] as const)
+        await db.insert(schema.leads).values({
+          organizationId: a.org.id,
+          contactId: a.contact.id,
+          status,
+          closedAt: new Date(),
+          cycleStartedAt: new Date(Date.now() - 60_000), // a lead cannot close before its cycle began
+        });
       await seedLead(db, a.org.id, a.contact.id);
-      await seedLead(db, a.org.id, a.contact.id);
-      await seedLead(db, a.org.id, a.contact.id);
+      await expectPgError(
+        seedLead(db, a.org.id, a.contact.id),
+        UNIQUE_VIOLATION,
+        "leads_org_contact_open_uidx",
+      );
       const rows = await t.pool.query("select count(*)::int n from leads where contact_id = $1", [
         a.contact.id,
       ]);

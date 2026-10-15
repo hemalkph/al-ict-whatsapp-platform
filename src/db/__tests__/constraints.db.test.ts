@@ -336,13 +336,20 @@ describe("uniqueness, idempotency and CHECK constraints", () => {
 
     it("keeps lead status values aligned with the TS list (all accepted)", async () => {
       const w = await seedWorld(db);
+      // one contact per status: a contact has at most one OPEN lead, and a closed status needs closed_at (migration 0006)
+      const closed = new Set<string>(schema.CLOSED_LEAD_STATUSES);
       for (const status of schema.LEAD_STATUSES) {
-        await db
-          .insert(schema.leads)
-          .values({ organizationId: w.org.id, contactId: w.contact.id, status });
+        const contact = await seedContact(db, w.org.id);
+        await db.insert(schema.leads).values({
+          organizationId: w.org.id,
+          contactId: contact.id,
+          status,
+          closedAt: closed.has(status) ? new Date() : null,
+          cycleStartedAt: new Date(Date.now() - 60_000), // a lead cannot close before its cycle began
+        });
       }
-      const n = await t.pool.query("select count(*)::int n from leads where contact_id = $1", [
-        w.contact.id,
+      const n = await t.pool.query("select count(*)::int n from leads where organization_id = $1", [
+        w.org.id,
       ]);
       expect(n.rows[0].n).toBe(schema.LEAD_STATUSES.length);
     });
