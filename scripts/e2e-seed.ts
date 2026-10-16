@@ -1,23 +1,45 @@
-import { eq } from "drizzle-orm";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { eq, sql } from "drizzle-orm";
 import { schema } from "@/db";
 import type { TestDb } from "@/db/__tests__/helpers";
 import { bootstrapFirstAdmin } from "@/modules/access/operator";
 import type { AuthEnv } from "@/modules/auth";
 import { createProvisioningAuth } from "@/modules/auth/provisioning";
 import {
+  DETAIL_CONTACTS,
+  DETAIL_HOSTILE,
+  DETAIL_STATUS_CHANGES,
+  DETAIL_USERS,
   E2E_PASSWORD,
   FIRST_ADMIN,
   INBOX_CONTACTS,
   INBOX_TEXT,
   INBOX_USERS,
+  LEADS_CONTACTS,
+  LEADS_SEED,
+  LEADS_USERS,
   ORG_A,
   ORG_B,
   ORG_C,
+  ORG_D,
+  ORG_E,
+  ORG_F,
+  ORG_G,
+  ORG_H,
+  PANEL_CONTACTS,
+  INTEG_CONTACTS,
+  INTEG_USERS,
+  PANEL_USERS,
   REVIEW_CONTACTS,
   REVIEW_USERS,
+  STATUS_CONTACTS,
   USERS,
 } from "../e2e/support/identities";
-import { can } from "@/modules/access";
+import { seedAccount } from "@/db/__tests__/helpers";
+import { can, type Role } from "@/modules/access";
+import { changeLeadStatus, createManualLead } from "@/modules/leads";
+import { addContact, addTouch, seedLead } from "@/modules/leads/testing";
 import { submitOutboundMessage } from "@/modules/messaging";
 
 // Seeds the DISPOSABLE E2E database with the minimum identities the browser tests need.
@@ -46,13 +68,32 @@ export async function seedE2E(t: TestDb, env: AuthEnv): Promise<void> {
   const [orgB] = await t.db.insert(schema.organizations).values(ORG_B).returning();
   if (!orgA || !orgB) throw new Error("E2E seed: organizations were not created.");
   const [orgC] = await t.db.insert(schema.organizations).values(ORG_C).returning();
-  if (!orgC) throw new Error("E2E seed: organizations were not created.");
-  const orgIds = { A: orgA.id, B: orgB.id, C: orgC.id };
+  const [orgD] = await t.db.insert(schema.organizations).values(ORG_D).returning();
+  const [orgE] = await t.db.insert(schema.organizations).values(ORG_E).returning();
+  if (!orgC || !orgD || !orgE) throw new Error("E2E seed: organizations were not created.");
+  const [orgF] = await t.db.insert(schema.organizations).values(ORG_F).returning();
+  const [orgG] = await t.db.insert(schema.organizations).values(ORG_G).returning();
+  const [orgH] = await t.db.insert(schema.organizations).values(ORG_H).returning();
+  if (!orgF || !orgG || !orgH) throw new Error("E2E seed: organizations were not created.");
+  const orgIds = {
+    A: orgA.id,
+    B: orgB.id,
+    C: orgC.id,
+    D: orgD.id,
+    E: orgE.id,
+    F: orgF.id,
+    G: orgG.id,
+    H: orgH.id,
+  };
 
   for (const u of [
     ...Object.values(USERS),
     ...Object.values(INBOX_USERS),
     ...Object.values(REVIEW_USERS),
+    ...Object.values(LEADS_USERS),
+    ...Object.values(DETAIL_USERS),
+    ...Object.values(PANEL_USERS),
+    ...Object.values(INTEG_USERS),
   ]) {
     const created = await provisioner.api.signUpEmail({
       body: { name: u.name, email: u.email, password: E2E_PASSWORD },
@@ -66,6 +107,291 @@ export async function seedE2E(t: TestDb, env: AuthEnv): Promise<void> {
   }
 
   await seedInbox(t, orgIds);
+  // FIRST among the fixtures that run the reconciler: it processes every organization's pending touches, so running it after the
+  // lead-page fixtures would link evidence those fixtures deliberately leave alone (and change their expected history).
+  await seedIntegration(t, orgIds.H);
+  await seedLeads(t, orgIds);
+  await seedLeadDetail(t, orgIds.F);
+  await seedLeadStatus(t, orgIds.F);
+  await seedInboxLeads(t, orgIds.G);
+}
+
+// An access context for a seeded account, so the REAL lead services can run as that member.
+async function actorOf(t: TestDb, email: string, organizationId: string, role: Role) {
+  const [m] = await t.db
+    .select({
+      id: schema.organizationMemberships.id,
+      userId: schema.organizationMemberships.userId,
+    })
+    .from(schema.organizationMemberships)
+    .innerJoin(schema.users, eq(schema.users.id, schema.organizationMemberships.userId))
+    .where(eq(schema.users.email, email));
+  if (!m) throw new Error("E2E seed: leads actor missing.");
+  return {
+    userId: m.userId,
+    membershipId: m.id,
+    organizationId,
+    role,
+    can: (p: Parameters<typeof can>[1]) => can(role, p),
+  };
+}
+
+// The reconciler is run as the REAL command (the only importer of the reconciler the 07C boundaries allow), against this
+// disposable database only: an explicit environment, no .env.local, nothing inherited but PATH.
+function runReconciler(t: TestDb): {
+  created?: number;
+  linked?: number;
+  skipped?: { beforeCycle?: number };
+} {
+  const run = spawnSync(
+    process.execPath,
+    [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "scripts/leads-reconcile.ts"],
+    {
+      env: {
+        PATH: process.env.PATH ?? "",
+        LEADS_RECONCILER_ENABLED: "true",
+        DATABASE_URL: t.url,
+      } as unknown as NodeJS.ProcessEnv,
+      encoding: "utf8",
+      timeout: 60_000,
+    },
+  );
+  if (run.status !== 0) throw new Error("E2E seed: the reconciler command failed.");
+  return JSON.parse(run.stdout.trim());
+}
+
+// ------------------------------------------------------------------------------------------------------ leads data
+// Organization D's leads for the Leads page specs (Phase 07D-2), made the way the application makes them: manual leads and status
+// changes through the REAL lead services, ad-referral leads through the REAL reconciler. One fixture writes directly, through the
+// module's own test helper, a state the application cannot produce on its own: a lead in a reserved status (nothing in Phase 07
+// sets one). A lead with a NON-Meta referral is not seeded: since migration 0006 the database links only confirmed Meta ad
+// touches, so that source kind cannot occur in this schema (the UI's wording for it is unit-tested).
+// Creation order decides the list order (newest first): 33 bulk (oldest), 3 closed, the reserved one, 2 ad leads.
+async function seedLeads(t: TestDb, orgIds: { D: string; E: string }): Promise<void> {
+  const deps = { db: t.db };
+  const staffD = await actorOf(t, LEADS_USERS.staff.email, orgIds.D, "STAFF");
+  const staffE = await actorOf(t, LEADS_USERS.otherOrg.email, orgIds.E, "STAFF");
+  const worldD = { org: { id: orgIds.D }, account: await seedAccount(t.db, orgIds.D) };
+  const contact = (organizationId: string, name: string) =>
+    addContact(t.db, organizationId, { profileName: name });
+  const manual = async (name: string) =>
+    (await createManualLead(staffD, { contactId: (await contact(orgIds.D, name)).id }, deps)).lead;
+
+  for (let i = 1; i <= LEADS_SEED.bulk; i++)
+    await manual(`${LEADS_CONTACTS.bulkPrefix} ${String(i).padStart(2, "0")}`);
+  for (let i = 1; i <= LEADS_SEED.closed; i++) {
+    const lead = await manual(`${LEADS_CONTACTS.closedPrefix} ${i}`);
+    await changeLeadStatus(
+      staffD,
+      lead.id,
+      { to: "NOT_INTERESTED", expectedRevision: lead.revision },
+      deps,
+    );
+  }
+  await seedLead(t.db, worldD, (await contact(orgIds.D, LEADS_CONTACTS.reserved)).id, {
+    status: "PAID",
+  });
+  for (const name of [LEADS_CONTACTS.adAmaya, LEADS_CONTACTS.adBimal])
+    await addTouch(t.db, worldD, (await contact(orgIds.D, name)).id); // a confirmed Meta ad touch of an inbound message
+  const report = runReconciler(t);
+  if (report.created !== 2)
+    throw new Error("E2E seed: the reconciler command did not create the two ad-referral leads.");
+
+  await createManualLead(
+    staffE,
+    { contactId: (await contact(orgIds.E, LEADS_CONTACTS.otherOrg)).id },
+    deps,
+  );
+}
+
+// ------------------------------------------------------------------------------------------------------ lead page data
+// Organization F's leads for the lead page specs (Phase 07D-3), made the way the application makes them: leads and status changes
+// through the REAL lead services, automatic leads and every "not linked" decision through the REAL reconciler command. Only the
+// reserved-status lead is written directly (nothing in Phase 07 can set a reserved status), exactly as in organization D.
+//   rich      a staff-created lead; Meta ad evidence linked to it (hostile text); older evidence skipped by the reconciler
+//             (SKIPPED_BEFORE_CYCLE); a later touch nobody has considered yet; CREATED, TOUCH_LINKED and 43 status changes
+//   reopened  an automatic lead, closed, then a second lead made by staff: the first lead's evidence belongs to another lead
+//   auto      an open automatic lead
+//   paid      a reserved-status lead with no history     plain  a staff-created lead with no evidence and no conversation
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+
+async function seedLeadDetail(t: TestDb, orgId: string): Promise<void> {
+  const deps = { db: t.db };
+  const staff = await actorOf(t, DETAIL_USERS.staff.email, orgId, "STAFF");
+  const world = { org: { id: orgId }, account: await seedAccount(t.db, orgId) };
+  const contact = (name: string) => addContact(t.db, orgId, { profileName: name });
+
+  const rich = await contact(DETAIL_CONTACTS.rich);
+  const reopened = await contact(DETAIL_CONTACTS.reopened);
+  const auto = await contact(DETAIL_CONTACTS.auto);
+
+  // the older touch comes first: it predates the lead made next, so the reconciler must refuse it (SKIPPED_BEFORE_CYCLE)
+  await addTouch(t.db, world, rich.id, {
+    receivedAt: hoursAgo(72),
+    headline: "Old campaign, before this lead",
+    body: "An earlier ad of the same contact",
+    sourceId: "120000000000009",
+  });
+  const richLead = (await createManualLead(staff, { contactId: rich.id }, deps)).lead;
+  await sleep(300); // the linked touch must be received after the lead's cycle began
+  await addTouch(t.db, world, rich.id, {
+    headline: DETAIL_HOSTILE.headline,
+    body: DETAIL_HOSTILE.body,
+    sourceId: "120000000000001",
+  });
+  await addTouch(t.db, world, reopened.id, { receivedAt: hoursAgo(2), headline: "Reopened ad" });
+  await addTouch(t.db, world, auto.id, { receivedAt: hoursAgo(1), headline: "Auto ad" });
+
+  const report = runReconciler(t);
+  if (report.created !== 2 || report.linked !== 1 || report.skipped?.beforeCycle !== 1)
+    throw new Error(`E2E seed: the reconciler did not do what the lead page fixtures need.`);
+
+  // a touch nobody has considered yet: "not linked to any lead yet"
+  await addTouch(t.db, world, rich.id, {
+    receivedAt: new Date(),
+    headline: "A later ad, not yet considered",
+    sourceId: "120000000000002",
+  });
+
+  let revision = richLead.revision;
+  for (let i = 0; i < DETAIL_STATUS_CHANGES; i++) {
+    const to = i % 2 === 0 ? "QUALIFIED" : "NEW";
+    revision = (
+      await changeLeadStatus(staff, richLead.id, { to, expectedRevision: revision }, deps)
+    ).lead.revision;
+  }
+
+  // reopened: close the automatic lead, then staff open a second one for the same contact
+  const [first] = (
+    await t.db.execute<{ id: string; revision: number }>(
+      sql`SELECT id, revision FROM leads WHERE organization_id = ${orgId}::uuid AND contact_id = ${reopened.id}::uuid`,
+    )
+  ).rows;
+  if (!first) throw new Error("E2E seed: the automatic lead of the reopened contact is missing.");
+  await changeLeadStatus(
+    staff,
+    first.id,
+    { to: "NOT_INTERESTED", expectedRevision: first.revision },
+    deps,
+  );
+  await createManualLead(staff, { contactId: reopened.id }, deps);
+
+  await seedLead(t.db, world, (await contact(DETAIL_CONTACTS.paid)).id, { status: "PAID" });
+  await createManualLead(staff, { contactId: (await contact(DETAIL_CONTACTS.plain)).id }, deps);
+}
+
+// ------------------------------------------------------------------------------------------------------ status specs data
+// Leads for the status management specs (Phase 07D-4): one open NEW lead per mutating test, made by the real lead services, so no
+// test depends on another's changes. `blocked` is closed through the real service, then a second lead is opened for its contact.
+async function seedLeadStatus(t: TestDb, orgId: string): Promise<void> {
+  const deps = { db: t.db };
+  const staff = await actorOf(t, DETAIL_USERS.staff.email, orgId, "STAFF");
+  for (const [key, name] of Object.entries(STATUS_CONTACTS)) {
+    const contact = await addContact(t.db, orgId, { profileName: name });
+    const first = (await createManualLead(staff, { contactId: contact.id }, deps)).lead;
+    if (key !== "blocked") continue;
+    await changeLeadStatus(
+      staff,
+      first.id,
+      { to: "NOT_INTERESTED", expectedRevision: first.revision },
+      deps,
+    );
+    await createManualLead(staff, { contactId: contact.id }, deps);
+  }
+}
+
+// ------------------------------------------------------------------------------------------------------ inbox lead panel data
+/** One conversation with one inbound message for a contact, so the Inbox lists it. `i` spreads the times (newest first). */
+async function addConversation(
+  t: TestDb,
+  orgId: string,
+  accountId: string,
+  contactId: string,
+  name: string,
+  i: number,
+): Promise<void> {
+  const at = new Date(Date.now() - i * 60_000);
+  const [conv] = await t.db
+    .insert(schema.conversations)
+    .values({
+      organizationId: orgId,
+      whatsappAccountId: accountId,
+      contactId,
+      lastMessageAt: at,
+      lastInboundAt: at,
+    })
+    .returning();
+  await t.db.insert(schema.messages).values({
+    organizationId: orgId,
+    conversationId: conv!.id,
+    whatsappAccountId: accountId,
+    direction: "INBOUND",
+    type: "TEXT",
+    body: `Hello from ${name}`,
+    occurredAt: at,
+    wamid: `wamid.PANEL${orgId.slice(0, 4)}${i}${Math.floor(Math.random() * 1e9)}`,
+  });
+}
+
+// Organization G (Phase 07D-5): one conversation per contact, and leads made by the REAL lead services (manual creation and status
+// changes), so the panel reads exactly what the application wrote. The archived contact is archived by the module's test helper.
+async function seedInboxLeads(t: TestDb, orgId: string): Promise<void> {
+  const deps = { db: t.db };
+  const staff = await actorOf(t, PANEL_USERS.staff.email, orgId, "STAFF");
+  const account = await seedAccount(t.db, orgId);
+  const contacts: Record<string, string> = {};
+  let i = 0;
+  for (const [key, name] of Object.entries(PANEL_CONTACTS)) {
+    const contact = await addContact(t.db, orgId, {
+      profileName: name,
+      archived: key === "archived",
+    });
+    await addConversation(t, orgId, account.id, contact.id, name, ++i);
+    contacts[key] = contact.id;
+  }
+  const close = async (lead: { id: string; revision: number }) =>
+    changeLeadStatus(
+      staff,
+      lead.id,
+      { to: "NOT_INTERESTED", expectedRevision: lead.revision },
+      deps,
+    );
+  // open: an earlier lead, closed; then the current one, Qualified
+  await close((await createManualLead(staff, { contactId: contacts.open! }, deps)).lead);
+  const current = (await createManualLead(staff, { contactId: contacts.open! }, deps)).lead;
+  await changeLeadStatus(staff, current.id, { to: "QUALIFIED", expectedRevision: 0 }, deps);
+  // closed: two closed leads, none open
+  await close((await createManualLead(staff, { contactId: contacts.closed! }, deps)).lead);
+  await close((await createManualLead(staff, { contactId: contacts.closed! }, deps)).lead);
+  // raceA: an open lead, so its panel can never be mistaken for raceB's (no lead)
+  await createManualLead(staff, { contactId: contacts.raceA! }, deps);
+}
+
+// Organization H (Phase 07D-6): the integration journeys. One fixture per journey, made the way the application makes it: the ad
+// lead by the REAL reconciler command from a confirmed Meta ad touch, the staff lead by the real service, the Paid lead directly
+// (no service produces a reserved status).
+async function seedIntegration(t: TestDb, orgId: string): Promise<void> {
+  const deps = { db: t.db };
+  const staff = await actorOf(t, INTEG_USERS.staff.email, orgId, "STAFF");
+  const account = await seedAccount(t.db, orgId);
+  const world = { org: { id: orgId }, account };
+  const contact = async (name: string, i: number, conversation = true) => {
+    const c = await addContact(t.db, orgId, { profileName: name });
+    if (conversation) await addConversation(t, orgId, account.id, c.id, name, i);
+    return c;
+  };
+  const ad = await contact(INTEG_CONTACTS.ad, 1, false); // its conversation comes with the touch's inbound message
+  await addTouch(t.db, world, ad.id);
+  await contact(INTEG_CONTACTS.manual, 2);
+  const cycle = await contact(INTEG_CONTACTS.cycle, 3);
+  await createManualLead(staff, { contactId: cycle.id }, deps);
+  await seedLead(t.db, world, (await contact(INTEG_CONTACTS.reserved, 4)).id, { status: "PAID" });
+  await contact(INTEG_CONTACTS.viewer, 5);
+  await contact(INTEG_CONTACTS.mobile, 6);
+  const report = runReconciler(t);
+  if (report.created !== 1)
+    throw new Error("E2E seed: the reconciler command did not create the integration ad lead.");
 }
 
 // ------------------------------------------------------------------------------------------------------ inbox data
