@@ -91,6 +91,18 @@
   }
 }
 
+/* Chat background (Phase 07D UI): a soft warm beige with a faint, regular dot pattern, drawn in CSS (no image). */
+@utility chat-wallpaper {
+  background-color: oklch(0.955 0.012 85);
+  background-image:
+    radial-gradient(oklch(0.86 0.02 85) 1px, transparent 1.5px),
+    radial-gradient(oklch(0.89 0.018 85) 1px, transparent 1.5px);
+  background-size: 24px 24px;
+  background-position:
+    0 0,
+    12px 12px;
+}
+
 /* scroll-fade */
 @property --scroll-fade-t {
   syntax: "<length-percentage>";
@@ -684,8 +696,11 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
+  /* Phase 07D-0: the application accent (the inbox's emerald-700) for shadcn components. Only these three tokens differ from the
+     shadcn neutral defaults. --background, --foreground and --border are deliberately untouched: the body inherits them, so
+     changing them would shift existing screens. */
+  --primary: oklch(50.8% 0.118 165.612);
+  --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -695,7 +710,9 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  /* emerald-700, the inbox's focus colour. It also feeds the global `outline-ring/50` base rule below: the only effect on existing
+     screens is the colour of the browser's default focus ring (measured in the 07D-0 report). */
+  --ring: oklch(50.8% 0.118 165.612);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -704,12 +721,12 @@
   --radius: 0.625rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(50.8% 0.118 165.612); /* the app accent (emerald-700), as --primary */
+  --sidebar-primary-foreground: oklch(1 0 0);
   --sidebar-accent: oklch(0.97 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-ring: oklch(50.8% 0.118 165.612);
 }
 
 .dark {
