@@ -224,3 +224,59 @@ export const actorIdsOf = (email: string) =>
        from organization_memberships m join users u on u.id = m.user_id where u.email = $1`,
     [email],
   );
+
+// ------------------------------------------------------------------------------------------------------- leads (read-only)
+/** The leads of a fake contact (by profile name), oldest first. */
+export const leadsFor = (profileName: string) =>
+  many<{ id: string; status: string; organization_id: string }>(
+    `select l.id, l.status, l.organization_id from leads l
+       join contacts ct on ct.organization_id = l.organization_id and ct.id = l.contact_id
+      where ct.profile_name = $1 order by l.created_at, l.id`,
+    [profileName],
+  );
+
+/** The CREATED history rows of a fake contact's leads: one per lead ever made (read-only: proves nothing was created twice). */
+export const createdEventsFor = async (profileName: string) =>
+  (
+    await one<{ n: number }>(
+      `select count(*)::int as n from lead_events e
+         join contacts ct on ct.organization_id = e.organization_id and ct.id = e.contact_id
+        where ct.profile_name = $1 and e.kind = 'CREATED'`,
+      [profileName],
+    )
+  ).n;
+
+/** The contact id of a fake contact (by profile name). */
+export const contactIdFor = async (profileName: string) =>
+  (await one<{ id: string }>("select id from contacts where profile_name = $1", [profileName])).id;
+
+/** Outbound requests (queued replies) of an organization: lead actions must never create one. */
+export const outboundRequestCountForOrg = async (organizationId: string) =>
+  (
+    await one<{ n: number }>(
+      "select count(*)::int as n from outbound_requests where organization_id = $1",
+      [organizationId],
+    )
+  ).n;
+
+/** A lead's recorded state and its STATUS history, straight from the database (read-only assertions: what really was committed). */
+export const leadState = async (leadId: string) =>
+  one<{
+    status: string;
+    revision: number;
+    closed_at: Date | null;
+    cycle_started_at: Date;
+    status_events: number;
+  }>(
+    `select l.status, l.revision, l.closed_at, l.cycle_started_at,
+            (select count(*)::int from lead_events e where e.lead_id = l.id and e.kind = 'STATUS') as status_events
+       from leads l where l.id = $1`,
+    [leadId],
+  );
+
+/** A lead's CREATED history rows (read-only): how it came to exist (MANUAL or AD_REFERRAL) and its revision then. */
+export const createdEventsOf = (leadId: string) =>
+  many<{ origin: string | null; revision: number | null }>(
+    "select origin, revision from lead_events where lead_id = $1 and kind = 'CREATED'",
+    [leadId],
+  );

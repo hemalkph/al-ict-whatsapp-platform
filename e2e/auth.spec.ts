@@ -140,9 +140,11 @@ test.describe.serial("first login and forced password change", () => {
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole("heading", { name: "Signed in" })).toBeVisible();
     // Everything displayed is derived on the server from the session and the membership.
-    await expect(page.getByText(FIRST_ADMIN.name)).toBeVisible();
-    await expect(page.getByText(ORG_A.name)).toBeVisible();
-    await expect(page.getByText("ADMIN", { exact: true })).toBeVisible();
+    // the home page's own summary (the sidebar shows the name and organization too, so the lookups are scoped to <main>)
+    const home = page.getByRole("main");
+    await expect(home.getByText(FIRST_ADMIN.name)).toBeVisible();
+    await expect(home.getByText(ORG_A.name)).toBeVisible();
+    await expect(home.getByText("ADMIN", { exact: true })).toBeVisible();
     expect(await passwordChangeRequired(FIRST_ADMIN.email)).toBe(false);
 
     // The replacement cookie round-trips: a reload stays signed in with the NEW cookie.

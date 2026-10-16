@@ -15,6 +15,7 @@ import type {
   MessagePage,
   TimelineMessage,
 } from "@/modules/inbox";
+import { ContactAvatar } from "./contact-avatar";
 import {
   ApiError,
   api,
@@ -27,6 +28,9 @@ import { Composer } from "./composer";
 import { ConversationList, type ListStatus } from "./conversation-list";
 import { DetailsPanel } from "./details-panel";
 import { createLane } from "./latest";
+import { fetchContactLeads, createLead } from "../leads/lead-api";
+import { LeadPanel } from "./lead-panel";
+import { createLeadPanelController } from "./lead-panel-controller";
 import { mergeFirstPage, mergeMessages } from "./merge";
 import { MessageTimeline } from "./message-timeline";
 import { STATUS_LABEL } from "./labels";
@@ -146,6 +150,23 @@ export function InboxApp({ initial, me, polling }: Props) {
     return () => setPageActor(null);
   }, [me.userId, me.organizationId, me.membershipId]);
   const actorChanged = useSyncExternalStore(subscribeActorChanged, getActorChanged, () => false);
+
+  // The open contact's leads (07D-5). Same shared client, so the same actor assertion; the controller drops any answer that is not
+  // for the contact shown now, and stops for good when the account changes.
+  const [leads] = useState(() =>
+    createLeadPanelController({
+      fetchContactLeads: (contactId, { signal }) => fetchContactLeads(contactId, { signal }),
+      createLead: (contactId, { signal }) => createLead(contactId, { signal }),
+      isActorChanged: getActorChanged,
+    }),
+  );
+  const leadState = useSyncExternalStore(leads.subscribe, leads.getState, leads.getState);
+  const leadContactId = detail?.contact.id ?? null;
+  useEffect(() => {
+    if (actorChanged) leads.block();
+  }, [actorChanged, leads]);
+  useEffect(() => leads.select(leadContactId), [leadContactId, leads]);
+  useEffect(() => () => leads.cancel(), [leads]);
 
   const desktop = useMedia("(min-width: 1024px)");
   const wide = useMedia("(min-width: 1280px)");
@@ -444,16 +465,18 @@ export function InboxApp({ initial, me, polling }: Props) {
   // previous account (it is not cancelled and not moved); reloading shows the current account's own inbox.
   if (actorChanged)
     return (
-      <div className="flex h-full items-center justify-center p-6">
+      <main aria-label="Inbox" className="flex h-full items-center justify-center p-6">
         <div
           role="alert"
           className="max-w-md rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950"
         >
           <p className="text-base font-semibold">Your signed-in account has changed.</p>
           <p className="mt-2">
-            This page was opened for a previous session, so it has stopped. Anything still being
-            checked here belongs to that session and was not cancelled. No new message was submitted
-            and nothing was changed.
+            This page was opened for a previous session, so it has stopped using information from
+            that session, and it sends nothing more. No new message was submitted after the change
+            was detected. An operation submitted before the change, such as a message or a lead, may
+            already have completed: this page cannot confirm its outcome. Reload to continue with
+            your current account.
           </p>
           <button
             type="button"
@@ -463,15 +486,18 @@ export function InboxApp({ initial, me, polling }: Props) {
             Reload as the current account
           </button>
         </div>
-      </div>
+      </main>
     );
   const quote = (m: TimelineMessage) =>
     setReplyTo({ id: m.id, preview: (m.text ?? m.placeholder ?? "Message").slice(0, 100) });
 
   return (
-    <div className="relative grid h-full min-h-0 grid-cols-1 lg:grid-cols-[20rem_minmax(0,1fr)] xl:grid-cols-[20rem_minmax(0,1fr)_20rem]">
+    <main
+      aria-label="Inbox"
+      className="relative grid h-full min-h-0 grid-cols-1 bg-zinc-100 lg:grid-cols-[20rem_minmax(0,1fr)] lg:gap-2 lg:p-2 xl:grid-cols-[20rem_minmax(0,1fr)_20rem] 2xl:grid-cols-[24rem_minmax(0,1fr)_22rem]"
+    >
       <div
-        className={`${pane === "list" ? "flex" : "hidden"} min-h-0 flex-col border-r border-zinc-200 lg:flex`}
+        className={`${pane === "list" ? "flex" : "hidden"} min-h-0 flex-col bg-white lg:flex lg:overflow-hidden lg:rounded-xl lg:border lg:border-zinc-200`}
       >
         <ConversationList
           items={items}
@@ -493,9 +519,9 @@ export function InboxApp({ initial, me, polling }: Props) {
         />
       </div>
 
-      <main
+      <section
         aria-label="Conversation"
-        className={`${pane === "chat" || pane === "details" ? "flex" : "hidden"} min-h-0 min-w-0 flex-col lg:flex`}
+        className={`${pane === "chat" || pane === "details" ? "flex" : "hidden"} min-h-0 min-w-0 flex-col bg-white lg:flex lg:overflow-hidden lg:rounded-xl lg:border lg:border-zinc-200`}
       >
         {!selectedId ? (
           <div className="flex flex-1 items-center justify-center p-8 text-center text-sm text-zinc-600">
@@ -529,6 +555,12 @@ export function InboxApp({ initial, me, polling }: Props) {
               >
                 ← Back
               </button>
+              {detail ? (
+                <ContactAvatar
+                  name={detail.contact.label.displayName}
+                  named={detail.contact.label.named}
+                />
+              ) : null}
               <div className="min-w-0 flex-1">
                 <h1 className="truncate text-base font-semibold text-zinc-900">
                   {detail ? detail.contact.label.displayName : "Loading…"}
@@ -594,10 +626,10 @@ export function InboxApp({ initial, me, polling }: Props) {
             )}
           </>
         )}
-      </main>
+      </section>
 
       <div
-        className={`${pane === "details" ? "flex" : "hidden"} z-20 min-h-0 flex-col border-l border-zinc-200 bg-white max-xl:absolute max-xl:inset-0 lg:max-xl:left-auto lg:max-xl:w-80 lg:max-xl:shadow-xl xl:flex`}
+        className={`${pane === "details" ? "flex" : "hidden"} z-20 min-h-0 flex-col bg-white max-xl:absolute max-xl:inset-0 max-xl:border-l max-xl:border-zinc-200 lg:max-xl:left-auto lg:max-xl:w-80 lg:max-xl:shadow-xl xl:flex xl:overflow-hidden xl:rounded-xl xl:border xl:border-zinc-200`}
       >
         {detail && selectedId ? (
           <DetailsPanel
@@ -607,6 +639,7 @@ export function InboxApp({ initial, me, polling }: Props) {
             pollTick={pollTick}
             onChanged={afterChange}
             onClose={() => setPane("chat")}
+            leadPanel={<LeadPanel state={leadState} controller={leads} />}
           />
         ) : (
           <p className="p-6 text-sm text-zinc-600">
@@ -614,6 +647,6 @@ export function InboxApp({ initial, me, polling }: Props) {
           </p>
         )}
       </div>
-    </div>
+    </main>
   );
 }

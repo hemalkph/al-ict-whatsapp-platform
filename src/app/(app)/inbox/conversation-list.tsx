@@ -1,6 +1,7 @@
 "use client";
 
 import type { ConversationListItem, InboxView } from "@/modules/inbox";
+import { ContactAvatar } from "./contact-avatar";
 import { shortTime } from "./format";
 import { STATUS_LABEL, VIEW_LABEL } from "./labels";
 
@@ -45,6 +46,7 @@ export function ConversationList(p: Props) {
   return (
     <section aria-label="Conversations" className="flex min-h-0 flex-1 flex-col bg-white">
       <div className="flex flex-col gap-2 border-b border-zinc-200 p-3">
+        <h2 className="px-0.5 text-base font-semibold text-zinc-900">Chats</h2>
         <label className="sr-only" htmlFor="inbox-search">
           Search conversations
         </label>
@@ -56,7 +58,7 @@ export function ConversationList(p: Props) {
           placeholder="Search name, username or number"
           maxLength={64}
           autoComplete="off"
-          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm placeholder:text-zinc-500 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-emerald-700"
+          className="w-full rounded-lg border border-transparent bg-zinc-100 px-3 py-2 text-sm placeholder:text-zinc-500 focus-visible:bg-white focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-emerald-700"
         />
         {p.searchHint ? (
           <p className="text-xs text-zinc-600">Type at least 2 characters to search.</p>
@@ -142,66 +144,69 @@ export function ConversationList(p: Props) {
             const selected = c.id === p.selectedId;
             const unread = c.unreadCount > 0;
             return (
-              <li key={c.id} className="border-b border-zinc-100">
+              <li key={c.id} className="border-b border-zinc-100 last:border-b-0">
                 <button
                   type="button"
                   onClick={() => p.onSelect(c.id)}
                   aria-current={selected ? "true" : undefined}
-                  className={`flex w-full flex-col gap-1 px-3 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-700 ${
+                  className={`flex w-full items-start gap-3 px-3 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-700 ${
                     selected ? "bg-emerald-50" : "hover:bg-zinc-50"
                   }`}
                 >
-                  <span className="flex items-baseline justify-between gap-2">
-                    <span
-                      className={`min-w-0 truncate text-sm ${unread ? "font-semibold text-zinc-900" : "font-medium text-zinc-800"}`}
-                    >
-                      {c.contact.displayName}
-                      {c.contact.idHint ? (
-                        <span className="ml-1.5 text-xs font-normal text-zinc-600">
-                          {c.contact.idHint}
+                  <ContactAvatar name={c.contact.displayName} named={c.contact.named} />
+                  <span className="flex min-w-0 flex-1 flex-col gap-1">
+                    <span className="flex items-baseline justify-between gap-2">
+                      <span
+                        className={`min-w-0 truncate text-sm ${unread ? "font-semibold text-zinc-900" : "font-medium text-zinc-800"}`}
+                      >
+                        {c.contact.displayName}
+                        {c.contact.idHint ? (
+                          <span className="ml-1.5 text-xs font-normal text-zinc-600">
+                            {c.contact.idHint}
+                          </span>
+                        ) : null}
+                      </span>
+                      <time
+                        dateTime={c.lastMessageAt}
+                        suppressHydrationWarning
+                        className={`shrink-0 text-xs ${unread ? "font-medium text-emerald-800" : "text-zinc-600"}`}
+                      >
+                        {shortTime(c.lastMessageAt)}
+                      </time>
+                    </span>
+                    <span className="flex items-center justify-between gap-2">
+                      <span
+                        className={`min-w-0 truncate text-sm ${unread ? "text-zinc-900" : "text-zinc-600"}`}
+                      >
+                        {c.preview
+                          ? `${c.preview.direction === "OUTBOUND" ? "You: " : ""}${c.preview.text}`
+                          : "No messages yet"}
+                      </span>
+                      {unread ? (
+                        <span
+                          aria-label={`${c.unreadCount}${c.unreadCapped ? " or more" : ""} unread`}
+                          className="shrink-0 rounded-full bg-emerald-700 px-1.5 py-0.5 text-xs font-semibold text-white"
+                        >
+                          {c.unreadCapped ? `${c.unreadCount}+` : c.unreadCount}
                         </span>
                       ) : null}
                     </span>
-                    <time
-                      dateTime={c.lastMessageAt}
-                      suppressHydrationWarning
-                      className="shrink-0 text-xs text-zinc-600"
-                    >
-                      {shortTime(c.lastMessageAt)}
-                    </time>
-                  </span>
-                  <span className="flex items-center justify-between gap-2">
-                    <span
-                      className={`min-w-0 truncate text-sm ${unread ? "text-zinc-900" : "text-zinc-600"}`}
-                    >
-                      {c.preview
-                        ? `${c.preview.direction === "OUTBOUND" ? "You: " : ""}${c.preview.text}`
-                        : "No messages yet"}
-                    </span>
-                    {unread ? (
+                    <span className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-600">
                       <span
-                        aria-label={`${c.unreadCount}${c.unreadCapped ? " or more" : ""} unread`}
-                        className="shrink-0 rounded-full bg-emerald-700 px-1.5 py-0.5 text-xs font-semibold text-white"
+                        className={`rounded px-1.5 py-0.5 font-medium ring-1 ring-inset ${statusStyle[c.status]}`}
                       >
-                        {c.unreadCapped ? `${c.unreadCount}+` : c.unreadCount}
+                        {STATUS_LABEL[c.status]}
                       </span>
-                    ) : null}
-                  </span>
-                  <span className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-600">
-                    <span
-                      className={`rounded px-1.5 py-0.5 font-medium ring-1 ring-inset ${statusStyle[c.status]}`}
-                    >
-                      {STATUS_LABEL[c.status]}
+                      {c.assignee ? (
+                        <span className={c.assignee.suspended ? "text-amber-800" : ""}>
+                          {c.assignee.name}
+                          {c.assignee.suspended ? " (inactive)" : ""}
+                        </span>
+                      ) : (
+                        <span>Unassigned</span>
+                      )}
+                      {p.accounts.length > 1 ? <span>· {c.account.label}</span> : null}
                     </span>
-                    {c.assignee ? (
-                      <span className={c.assignee.suspended ? "text-amber-800" : ""}>
-                        {c.assignee.name}
-                        {c.assignee.suspended ? " (inactive)" : ""}
-                      </span>
-                    ) : (
-                      <span>Unassigned</span>
-                    )}
-                    {p.accounts.length > 1 ? <span>· {c.account.label}</span> : null}
                   </span>
                 </button>
               </li>

@@ -8,6 +8,7 @@ import type {
   NoteView,
   TagView,
 } from "@/modules/inbox";
+import { ContactAvatar } from "./contact-avatar";
 import { ApiError, api, isAbort } from "./api";
 import { fullTime } from "./format";
 import { STATUS_LABEL, STATUS_ORDER } from "./labels";
@@ -19,6 +20,8 @@ type Props = {
   pollTick: number;
   onChanged: () => void;
   onClose: () => void;
+  /** The contact's lead information (07D-5), shown under Contact. */
+  leadPanel?: React.ReactNode;
 };
 
 const focus =
@@ -65,7 +68,14 @@ function conflictOrError(error: unknown, what: string): string {
   return "That did not work. Please try again.";
 }
 
-export function DetailsPanel({ detail, meMembershipId, pollTick, onChanged, onClose }: Props) {
+export function DetailsPanel({
+  detail,
+  meMembershipId,
+  pollTick,
+  onChanged,
+  onClose,
+  leadPanel,
+}: Props) {
   const { can, contact } = detail;
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -111,8 +121,9 @@ export function DetailsPanel({ detail, meMembershipId, pollTick, onChanged, onCl
       aria-label="Contact and conversation details"
       className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-white"
     >
-      <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
-        <div className="min-w-0">
+      <div className="relative flex flex-col items-center gap-2 border-b border-zinc-200 px-4 pt-6 pb-4 text-center">
+        <ContactAvatar name={contact.label.displayName} named={contact.label.named} size="lg" />
+        <div className="max-w-full min-w-0">
           <h2 className="truncate text-base font-semibold text-zinc-900">
             {contact.label.displayName}
           </h2>
@@ -123,7 +134,7 @@ export function DetailsPanel({ detail, meMembershipId, pollTick, onChanged, onCl
         <button
           type="button"
           onClick={onClose}
-          className={`rounded-md px-2 py-1 text-sm text-zinc-700 ring-1 ring-zinc-300 hover:bg-zinc-50 xl:hidden ${focus}`}
+          className={`absolute top-3 right-3 rounded-md px-2 py-1 text-sm text-zinc-700 ring-1 ring-zinc-300 hover:bg-zinc-50 xl:hidden ${focus}`}
         >
           Close
         </button>
@@ -210,6 +221,8 @@ export function DetailsPanel({ detail, meMembershipId, pollTick, onChanged, onCl
           </p>
         )}
       </Section>
+
+      {leadPanel}
 
       <TagsSection detail={detail} busy={busy} mutate={mutate} />
       {can.manage ? <NotesSection conversationId={detail.id} pollTick={pollTick} /> : null}
