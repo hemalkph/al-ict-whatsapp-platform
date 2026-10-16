@@ -11,6 +11,8 @@
 //      E2E_SLOW_JITTER_MS  delays each GET by a random 0..N ms before Next sees it;
 //      E2E_DELAY_END_MS    for POST responses that are already under way (headers sent), finishes them N ms later, which
 //                          widens the window between "first bytes written" and "response complete".
+//  - per-attempt evidence (harness/attempts.mjs): GET /attempts/<id> on the control port reports the status the server wrote
+//    for the request marked `x-e2e-attempt: <id>` (the oversize webhook test needs it when the client loses the answer).
 //  - E2E_DIAG=1: an opt-in, privacy-safe request timeline (harness/diag.mjs) for investigating a server error.
 //  - graceful shutdown on SIGTERM (Playwright sends it after the browsers are closed).
 import { readFileSync } from "node:fs";
@@ -18,6 +20,7 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:https";
 import { join } from "node:path";
 import next from "next";
+import { createAttemptLog } from "./harness/attempts.mjs";
 import { createRequestTracker } from "./harness/tracker.mjs";
 
 const hostname = process.env.E2E_HOST;
@@ -37,10 +40,12 @@ await app.prepare();
 const handle = app.getRequestHandler();
 
 const tracker = createRequestTracker();
+const attempts = createAttemptLog();
 const server = createServer(
   { key: readFileSync(join(tlsDir, "key.pem")), cert: readFileSync(join(tlsDir, "cert.pem")) },
   (req, res) => {
     tracker.track(res);
+    attempts.track(req, res);
     if (delayEndMs > 0 && req.method === "POST") {
       const end = res.end.bind(res);
       res.end = (...args) => {
@@ -61,6 +66,11 @@ const control = createHttpServer((req, res) => {
   if (req.method === "GET" && req.url === "/in-flight") {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ inFlight: tracker.inFlight() }));
+  } else if (req.method === "GET" && req.url?.startsWith("/attempts/")) {
+    const outcome = attempts.get(req.url.slice("/attempts/".length)); // ids are [A-Za-z0-9-]: nothing to decode
+    res.statusCode = outcome ? 200 : 404;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(outcome ?? null));
   } else {
     res.statusCode = 404;
     res.end();

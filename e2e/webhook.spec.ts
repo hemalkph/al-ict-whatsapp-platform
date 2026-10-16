@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { connect } from "node:tls";
 import { expect, test } from "./support/fixtures";
@@ -53,6 +53,49 @@ const unroutable = () =>
       ],
     }),
   );
+
+/** What the SERVER answered the request marked `x-e2e-attempt: <id>` (test harness record; e2e/harness/attempts.mjs). */
+async function serverAnswer(
+  attempt: string,
+  waitMs: number,
+): Promise<{ status: number | null } | null> {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    const res = await fetch(`http://127.0.0.1:${process.env.E2E_CONTROL_PORT}/attempts/${attempt}`);
+    if (res.ok) return (await res.json()) as { status: number | null };
+    if (Date.now() > until) return null;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/**
+ * The oversize verdict for ONE attempt. The server refuses from the declared length, before reading the body, and closes the
+ * connection (`Connection: close`, handler.ts), so a client still uploading 4 MiB can lose the 413 to a reset (EPIPE /
+ * ECONNRESET: closing a socket with unread inbound data resets it, and the reset discards what the client had not read; RFC 9112
+ * section 9.6). The client's error alone proves nothing (it can come from anywhere, even before anything was sent), so the
+ * evidence is always the server's own answer to THIS attempt, recorded by the harness: it must be 413 (413 comes only from the
+ * size guard). Passes as "413" (the client read it too) or "reset-after-413"; anything else fails.
+ */
+async function judgeOversize(attempt: string, send: () => Promise<number>): Promise<string> {
+  const sent = await send().then(
+    (status) => ({ status }),
+    (error: Error) => ({ error }),
+  );
+  if ("error" in sent && !/\b(EPIPE|ECONNRESET)\b/.test(sent.error.message)) throw sent.error;
+  // the record is written when the response closes, right after the answer; 3 s bounds the wait when there is none
+  const server = await serverAnswer(attempt, 3000);
+  if (server?.status !== 413)
+    throw new Error(
+      `no 413 from the server is recorded for this attempt (server: ${JSON.stringify(server)}, client: ${
+        "error" in sent ? sent.error.message : sent.status
+      })`,
+    );
+  if ("status" in sent) {
+    expect(sent.status).toBe(413);
+    return "413";
+  }
+  return "reset-after-413";
+}
 
 test.describe("Meta webhook endpoint", () => {
   test("GET verification: the right token returns the challenge as text/plain, a wrong one is 403 (not a proxy 401)", async ({
@@ -120,12 +163,73 @@ test.describe("Meta webhook endpoint", () => {
     expect(await webhookDelivery(sha(body))).toHaveLength(0);
   });
 
-  test("a body over 4 MiB is refused with 413", async ({ request }) => {
+  test("a body over 4 MiB is refused with 413: the client reads it, or the SERVER's 413 for this very request is on record", async ({
+    request,
+  }) => {
+    const body = Buffer.alloc(4 * 1024 * 1024 + 1, 0x20);
+    const attempt = randomUUID();
+    const outcome = await judgeOversize(attempt, () =>
+      request
+        .post(URL_PATH, {
+          data: body,
+          headers: { ...headers(sign(Buffer.alloc(1))), "x-e2e-attempt": attempt },
+        })
+        .then((res) => res.status()),
+    );
+    console.log(`OVERSIZE-OUTCOME ${outcome}`); // tallied by the stress runs
+    expect(await webhookDelivery(sha(body))).toHaveLength(0); // never stored, never processed
+  });
+
+  test("the oversize verdict cannot be faked: a socket error with no 413 recorded for THAT request fails, and so does any other status", async ({
+    request,
+  }) => {
+    test.setTimeout(60_000); // each attempt with no record waits the bounded 3 s before it fails
+    // fault injection: the request fails before anything reaches the network (the reviewer's false positive)
+    for (const code of ["EPIPE", "ECONNRESET"])
+      await expect(
+        judgeOversize(randomUUID(), () =>
+          Promise.reject(new Error(`apiRequestContext.post: write ${code}`)),
+        ),
+      ).rejects.toThrow(/no 413 from the server is recorded for this attempt/);
+
+    // a real 413 for ANOTHER attempt is not evidence for this one
+    const other = randomUUID();
+    await judgeOversize(other, () =>
+      request
+        .post(URL_PATH, {
+          data: Buffer.alloc(4 * 1024 * 1024 + 1, 0x20),
+          headers: { ...headers(sign(Buffer.alloc(1))), "x-e2e-attempt": other },
+        })
+        .then((res) => res.status()),
+    );
+    await expect(
+      judgeOversize(randomUUID(), () => Promise.reject(new Error("write EPIPE"))),
+    ).rejects.toThrow(/no 413 from the server is recorded for this attempt/);
+
+    // a status the client reads must be 413, and must be the server's own answer to this attempt
+    for (const status of [200, 403, 500])
+      await expect(judgeOversize(randomUUID(), async () => status)).rejects.toThrow();
+    await expect(judgeOversize(randomUUID(), async () => 413)).rejects.toThrow(
+      /no 413 from the server is recorded for this attempt/,
+    );
+
+    // a REAL request the server answered with something else (403: wrong signature) is not a size refusal either
+    const refused = randomUUID();
     const res = await request.post(URL_PATH, {
-      data: Buffer.alloc(4 * 1024 * 1024 + 1, 0x20),
-      headers: headers(sign(Buffer.alloc(1))),
+      data: Buffer.from("{}"),
+      headers: { ...headers(sign(Buffer.from("other bytes"))), "x-e2e-attempt": refused },
     });
-    expect(res.status()).toBe(413);
+    expect(res.status()).toBe(403);
+    await expect(
+      judgeOversize(refused, () => Promise.reject(new Error("write ECONNRESET"))),
+    ).rejects.toThrow(
+      /no 413 from the server is recorded for this attempt \(server: \{"status":403\}/,
+    );
+
+    // and an unrelated error is never turned into a verdict
+    await expect(
+      judgeOversize(randomUUID(), () => Promise.reject(new Error("getaddrinfo ENOTFOUND"))),
+    ).rejects.toThrow(/ENOTFOUND/);
   });
 
   test("an oversize body is refused with 413 and the connection is closed, even when the client stalls mid-upload", async () => {
