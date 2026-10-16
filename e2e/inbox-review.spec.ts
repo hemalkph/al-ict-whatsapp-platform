@@ -455,7 +455,9 @@ test.describe("M2: a stale refresh never overwrites newer state", () => {
     const id = await conversationIdFor(REVIEW_CONTACTS.gamma);
     await openInbox(page, REVIEW_USERS.staff2.email);
     await open(page, REVIEW_CONTACTS.gamma);
-    const header = page.getByRole("main", { name: "Conversation" });
+    const header = page
+      .getByRole("main", { name: "Inbox" })
+      .locator(":scope > section[aria-label='Conversation']");
     await expect(header.getByText(/^(Open|Pending|Resolved) ·/)).toBeVisible();
     const startStatus = (await conversationState(id)).status;
     const target = startStatus === "PENDING" ? "Open" : "Pending";

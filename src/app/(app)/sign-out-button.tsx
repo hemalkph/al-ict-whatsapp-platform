@@ -1,10 +1,16 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { clearPendingSends } from "./inbox/pending-send";
 
-export function SignOutButton() {
+export function SignOutButton({
+  className = "rounded border border-zinc-300 px-3 py-1 text-sm disabled:opacity-50",
+  children = "Sign out",
+}: {
+  className?: string;
+  children?: ReactNode;
+} = {}) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   async function signOut() {
@@ -23,13 +29,8 @@ export function SignOutButton() {
     }
   }
   return (
-    <button
-      type="button"
-      onClick={signOut}
-      disabled={busy}
-      className="rounded border border-zinc-300 px-3 py-1 text-sm disabled:opacity-50"
-    >
-      Sign out
+    <button type="button" onClick={signOut} disabled={busy} className={className}>
+      {children}
     </button>
   );
 }

@@ -124,7 +124,7 @@ export function MessageTimeline(p: Props) {
         const el = e.currentTarget;
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       }}
-      className="min-h-0 flex-1 overflow-y-auto bg-zinc-50 px-3 py-4 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-700 sm:px-6"
+      className="chat-wallpaper min-h-0 flex-1 overflow-y-auto px-3 py-4 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-700 sm:px-6"
     >
       {p.hasOlder ? (
         <div className="mb-4 text-center">
@@ -166,22 +166,27 @@ export function MessageTimeline(p: Props) {
             >
               {showDay ? (
                 <div className="my-2 text-center text-xs font-medium text-zinc-600">
-                  <span suppressHydrationWarning>{dayLabel(m.occurredAt)}</span>
+                  <span
+                    suppressHydrationWarning
+                    className="inline-block rounded-md bg-white/95 px-2.5 py-1 shadow-sm"
+                  >
+                    {dayLabel(m.occurredAt)}
+                  </span>
                 </div>
               ) : null}
               {m.id === p.newFromId ? (
                 <div className="my-2 flex items-center gap-2 text-xs font-semibold text-emerald-800">
                   <span className="h-px flex-1 bg-emerald-300" />
-                  New messages
+                  <span className="rounded-md bg-white/95 px-2.5 py-1 shadow-sm">New messages</span>
                   <span className="h-px flex-1 bg-emerald-300" />
                 </div>
               ) : null}
               <div className={`group flex ${out ? "justify-end" : "justify-start"}`}>
                 <div
-                  className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm sm:max-w-[70%] ${
+                  className={`max-w-[85%] rounded-xl px-3 py-1.5 text-sm shadow-sm sm:max-w-[65%] ${
                     out
-                      ? "rounded-br-sm bg-emerald-100 text-zinc-900"
-                      : "rounded-bl-sm bg-white text-zinc-900 ring-1 ring-zinc-200"
+                      ? "rounded-tr-sm bg-[#d9fdd3] text-zinc-900"
+                      : "rounded-tl-sm bg-white text-zinc-900"
                   }`}
                 >
                   <p className="sr-only">{out ? "Sent by us" : "From the customer"}</p>

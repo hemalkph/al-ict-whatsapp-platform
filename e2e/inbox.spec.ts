@@ -110,7 +110,7 @@ test.describe("staff inbox", () => {
 
     // a tag: create it, see it, remove it
     await details.getByLabel("New tag name").fill("Theory batch");
-    await details.getByRole("button", { name: "Create" }).click();
+    await details.getByRole("button", { name: "Create", exact: true }).click();
     await expect(
       details.getByRole("list", { name: "Contact tags" }).getByText("Theory batch"),
     ).toBeVisible();
@@ -289,7 +289,11 @@ test.describe("staff inbox", () => {
     await openInbox(page, INBOX_USERS.mobile.email);
     const list = page.getByRole("region", { name: "Conversations" });
     await expect(list).toBeVisible();
-    await expect(page.getByRole("main", { name: "Conversation" })).toBeHidden();
+    await expect(
+      page
+        .getByRole("main", { name: "Inbox" })
+        .locator(":scope > section[aria-label='Conversation']"),
+    ).toBeHidden();
     await open(page, INBOX_CONTACTS.nimal);
     await expect(list).toBeHidden();
     await expect(page.getByLabel("Message to the customer")).toBeVisible();
