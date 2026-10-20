@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWorkerDatabase } from "@/db";
+import { lostCommitAck } from "@/db/__tests__/lost-commit-ack";
 import { recordMessageStatus } from "@/db/ops/message-status";
 import {
   CHECK_VIOLATION,
@@ -773,9 +774,9 @@ describe("BOT outbound dispatch", () => {
   });
 
   // ------------------------------------------------------------------------------------------------ acceptance retry
-  describe("acceptance-record retry (RT1-RT6, RT8, RT9): database-only, bounded, fenced", () => {
-    /** Raises `code` from inside the record transaction (on the message wamid update) the first `n` times. */
-    async function injectRecordFault(code: string, n: number) {
+  describe("acceptance-record retry (RT1-RT9): database-only, bounded, fenced", () => {
+    /** Raises `code` on the wamid update, or at COMMIT through a deferred trigger, the first `n` times. */
+    async function injectRecordFault(code: string, n: number, deferred = false) {
       await q("create table test_fault_config (code text not null, n int not null)");
       await q("insert into test_fault_config values ($1, $2)", [code, n]);
       await q("create sequence test_record_faults");
@@ -790,13 +791,16 @@ describe("BOT outbound dispatch", () => {
           return new;
         end $$`);
       await q(
-        "create trigger test_record_fault before update of wamid on messages for each row when (new.wamid is not null) execute function test_record_fault()",
+        deferred
+          ? "create constraint trigger test_record_fault after update on messages deferrable initially deferred for each row when (new.wamid is not null and old.wamid is distinct from new.wamid) execute function test_record_fault()"
+          : "create trigger test_record_fault before update of wamid on messages for each row when (new.wamid is not null) execute function test_record_fault()",
       );
     }
     async function run(o: {
       origin?: "BOT" | "STAFF";
       code: string;
       n: number;
+      deferred?: boolean;
       hook?: (attempt: number, outcome: string | null, requestId: string) => Promise<void>;
     }) {
       let requestId: string;
@@ -816,7 +820,7 @@ describe("BOT outbound dispatch", () => {
         requestId = x.r.requestId;
         conversationId = x.s.student.conversation.id;
       }
-      await injectRecordFault(o.code, o.n);
+      await injectRecordFault(o.code, o.n, o.deferred);
       const attempts: Array<[number, string | null]> = [];
       const worker = createWorkerDatabase(t.url, {
         maxConnections: 3,
@@ -908,6 +912,195 @@ describe("BOT outbound dispatch", () => {
       const r = await run({ code: "23505", n: 1 });
       expect(r.attempts).toEqual([[1, "23505"]]);
       expect(r.outcome).toBe("unknown");
+    });
+
+    const requestLogs = (requestId: string) =>
+      vi
+        .mocked(console.log)
+        .mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((log) => log.outbound_request_id === requestId);
+
+    async function assertSingleRequestAndMessage(requestId: string) {
+      const r = await row(requestId);
+      expect(r.attempt_count).toBe(1);
+      expect(
+        (
+          await q("select id from outbound_requests where conversation_id = $1", [
+            r.conversation_id,
+          ])
+        ).rows,
+      ).toEqual([{ id: requestId }]);
+      expect(
+        (
+          await q("select id from messages where conversation_id = $1 and direction = 'OUTBOUND'", [
+            r.conversation_id,
+          ])
+        ).rows,
+      ).toEqual([{ id: r.message_id }]);
+      expect(
+        requestLogs(requestId).filter((log) => log.webhook_event === "outbound.record_retry"),
+      ).toEqual([]);
+    }
+
+    async function assertRetryPoolClosed() {
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const { rows } = await q(
+          "select pid from pg_stat_activity where datname = current_database() and application_name = 'test-08d-retry'",
+        );
+        if (rows.length === 0) return;
+        if (Date.now() > deadline) throw new Error("acceptance retry pool leaked a backend");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    it.each([
+      { label: "RT7a", code: "40001", origin: "BOT" as const },
+      { label: "RT7b", code: "40P01", origin: "BOT" as const },
+      { label: "RT7c", code: "40001", origin: "STAFF" as const },
+    ])(
+      "$label: $origin COMMIT raises $code after the body; rollback, no retry or resend",
+      async ({ code, origin }) => {
+        let observedRollback = false;
+        const r = await run({
+          origin,
+          code,
+          n: 1,
+          deferred: true,
+          hook: async (attempt, outcome, requestId) => {
+            expect([attempt, outcome]).toEqual([1, code]);
+            // The deferred trigger runs at COMMIT, not on the wamid statement. Observe before fallback.
+            const beforeFallback = await row(requestId);
+            expect(beforeFallback).toMatchObject({ state: "SENDING", accepted_at: null });
+            expect((await messageOf(beforeFallback.message_id)).wamid).toBeNull();
+            expect(
+              (await conversationOf(beforeFallback.conversation_id)).last_outbound_at,
+            ).toBeNull();
+            observedRollback = true;
+          },
+        });
+        expect(observedRollback).toBe(true);
+        expect(r.attempts).toEqual([[1, code]]);
+        expect((await q("select last_value::int n from test_record_faults")).rows).toEqual([
+          { n: 1 },
+        ]);
+        expect(r.outcome).toBe("unknown");
+        expect(await row(r.requestId)).toMatchObject({
+          origin,
+          state: "UNKNOWN_OUTCOME",
+          failure_code: "accepted_but_not_recorded",
+          accepted_at: null,
+        });
+        expect(r.transport.calls).toHaveLength(1);
+        await assertSingleRequestAndMessage(r.requestId);
+        await assertRetryPoolClosed();
+      },
+    );
+
+    it("RT7b fence: COMMIT rollback followed by recovery cannot be overwritten by fallback", async () => {
+      let recovered: Record<string, unknown> | undefined;
+      const r = await run({
+        code: "40P01",
+        n: 1,
+        deferred: true,
+        hook: async (_attempt, outcome, requestId) => {
+          expect(outcome).toBe("40P01");
+          expect((await row(requestId)).state).toBe("SENDING");
+          await q(
+            "update outbound_requests set state = 'UNKNOWN_OUTCOME', failure_code = 'process_died_after_dispatch_start', finished_at = now() where id = $1",
+            [requestId],
+          );
+          recovered = await row(requestId);
+        },
+      });
+      expect(recovered).toBeDefined();
+      expect(r.attempts).toEqual([[1, "40P01"]]);
+      expect(r.outcome).toBe("fence_lost");
+      expect(await row(r.requestId)).toEqual(recovered);
+      expect(r.transport.calls).toHaveLength(1);
+      await assertSingleRequestAndMessage(r.requestId);
+      await assertRetryPoolClosed();
+    });
+
+    it("RT7d: the server terminates the connection during COMMIT; rollback and fresh-connection fallback", async () => {
+      let observedRollback = false;
+      const r = await run({
+        code: "TERMINATE",
+        n: 1,
+        deferred: true,
+        hook: async (attempt, outcome, requestId) => {
+          expect(attempt).toBe(1);
+          // Drizzle's failed ROLLBACK can replace the termination SQLSTATE with a driver error.
+          expect(outcome === null || /^(08|57)/.test(outcome)).toBe(true);
+          const beforeFallback = await row(requestId);
+          expect(beforeFallback).toMatchObject({ state: "SENDING", accepted_at: null });
+          expect((await messageOf(beforeFallback.message_id)).wamid).toBeNull();
+          observedRollback = true;
+        },
+      });
+      expect(observedRollback).toBe(true);
+      expect(r.attempts).toHaveLength(1);
+      expect((await q("select last_value::int n from test_record_faults")).rows).toEqual([
+        { n: 1 },
+      ]);
+      expect(r.outcome).toBe("unknown");
+      expect(await row(r.requestId)).toMatchObject({
+        state: "UNKNOWN_OUTCOME",
+        failure_code: "accepted_but_not_recorded",
+        accepted_at: null,
+      });
+      expect(r.transport.calls).toHaveLength(1);
+      await assertSingleRequestAndMessage(r.requestId);
+      await assertRetryPoolClosed();
+    });
+
+    it("RT7e: COMMIT succeeds but its acknowledgement is lost; ACCEPTED survives the fenced fallback", async () => {
+      const { r } = await botRequest();
+      const transport = new FakeTransport().next(accepted("wamid.RT7e.1"));
+      const { claim } = await claimNext(deps(transport));
+      expect(claim).toMatchObject({ requestId: r.requestId, origin: "BOT" });
+      const faulty = lostCommitAck(t);
+      const attempts: Array<[number, string | null]> = [];
+      let committed: Record<string, unknown> | undefined;
+      try {
+        faulty.arm(async () => {
+          // A separate pool sees both writes BEFORE the test client loses the acknowledgement.
+          committed = await row(r.requestId);
+          expect(committed).toMatchObject({ state: "ACCEPTED", failure_code: null });
+          expect((await messageOf(r.messageId)).wamid).toBe("wamid.RT7e.1");
+        });
+        const outcome = await executeClaim(
+          deps(transport, {
+            db: faulty.db as never,
+            onRecordAttempt: (attempt, state) => void attempts.push([attempt, state]),
+          }),
+          claim!,
+        );
+        expect(faulty.injected).toBe(1);
+        expect(attempts).toEqual([[1, "08006"]]);
+        expect(outcome).toBe("fence_lost");
+        expect(await row(r.requestId)).toEqual(committed);
+        expect((await messageOf(r.messageId)).wamid).toBe("wamid.RT7e.1");
+        expect(transport.calls).toHaveLength(1);
+        expect(faulty.statements.filter((text) => /^begin$/i.test(text))).toHaveLength(1);
+        expect(faulty.statements.filter((text) => /^commit$/i.test(text))).toHaveLength(1);
+        expect(faulty.statements.filter((text) => /^rollback$/i.test(text))).toHaveLength(1);
+        await assertSingleRequestAndMessage(r.requestId);
+        // Characterize the suspected logging defect without changing production behavior.
+        expect(
+          requestLogs(r.requestId).filter(
+            (log) => log.webhook_event === "outbound.unknown_outcome",
+          ),
+        ).toEqual([
+          expect.objectContaining({ outcome: "failure", reason: "accepted_but_not_recorded" }),
+        ]);
+        expect(faulty.checkedOut).toBe(0);
+        expect(faulty.waiting).toBe(0);
+        expect((await faulty.db.execute("select 1 as ok")).rows).toEqual([{ ok: 1 }]);
+        expect(faulty.checkedOut).toBe(0);
+      } finally {
+        await faulty.close();
+      }
     });
 
     it("RT8: a retry never duplicates status reconciliation (an early status links exactly once)", async () => {

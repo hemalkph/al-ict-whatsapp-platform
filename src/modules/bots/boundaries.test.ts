@@ -157,7 +157,7 @@ describe("bots module boundaries (08A, 08B)", () => {
     }
   });
 
-  it("leaves migrations 0000-0007 byte-for-byte unchanged; 0008 (bot outbound dispatch) is the latest", () => {
+  it("leaves migrations 0000-0008 byte-for-byte unchanged; 0008 (bot outbound dispatch) is the latest", () => {
     const repo = join(root, "../../..");
     const dir = join(repo, "src/db/migrations");
     const migrations = readdirSync(dir)
@@ -167,7 +167,7 @@ describe("bots module boundaries (08A, 08B)", () => {
       createHash("sha256")
         .update(readFileSync(join(dir, f)))
         .digest("hex");
-    expect(Object.fromEntries(migrations.slice(0, 8).map((f) => [f, sha(f)]))).toEqual({
+    expect(Object.fromEntries(migrations.map((f) => [f, sha(f)]))).toEqual({
       "0000_init_foundation_schema.sql":
         "f32afe09d834c149dd7d1405ae1d5d4b4392b73b2025d5fc0d3b19e6030ccb8b",
       "0001_auth_and_access_foundation.sql":
@@ -183,6 +183,8 @@ describe("bots module boundaries (08A, 08B)", () => {
       "0006_leads_lifecycle_and_attribution_integrity.sql":
         "27dd6768054d0386418281f8c094ed21259610370343d868104229d4ae4f9bd4",
       "0007_bot_foundation.sql": "98232660a569710ca1dcfe89ce4c59d6d112a9cdf5cb0da25d365e2376dcf6b2",
+      "0008_bot_outbound_dispatch.sql":
+        "db4b6428481c5b5e4445832534e2a845f769595f82b332dbb1a2171977fac465",
     });
     expect(migrations.at(-1)).toBe("0008_bot_outbound_dispatch.sql");
     expect(migrations).toHaveLength(9);
@@ -270,12 +272,21 @@ describe("ADR 0017 stays in step with the code", () => {
     for (const r of HANDOVER_REASON_CODES) expect(adr, r).toContain(r);
   });
 
-  it("records the owner decisions and keeps the P2 acceptance-recording finding OPEN", () => {
+  it("records owner-reported approval, the reviewed P2 closure and the historical finding", () => {
+    const status = adr.split("\n").find((line) => line.startsWith("Status:"));
+    expect(status).toMatch(
+      /^Status: Accepted for Phase 08A .*independently approved, owner-reported/,
+    );
+    expect(status).not.toMatch(/awaiting|not approved/i);
     expect(adr).toMatch(/Owner decisions confirmed for 08A/);
-    expect(adr).toMatch(/P2 concurrency finding/);
-    expect(adr).toMatch(/\*\*OPEN\*\*|It is \*\*OPEN\*\*/);
-    expect(adr).toMatch(/MUST be resolved before production sign-off/);
-    expect(adr).not.toMatch(/P2[^.]*\b(is|was|has been) (resolved|closed|fixed)\b/i);
+    expect(adr).toContain(
+      "Phase 08D Stop/acceptance deadlock P2 CLOSED for the reviewed implementation",
+    );
+    expect(adr).toMatch(/At the architecture\/08A checkpoint, .*finding was OPEN/);
+    expect(adr).toContain("Phase 08A did not modify or resolve dispatcher concurrency");
+    expect(adr).toContain("three Phase 08D testing conditions are now CLOSED");
+    expect(adr).toContain("post-final-authorization limitation");
+    expect(adr).toContain("No live automation is authorized");
   });
 });
 
@@ -294,13 +305,31 @@ describe("ADR 0018 stays in step with the engine", () => {
     expect(adr).toMatch(/4,096 UTF-16 code units/);
   });
 
-  it("records the owner decisions and keeps the acceptance-recording versus Stop blocker OPEN", () => {
+  it("records owner-reported approval, historical P2 context and all three testing-condition closures", () => {
+    const status = adr.split("\n").find((line) => line.startsWith("Status:"));
+    expect(status).toMatch(
+      /^Status: Accepted for Phase 08B .*independently approved, owner-reported/,
+    );
+    expect(status).not.toMatch(/awaiting|not approved/i);
     expect(adr).toMatch(/routes to `errorNodeId` \(owner decision\)/);
     expect(adr).toMatch(/Missing variables are strict \(owner decision\)/);
-    expect(adr).toMatch(/is \*\*OPEN\*\*/);
-    expect(adr).toMatch(
-      /MUST be resolved, and proven with disposable PostgreSQL concurrency tests/,
+    expect(adr).toContain(
+      "Phase 08D Stop/acceptance deadlock P2 CLOSED for the reviewed implementation",
     );
-    expect(adr).not.toMatch(/blocker[^.]*\b(is|was|has been) (resolved|closed|fixed)\b/i);
+    expect(adr).toMatch(/At the 08B checkpoint, .*finding was OPEN/);
+    expect(adr).toContain("The pure engine did not resolve it");
+    expect(adr).toContain("three Phase 08D testing conditions are now CLOSED");
+    expect(adr).toContain("post-final-authorization limitation remains accepted");
+    expect(adr).toContain("No live automation is authorized");
+    const dispatchAdr = read(join(root, "../../../docs/adr/0020-bot-outbound-dispatch.md"));
+    expect(dispatchAdr).toMatch(
+      /\| 08D-T1: migration 0008 raw-SQL constraint regressions\s+\| \*\*CLOSED\*\*\s+\|/,
+    );
+    expect(dispatchAdr).toMatch(
+      /\| 08D-T2: real acceptance-wrapper COMMIT-stage failure regressions\s+\| \*\*CLOSED\*\*\s+\|/,
+    );
+    expect(dispatchAdr).toMatch(
+      /\| 08D-T3: Inbox interactive-rendering regressions\s+\| \*\*CLOSED\*\*\s+\|/,
+    );
   });
 });

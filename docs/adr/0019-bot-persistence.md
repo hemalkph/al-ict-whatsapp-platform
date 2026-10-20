@@ -1,6 +1,8 @@
 # ADR 0019: Bot persistence, versioning and state controls (Phase 08C)
 
-Status: Accepted for Phase 08C (implemented; awaiting independent database and code review, not approved). Implements the 08C checkpoint of the Phase 08-0 V3.2 proposal (sections F, G, J.1, K, K.10, K.11, L, P) following the corrected, independently reviewed 08C implementation plan. Builds on [ADR 0011](0011-database-foundation-conventions.md), [ADR 0012](0012-authentication-and-authorization.md), [ADR 0017](0017-bot-flow-contract.md) and [ADR 0018](0018-bot-execution-engine.md).
+Status: Accepted for Phase 08C (implemented; independently approved, owner-reported). Implements the 08C checkpoint of the Phase 08-0 V3.2 proposal (sections F, G, J.1, K, K.10, K.11, L, P) following the corrected, independently reviewed 08C implementation plan. Builds on [ADR 0011](0011-database-foundation-conventions.md), [ADR 0012](0012-authentication-and-authorization.md), [ADR 0017](0017-bot-flow-contract.md) and [ADR 0018](0018-bot-execution-engine.md).
+
+Review reconciliation (Phase 08E-0.1): the earlier awaiting-review status is superseded by the owner's report of independent approval. Reviewer identity, approval URL and exact review date were not supplied; see the [review status and evidence record](../PRE_PRODUCTION_BLOCKERS.md#phase-08-review-status-and-outstanding-testing-conditions). Review approval is distinct from testing-condition closure (all three Phase 08D conditions are now CLOSED following owner-reported final Phase 08E-0 independent acceptance) and from production or automation authorization.
 
 ## Context
 
@@ -56,7 +58,7 @@ A session that starts at END or HANDOVER is inserted live (`ACTIVE`) and made te
 
 Stop Active Sessions (per deployment): `PAUSED`, epoch + 1, every live session `HANDED_OVER` (`system_handover`, `operator_stop`) with `output_suppressed_at` set, `awaiting` and tokens cleared, a `HANDED_OVER` session event and a `SESSIONS_STOPPED` deployment event. Emergency Stop: every `ACTIVE` / `PAUSED` deployment of the organization (optionally one account) `STOPPED`, epoch + 1, sessions as above; permission `bot.emergency_stop`. Retire: sessions stopped first, then `RETIRED`, epoch + 1. Each needs a typed confirmation matching the current state (live-session or deployment count; the bot key to retire; the phrase `EMERGENCY STOP`).
 
-**Not in 08C:** suppressing `QUEUED` BOT requests (`QUEUED -> HELD`) needs the BOT columns of migration 0008 and belongs to 08D, together with the open concurrency correction below. No BOT request can exist before 08D (`requests_suppressed` is always 0).
+**Not in 08C:** suppressing `QUEUED` BOT requests (`QUEUED -> HELD`) needs the BOT columns of migration 0008 and belongs to 08D, together with the concurrency correction tracked below (now owner-reported CLOSED for 08D). No BOT request can exist before 08D (`requests_suppressed` is always 0 at the 08C checkpoint).
 
 ### 8. Privacy redaction (V3.2 K.11)
 
@@ -78,11 +80,11 @@ Stop Active Sessions (per deployment): `PAUSED`, epoch + 1, every live session `
 4. Administration is command-line only in 08C, acting as a real, re-validated member, every change audited.
 5. The database stamps `started_at` and `ended_at` (and deployment and version times).
 
-## Open production blocker: acceptance-recording versus Stop suppression (P2)
+## Historical concurrency finding: Phase 08D Stop/acceptance P2 CLOSED
 
-The acceptance-recording versus Stop suppression concurrency finding is **OPEN** and production-blocking. Its correction needs a compatible non-blocking suppression protocol and the three-party (suppression, claim, acceptance) PostgreSQL regression, in 08D, before automated sending is possible. 08C implements only Stop's deployment and session state changes and does not resolve it. No live automation may be enabled.
+At the 08C checkpoint, this finding was OPEN and production-blocking: 08C implemented only Stop's deployment/session state changes. The required nonblocking suppression protocol and three-party regression belonged to 08D, not to this persistence approval.
 
-**Phase 08D update:** the correction (a `FOR UPDATE OF r SKIP LOCKED` suppression primitive) and its three-participant READ COMMITTED regression are implemented (ADR 0020). The finding stays **OPEN and production-blocking until those tests pass on PostgreSQL and the correction is independently reviewed.**
+**Current owner-reported status:** the `FOR UPDATE OF r SKIP LOCKED` correction and three-participant READ COMMITTED regression are part of the independently reviewed Phase 08D implementation ([ADR 0020](0020-bot-outbound-dispatch.md)); the **Stop/acceptance deadlock P2 is CLOSED for that reviewed implementation**. The three Phase 08D testing conditions are now CLOSED following final Phase 08E-0 independent acceptance (owner-reported), with evidence tracked separately in the blocker register. This does not claim closure of Phase 08E pairings, the post-final-authorization window, or other production limitations. No live automation may be enabled.
 
 ## Consequences
 

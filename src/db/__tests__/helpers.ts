@@ -21,8 +21,9 @@ import * as schema from "../schema";
 // variables. So the string must be a plain postgres(ql)://user[:password]@local-host[:port]/postgres with no query, fragment
 // or whitespace; pg's own ConnectionParameters must then resolve both the string and the explicit config built from it to
 // that same host, port, database and user; and the pool is created from that explicit config (no connection string), so
-// what was validated is exactly what connects. Every check runs before any client or pool exists. Error messages never
-// include the connection string or credentials.
+// what was validated is exactly what connects. These URL/driver checks run before any client or pool exists. The validated
+// maintenance connection must then report PostgreSQL 17 before CREATE DATABASE. Refusal closes its pool. Error messages
+// never include the connection string or credentials.
 export const PERSISTENT_DATABASE = "al_ict_whatsapp";
 export const DISPOSABLE_DATABASE_NAME = /^al_ict_(test|e2e)_[0-9a-f]{12}$/;
 export const MAINTENANCE_DATABASE = "postgres";
@@ -230,7 +231,18 @@ export async function createTestDatabase(
   const disposable = disposableTarget(adminTarget, name);
   const url = disposable.url;
   const admin = ownedPool(adminTarget, 1);
-  await admin.pool.query(`CREATE DATABASE ${name}`);
+  try {
+    const result = await admin.pool.query<{ server_version_num: string }>(
+      "SHOW server_version_num",
+    );
+    const version = Number(result.rows[0]?.server_version_num);
+    if (!Number.isInteger(version) || version < 170000 || version >= 180000)
+      throw refuse("PostgreSQL 17 is required for the isolated test server");
+    await admin.pool.query(`CREATE DATABASE ${name}`);
+  } catch (error) {
+    await admin.end();
+    throw error;
+  }
   const owned = ownedPool(disposable.target, 10, options.sessionTimeouts);
   const pool = owned.pool;
   const db = drizzle(pool, { schema });

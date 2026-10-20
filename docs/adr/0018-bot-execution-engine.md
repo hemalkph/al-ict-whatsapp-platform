@@ -1,6 +1,8 @@
 # ADR 0018: Pure bot execution engine and offline simulator (Phase 08B)
 
-Status: Accepted for Phase 08B (implemented; independent review corrections applied, awaiting re-review, not approved). Builds on [ADR 0017](0017-bot-flow-contract.md) (the flow contract and validator, independently approved), [ADR 0007](0007-deterministic-bot.md) and [ADR 0014](0014-whatsapp-outbound-messaging.md). It implements the 08B checkpoint of the Phase 08-0 V3.2 proposal (section P), following its session state machine (section G) and terminal-notice design (section I.5).
+Status: Accepted for Phase 08B (implemented; independent review corrections applied and independently approved, owner-reported). Builds on [ADR 0017](0017-bot-flow-contract.md) (the flow contract and validator, independently approved), [ADR 0007](0007-deterministic-bot.md) and [ADR 0014](0014-whatsapp-outbound-messaging.md). It implements the 08B checkpoint of the Phase 08-0 V3.2 proposal (section P), following its session state machine (section G) and terminal-notice design (section I.5).
+
+Review reconciliation (Phase 08E-0.1): the earlier awaiting-re-review status is superseded by the owner's report of independent approval. Reviewer identity, approval URL and exact review date were not supplied; see the [review status and evidence record](../PRE_PRODUCTION_BLOCKERS.md#phase-08-review-status-and-outstanding-testing-conditions). Review approval does not authorize production or live automation.
 
 ## Context
 
@@ -70,9 +72,9 @@ From V3.2 section E (`ENGINE_BUDGETS`): at most 20 nodes entered per step, 200 p
 4. `stepSeq` advances when nodes run, a prompt is re-sent or the session ends; recording the acceptance of a prompt alone does not advance it.
 5. An error-driven termination (any `EngineErrorCode` routed to `errorNodeId`, including `SESSION_INVALID`) renders no final message and produces no terminal notice: the error node's configured message is skipped (`noticeSkipped = ENGINE_ERROR`), `terminalNoticeStepSeq` stays null, and the session keeps its error provenance (`endReason = error`; `handoverReason = engine_error`, a system reason, when the error node is a HANDOVER). A session found inconsistent is never repaired and its values are never used: its variables are discarded as it ends.
 
-## Open production blocker: acceptance-recording versus Stop suppression (P2)
+## Historical concurrency finding: Phase 08D Stop/acceptance P2 CLOSED
 
-The acceptance-recording versus Stop suppression concurrency finding (the dispatcher's `ACCEPTED` record against the Stop's suppression of `QUEUED` BOT requests) is **OPEN**. It is an owner-accepted exception for development only. It MUST be resolved, and proven with disposable PostgreSQL concurrency tests, before production sign-off and before any live WhatsApp automation. Phase 08B does not touch the dispatcher, request states or any transaction and does not resolve it; its green tests say nothing about it.
+At the 08B checkpoint, the acceptance-recording versus Stop suppression finding was OPEN, an exception for development only pending a correction and independent review. The pure engine did not resolve it. The owner now reports the **Phase 08D Stop/acceptance deadlock P2 CLOSED for the reviewed implementation** ([ADR 0020](0020-bot-outbound-dispatch.md)); this is not inferred from green engine tests. The three Phase 08D testing conditions are now CLOSED following final Phase 08E-0 independent acceptance (owner-reported); other Phase 08E concurrency coverage remains required, and the post-final-authorization limitation remains accepted. No live automation is authorized.
 
 ## Consequences
 

@@ -1,15 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // The disposable-database safety preflight (Phase 08C, ADR 0019). No connection is ever made: pg's Pool (and Client) are
-// replaced by spies that throw, so a URL that slipped past the preflight would fail loudly with "CONNECTION ATTEMPTED" instead
-// of reaching a server. The driver's own ConnectionParameters (which opens nothing) stays real: it is what the preflight checks.
+// replaced by spies that throw unless a test supplies a fake server response. Neither mode reaches a server. The driver's
+// own ConnectionParameters (which opens nothing) stays real: it is what the preflight checks.
 
 const attempts = vi.hoisted(() => [] as unknown[]);
+const server = vi.hoisted(() => ({ enabled: false, query: vi.fn(), end: vi.fn() }));
 vi.mock("pg", async (importOriginal) => {
   const real = await importOriginal<typeof import("pg")>();
   const refuse = function (config: unknown) {
     attempts.push(config);
-    throw new Error("CONNECTION ATTEMPTED");
+    if (!server.enabled) throw new Error("CONNECTION ATTEMPTED");
+    return {
+      on() {
+        return this;
+      },
+      query: server.query,
+      end: server.end,
+    };
   } as unknown as typeof real.Pool;
   return {
     ...real,
@@ -33,6 +41,9 @@ const LOCAL = "postgresql://postgres:postgres@localhost:5432/postgres";
 afterEach(() => {
   vi.unstubAllEnvs();
   attempts.length = 0;
+  server.enabled = false;
+  server.query.mockReset();
+  server.end.mockReset();
 });
 
 const refused = (raw: string | undefined) => {
@@ -221,5 +232,68 @@ describe("database test harness preflight", () => {
         max: 1,
       },
     ]);
+  });
+
+  it.each(["160000", "180000", "invalid", "", undefined, "170000.5"])(
+    "refuses server version %s before creating a database and closes the admin pool",
+    async (version) => {
+      vi.stubEnv("TEST_DATABASE_ADMIN_URL", LOCAL);
+      server.enabled = true;
+      server.query.mockResolvedValue({ rows: [{ server_version_num: version }] });
+      await expect(createTestDatabase()).rejects.toThrow(/PostgreSQL 17 is required/);
+      expect(server.query.mock.calls).toEqual([["SHOW server_version_num"]]);
+      expect(attempts).toHaveLength(1); // only the validated maintenance pool, no disposable pool
+      expect(server.end).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["170000", "170015", "179999"])(
+    "accepts PostgreSQL 17 version %s before creating the disposable database",
+    async (version) => {
+      vi.stubEnv("TEST_DATABASE_ADMIN_URL", LOCAL);
+      server.enabled = true;
+      server.query.mockImplementation(async (text: string) => {
+        if (text === "SHOW server_version_num") return { rows: [{ server_version_num: version }] };
+        if (text.startsWith("CREATE DATABASE")) expect(attempts).toHaveLength(1);
+        return { rows: [], rowCount: 0 };
+      });
+      const t = await createTestDatabase({ migrate: false });
+      try {
+        expect(server.query.mock.calls.slice(0, 2)).toEqual([
+          ["SHOW server_version_num"],
+          [`CREATE DATABASE ${t.name}`],
+        ]);
+        expect(attempts).toHaveLength(2);
+        expect(t.target.database).toMatch(DISPOSABLE_DATABASE_NAME);
+        expect(t.target.database).not.toBe(PERSISTENT_DATABASE);
+      } finally {
+        await t.close();
+      }
+      expect(server.end).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("fails closed and closes the admin pool if the server version cannot be read", async () => {
+    vi.stubEnv("TEST_DATABASE_ADMIN_URL", LOCAL);
+    server.enabled = true;
+    const failure = new Error("version query failed");
+    server.query.mockRejectedValue(failure);
+    await expect(createTestDatabase()).rejects.toBe(failure);
+    expect(server.query.mock.calls).toEqual([["SHOW server_version_num"]]);
+    expect(attempts).toHaveLength(1);
+    expect(server.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the admin pool if creation fails after the version check", async () => {
+    vi.stubEnv("TEST_DATABASE_ADMIN_URL", LOCAL);
+    server.enabled = true;
+    const failure = new Error("database creation failed");
+    server.query.mockResolvedValueOnce({ rows: [{ server_version_num: "170015" }] });
+    server.query.mockRejectedValueOnce(failure);
+    await expect(createTestDatabase()).rejects.toBe(failure);
+    expect(server.query.mock.calls[0]).toEqual(["SHOW server_version_num"]);
+    expect(server.query.mock.calls[1]?.[0]).toMatch(/^CREATE DATABASE al_ict_test_[0-9a-f]{12}$/);
+    expect(attempts).toHaveLength(1);
+    expect(server.end).toHaveBeenCalledTimes(1);
   });
 });

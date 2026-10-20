@@ -1,6 +1,8 @@
 # ADR 0017: Bot flow contract and validator (Phase 08A)
 
-Status: Accepted for Phase 08A (implemented; awaiting independent code and test review, not approved). Builds on [ADR 0007](0007-deterministic-bot.md) (deterministic bot, no arbitrary code), [ADR 0011](0011-database-foundation-conventions.md) and [ADR 0014](0014-whatsapp-outbound-messaging.md). The architecture it implements is the Phase 08-0 V3.2 proposal, section E (the flow contract), with the checkpoint order of its section P.
+Status: Accepted for Phase 08A (implemented; independently approved, owner-reported). Builds on [ADR 0007](0007-deterministic-bot.md) (deterministic bot, no arbitrary code), [ADR 0011](0011-database-foundation-conventions.md) and [ADR 0014](0014-whatsapp-outbound-messaging.md). The architecture it implements is the Phase 08-0 V3.2 proposal, section E (the flow contract), with the checkpoint order of its section P.
+
+Review reconciliation (Phase 08E-0.1): the earlier awaiting-review status is superseded by the owner's report of independent approval. Reviewer identity, approval URL and exact review date were not supplied; see the [review status and evidence record](../PRE_PRODUCTION_BLOCKERS.md#phase-08-review-status-and-outstanding-testing-conditions). This records review approval, not production or automation authorization.
 
 ## Context
 
@@ -204,9 +206,9 @@ Syntax of the V3.2 contract, `b1.<promptToken>.<optionKey>`: `^b1\.[A-Za-z0-9_-]
 5. The HANDOVER reason list (section 3).
 6. Bidirectional overrides are refused, and the https review warning is emitted for every https link.
 
-## Open production blocker: acceptance-recording concurrency (P2)
+## Historical concurrency finding: Phase 08D Stop/acceptance P2 CLOSED
 
-The independent review of the V3.2 architecture left one **P2 concurrency finding** on the path that records an outbound request's acceptance (the dispatcher's `ACCEPTED` record interacting with other transactions on the same conversation). It was explicitly **deferred from development approval and MUST be resolved before production sign-off.** It is **OPEN**. Phase 08A does not touch the dispatcher or any outbound code and does not resolve it; passing 08A tests says nothing about it. V3.2 specifies acceptance-recording concurrency tests (R3-L) for checkpoints 08D and 08E; they are necessary but this ADR does not claim they are sufficient to close the finding. It must not be treated as closed by any green test suite.
+At the architecture/08A checkpoint, the acceptance-recording concurrency finding was OPEN and deferred from development approval until corrected and independently reviewed. Phase 08A did not modify or resolve dispatcher concurrency; passing its tests was not closure evidence. The owner now reports the **Phase 08D Stop/acceptance deadlock P2 CLOSED for the reviewed implementation** ([ADR 0020](0020-bot-outbound-dispatch.md)). The three Phase 08D testing conditions are now CLOSED following final Phase 08E-0 independent acceptance (owner-reported). This does not close other acceptance-recording pairings required in Phase 08E or the post-final-authorization limitation. No live automation is authorized.
 
 ## Consequences
 

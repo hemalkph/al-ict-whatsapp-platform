@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { INBOX_DEFAULTS, readInboxConfig } from "./config";
 import { decodeCursor, encodeCursor } from "./cursor";
 import {
+  HOLD_REASONS,
   contactLabel,
   deliveryView,
   describeMessage,
@@ -315,5 +316,397 @@ describe("polling configuration", () => {
       expect(readInboxConfig({ INBOX_POLL_LIST_MS: bad, INBOX_POLL_CHAT_MS: bad })).toEqual(
         INBOX_DEFAULTS,
       );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Phase 08E-0.4: how interactive messages are shown to staff (closes the third outstanding Phase 08D condition together with
+// interactive.db.test.ts). Pure display functions only; the database side reads real BOT requests. Nothing here changes the
+// production display code: where it behaves in a way staff may find surprising, the test pins the CURRENT output and says so.
+
+describe("interactive messages in the Inbox: what staff see", () => {
+  // Realistic ids and a token: none of them may ever be shown (an id is `b1.<22-character token>.<option key>`).
+  const TOKEN = "AbCdEfGhIjKlMnOpQrStUv";
+  const rid = (key: string) => `b1.${TOKEN}.${key}`;
+  const buttons = {
+    v: 1,
+    kind: "buttons",
+    body: "Choose a topic",
+    footer: "Reply to continue",
+    buttons: [
+      { id: rid("fees"), title: "Fees" },
+      { id: rid("timetable"), title: "Timetable" },
+      { id: rid("staff"), title: "Talk to staff" },
+    ],
+  };
+  const list = {
+    v: 1,
+    kind: "list",
+    body: "Pick a class",
+    footer: "Tap Menu",
+    buttonLabel: "Menu",
+    sections: [
+      {
+        title: "Menu",
+        rows: [
+          { id: rid("theory"), title: "ICT Theory", description: "Tuesday evening" },
+          { id: rid("practical"), title: "ICT Practical" },
+        ],
+      },
+    ],
+  };
+  const sent = (body: string | null, interactive: unknown) =>
+    describeMessage({ type: "INTERACTIVE", body, content: { interactive } });
+
+  describe("a bot's outbound buttons and list", () => {
+    it("buttons: the body, then the option titles; footer and ids are never shown", () => {
+      expect(sent("Choose a topic", buttons)).toEqual({
+        text: "Choose a topic · Fees / Timetable / Talk to staff",
+        placeholder: "Interactive message",
+      });
+    });
+
+    it("a list: the body, then every row title across sections; descriptions, section titles, footer and button label are not shown", () => {
+      expect(sent("Pick a class", list)).toEqual({
+        text: "Pick a class · ICT Theory / ICT Practical",
+        placeholder: "Interactive message",
+      });
+      const two = {
+        ...list,
+        sections: [
+          { title: "Theory", rows: [{ id: rid("t1"), title: "Paper 1" }] },
+          { title: "Practical", rows: [{ id: rid("p1"), title: "Lab A" }] },
+        ],
+      };
+      expect(sent("Pick", two).text).toBe("Pick · Paper 1 / Lab A");
+    });
+
+    it("Sinhala and Tamil titles are kept, including the zero-width joiner Sinhala spelling needs", () => {
+      const sinhala = "ශ්\u200dරී ලංකා";
+      const r = sent("තෝරන්න", {
+        ...buttons,
+        buttons: [
+          { id: rid("a"), title: sinhala },
+          { id: rid("b"), title: "கட்டணம்" },
+        ],
+      });
+      expect(r.text).toBe(`තෝරන්න · ${sinhala} / கட்டணம்`);
+    });
+
+    it("a body-less message shows the options alone, and one with nothing to show has no text at all", () => {
+      expect(sent(null, buttons)).toEqual({
+        text: "Fees / Timetable / Talk to staff",
+        placeholder: "Interactive message",
+      });
+      expect(sent(null, { ...buttons, buttons: [] })).toEqual({
+        text: null,
+        placeholder: "Interactive message",
+      });
+    });
+  });
+
+  describe("a customer's reply", () => {
+    it("a button reply and a list reply show the title the customer tapped, never the id or the description", () => {
+      expect(
+        describeMessage({
+          type: "INTERACTIVE",
+          body: "Fees",
+          content: { subtype: "button_reply", id: rid("fees"), title: "Fees" },
+        }),
+      ).toEqual({ text: "Fees", placeholder: "Interactive reply" });
+      expect(
+        describeMessage({
+          type: "INTERACTIVE",
+          body: "ICT Theory",
+          content: {
+            subtype: "list_reply",
+            id: rid("theory"),
+            title: "ICT Theory",
+            description: "Tuesday evening",
+          },
+        }),
+      ).toEqual({ text: "ICT Theory", placeholder: "Interactive reply" });
+    });
+
+    it("a reply stored without a body falls back to the stored title", () => {
+      expect(
+        describeMessage({
+          type: "INTERACTIVE",
+          body: null,
+          content: { subtype: "button_reply", id: rid("fees"), title: "Fees" },
+        }),
+      ).toEqual({ text: "Fees", placeholder: "Interactive reply" });
+    });
+
+    it("a template quick-reply BUTTON shows its text; its payload (an internal campaign key) is never shown", () => {
+      expect(
+        describeMessage({
+          type: "BUTTON",
+          body: "Yes, I am interested",
+          content: { payload: "CAMPAIGN_4471_YES", text: "Yes, I am interested" },
+        }),
+      ).toEqual({ text: "Yes, I am interested", placeholder: "Button reply" });
+      expect(
+        describeMessage({
+          type: "BUTTON",
+          body: null,
+          content: { payload: "CAMPAIGN_4471_YES", text: "Yes" },
+        }),
+      ).toEqual({ text: "Yes", placeholder: "Button reply" });
+      expect(
+        describeMessage({ type: "BUTTON", body: null, content: { payload: "CAMPAIGN_4471_YES" } }),
+      ).toEqual({ text: null, placeholder: "Button reply" });
+    });
+  });
+
+  describe("malformed and incomplete stored content never throws and never shows raw JSON", () => {
+    it.each([
+      ["no content", null, { text: "Hi", placeholder: "Interactive reply" }],
+      ["a non-object content", "oops", { text: "Hi", placeholder: "Interactive reply" }],
+      [
+        "interactive: a string",
+        { interactive: "oops" },
+        { text: "Hi", placeholder: "Interactive reply" },
+      ],
+      [
+        "interactive: null",
+        { interactive: null },
+        { text: "Hi", placeholder: "Interactive reply" },
+      ],
+      [
+        "interactive: an array",
+        { interactive: ["a"] },
+        { text: "Hi", placeholder: "Interactive reply" },
+      ],
+      [
+        "interactive: a number",
+        { interactive: 42 },
+        { text: "Hi", placeholder: "Interactive reply" },
+      ],
+      ["interactive: {}", { interactive: {} }, { text: "Hi", placeholder: "Interactive message" }],
+      [
+        "buttons that are not a list",
+        { interactive: { buttons: "x" } },
+        { text: "Hi", placeholder: "Interactive message" },
+      ],
+      [
+        "sections that are not a list",
+        { interactive: { sections: "x" } },
+        { text: "Hi", placeholder: "Interactive message" },
+      ],
+      [
+        "buttons holding junk and one valid title",
+        { interactive: { buttons: [1, null, "x", { title: 5 }, { title: "ok" }] } },
+        { text: "Hi · ok", placeholder: "Interactive message" },
+      ],
+      [
+        "sections holding junk and one valid row",
+        { interactive: { sections: [null, 5, { rows: "x" }, { rows: [{ title: "A" }, {}] }] } },
+        { text: "Hi · A", placeholder: "Interactive message" },
+      ],
+    ])("%s", (_name, content, expected) => {
+      const r = describeMessage({ type: "INTERACTIVE", body: "Hi", content });
+      expect(r).toEqual(expected);
+      expect(`${r.text} ${r.placeholder}`).not.toMatch(/[{}[\]]|"|buttons|sections/);
+    });
+
+    // PINNED CURRENT BEHAVIOUR (reported, not changed): a BOT message whose stored `content.interactive` is unusable is
+    // labelled "Interactive reply", the label meant for a CUSTOMER's reply. Unreachable through the approved queue function
+    // (it always stores a valid payload) but reachable for a damaged row.
+    it("pins: an outbound bot message with unusable content is labelled with the customer-reply placeholder", () => {
+      expect(sent("Hi", "oops").placeholder).toBe("Interactive reply");
+    });
+  });
+
+  describe("truncation and control characters", () => {
+    it("an option title is cut to 24 characters (no ellipsis), whitespace collapsed", () => {
+      expect(sent("B", { buttons: [{ title: "T".repeat(40) }] }).text).toBe(
+        `B · ${"T".repeat(24)}`,
+      );
+      expect(sent("B", { buttons: [{ title: "A\n\t  B" }] }).text).toBe("B · A B");
+    });
+
+    it("control characters, bidirectional overrides, the zero-width space and the BOM are removed from titles and body", () => {
+      const dirty = `x${String.fromCharCode(0, 7, 0x1b, 0x202e, 0x2066, 0x200b, 0xfeff)}y`;
+      expect(sent(dirty, { buttons: [{ title: dirty }] }).text).toBe("xy · xy");
+    });
+
+    it("a lone surrogate becomes the replacement character instead of breaking the output", () => {
+      const t = sent("a", { buttons: [{ title: `b${String.fromCharCode(0xd83d)}c` }] }).text!;
+      expect(t).toBe("a · b\ufffdc");
+      expect(t.isWellFormed()).toBe(true);
+    });
+
+    it("the body is cut at 4096 with an ellipsis; the joined option list at 240", () => {
+      const body = sent("x".repeat(5000), buttons).text!;
+      expect(body.startsWith(`${"x".repeat(4095)}…`)).toBe(true);
+      const rows = Array.from({ length: 10 }, (_, i) => ({ title: `R${i}`.padEnd(24, "z") }));
+      const joined = rows.map((r) => r.title).join(" / ");
+      expect(joined.length).toBeGreaterThan(240);
+      expect(sent("Pick", { sections: [{ rows }] }).text).toBe(`Pick · ${joined.slice(0, 240)}`);
+    });
+  });
+
+  describe("nothing internal is exposed", () => {
+    it("no id, token, payload key, campaign key or raw JSON appears in any rendering", () => {
+      const outputs = [
+        sent("Choose a topic", buttons),
+        sent("Pick a class", list),
+        describeMessage({
+          type: "INTERACTIVE",
+          body: "Fees",
+          content: { subtype: "button_reply", id: rid("fees"), title: "Fees" },
+        }),
+        describeMessage({
+          type: "INTERACTIVE",
+          body: "ICT Theory",
+          content: {
+            subtype: "list_reply",
+            id: rid("theory"),
+            title: "ICT Theory",
+            description: "d",
+          },
+        }),
+        describeMessage({
+          type: "BUTTON",
+          body: "Yes",
+          content: { payload: "CAMPAIGN_4471_YES", text: "Yes" },
+        }),
+      ];
+      const text = JSON.stringify(outputs);
+      for (const secret of [
+        TOKEN,
+        "b1.",
+        "CAMPAIGN_4471",
+        'fees"',
+        '"kind"',
+        '"v":',
+        "footer",
+        "Reply to continue",
+      ])
+        expect(text, secret).not.toContain(secret);
+    });
+  });
+});
+
+describe("delivery of a bot's interactive message: every request state and provider status", () => {
+  const view = (o: Partial<Parameters<typeof deliveryView>[0]>) =>
+    deliveryView({
+      requestState: null,
+      holdReason: null,
+      failureCode: null,
+      providerStatus: null,
+      providerErrorCode: null,
+      ...o,
+    });
+
+  it.each([
+    ["QUEUED", null, "QUEUED", "Queued", "neutral"],
+    ["SENDING", null, "SENDING", "Sending…", "neutral"],
+    ["ACCEPTED", null, "ACCEPTED", "Accepted by WhatsApp", "neutral"],
+    ["ACCEPTED", "SENT", "SENT", "Sent", "neutral"],
+    ["ACCEPTED", "DELIVERED", "DELIVERED", "Delivered", "good"],
+    ["ACCEPTED", "READ", "READ", "Read", "good"],
+    ["ACCEPTED", "FAILED", "FAILED", "Delivery failed", "error"],
+    ["REJECTED", null, "REJECTED", "Rejected by WhatsApp", "error"],
+    ["HELD", null, "HELD", "Not sent", "warning"],
+    ["UNKNOWN_OUTCOME", null, "UNKNOWN_OUTCOME", "Outcome unknown", "warning"],
+  ])(
+    "%s with provider status %s shows %s",
+    (requestState, providerStatus, phase, label, severity) => {
+      expect(
+        view({
+          requestState,
+          providerStatus,
+          holdReason: requestState === "HELD" ? "bot_stopped" : null,
+          failureCode: requestState === "REJECTED" ? "invalid_request" : null,
+        }),
+      ).toMatchObject({ phase, label, severity });
+    },
+  );
+
+  // The provider can only report on a message Meta ACCEPTED (the id is stored at acceptance), so these combinations do not
+  // occur in production; the display contract still must never let a provider status override a request that was not accepted.
+  it.each(["QUEUED", "SENDING", "REJECTED", "HELD", "UNKNOWN_OUTCOME"] as const)(
+    "a provider status cannot override %s",
+    (requestState) => {
+      const base = view({ requestState, holdReason: "bot_stopped", failureCode: "x" });
+      for (const providerStatus of ["SENT", "DELIVERED", "READ", "FAILED"])
+        expect(
+          view({ requestState, providerStatus, holdReason: "bot_stopped", failureCode: "x" }),
+        ).toEqual(base);
+    },
+  );
+
+  it("a failed delivery names the WhatsApp error code only, and a rejection a plain reason", () => {
+    expect(
+      view({ requestState: "ACCEPTED", providerStatus: "FAILED", providerErrorCode: "131026" })
+        .detail,
+    ).toBe("WhatsApp error 131026");
+    expect(view({ requestState: "REJECTED", failureCode: "invalid_request" }).detail).toBe(
+      "invalid request",
+    );
+  });
+
+  describe("every reason a bot request can be held", () => {
+    // Codes written by the approved bot dispatch (migration 0008's bot_request_hold_code, the claim, the final authorization
+    // and enqueue) plus the one the 08E reconciler will write (bot_send_deadline, V3.2 N.1), so the display contract is pinned
+    // before the runtime produces it.
+    const SHARED = [
+      "window_closed",
+      "no_inbound",
+      "account_inactive",
+      "contact_archived",
+      "recipient_changed",
+      "identity_ambiguous",
+      "bsuid_send_unavailable",
+      "deadline_passed",
+      "outbound_disabled",
+    ];
+    const BOT_ONLY = [
+      "bot_stopped",
+      "bot_epoch_superseded",
+      "bot_deployment_inactive",
+      "bot_archived",
+      "bot_output_suppressed",
+      "bot_session_ended",
+      "bot_step_superseded",
+      "staff_took_over",
+      "conversation_resolved",
+      "bot_state_unreadable",
+      "bots_runtime_disabled",
+      "payload_invalid",
+      "bot_send_deadline",
+    ];
+
+    it.each(SHARED)("%s uses the curated wording shared with staff messages", (code) => {
+      expect(HOLD_REASONS[code], code).toBeDefined();
+      expect(view({ requestState: "HELD", holdReason: code })).toEqual({
+        phase: "HELD",
+        label: "Not sent",
+        severity: "warning",
+        detail: `Not sent: ${HOLD_REASONS[code]}.`,
+      });
+    });
+
+    // PINNED CURRENT BEHAVIOUR (reported, not changed): the bot-only codes have NO curated wording, so staff see the code with
+    // its underscores replaced by spaces ("Not sent: bot epoch superseded."). Readable, never raw JSON or an id, but jargon.
+    it.each(BOT_ONLY)("%s falls back to the code's words", (code) => {
+      expect(HOLD_REASONS[code]).toBeUndefined();
+      expect(view({ requestState: "HELD", holdReason: code })).toEqual({
+        phase: "HELD",
+        label: "Not sent",
+        severity: "warning",
+        detail: `Not sent: ${code.replace(/_/g, " ")}.`,
+      });
+    });
+
+    it("whatever the code, the held display is a warning that says nothing was sent and exposes no identifier", () => {
+      for (const code of [...SHARED, ...BOT_ONLY]) {
+        const v = view({ requestState: "HELD", holdReason: code });
+        expect(v.detail, code).not.toMatch(/_|b1\.|[0-9a-f]{8}-[0-9a-f]{4}/);
+        expect(v.detail, code).toMatch(/^Not sent: /);
+      }
+    });
   });
 });

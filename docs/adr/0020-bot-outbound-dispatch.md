@@ -1,6 +1,6 @@
 # ADR 0020: Bot outbound dispatch, staff control sequences and the Stop-suppression correction (Phase 08D)
 
-- **Status:** Implemented in Phase 08D; awaiting independent code, database and concurrency review. Not approved.
+- **Status:** Implemented in Phase 08D; independently approved, owner-reported. The reviewed Stop/acceptance deadlock P2 remains CLOSED. Testing conditions 08D-T1/T2/T3 are now CLOSED following the owner-reported final Phase 08E-0 independent acceptance: READY WITH NONBLOCKING CONDITIONS.
 - **Context:** Phase 08-0 architecture V3.2 (sections I, J, K.8, K.10, L, N); the corrected Phase 08D implementation plan
   (`PHASE_08D_IMPLEMENTATION_PLAN.md`, revision 2); ADR 0014 (outbound messaging), ADR 0019 (bot persistence).
 
@@ -97,7 +97,7 @@
 - Takeover acts on **output** in 08D: hold codes `staff_took_over` and `conversation_resolved` at claim and at the final read.
   Handing a session over on a staff action is 08E work.
 
-### Stop suppression (the correction of the open P2)
+### Stop suppression (the correction of the now-closed P2)
 
 - **The finding:** a suppression statement that waits on a request row can close a cycle.
   1. Stop holds the conversation, and its statement saw R as `QUEUED`.
@@ -143,7 +143,7 @@
   - the real-Stop orders O1–O8;
   - the I.3 invariant.
 
-  It **remains OPEN and production-blocking until those tests pass on PostgreSQL and the correction is independently reviewed.**
+  **Current status: CLOSED for the reviewed implementation, owner-reported.** The earlier OPEN status pending PostgreSQL/concurrency review is historical. Closure is not inferred from unrelated green tests, and its scope does not cover Phase 08E acceptance pairings or the remaining limitations. The three testing conditions were subsequently closed through the separate Phase 08E-0 acceptance recorded below.
 
 - **Two deliberate STAFF behaviour changes:**
   - the conversation-first lock in submission;
@@ -157,3 +157,19 @@
   - the acceptance record waits behind a long Stop's conversation locks (latency, not correctness);
   - one database role (the "only the runtime enqueues" rule is enforced by application code and static tests);
   - the BOT deadline and window use the application clock, like staff messaging.
+
+## Review reconciliation and testing-condition closure (Phase 08E-0)
+
+At 08E-0.1, the reviewed Phase 08D design/code was independently approved while three testing conditions remained OPEN. The owner now reports the final Phase 08E-0 decision **READY WITH NONBLOCKING CONDITIONS**, technical acceptability with no new confirmed P1/P2 defects, and independent approval to close all three conditions. The reviewed Stop/acceptance deadlock P2 remains CLOSED. Reviewer identity, approval URL and exact review date were not supplied; see the [review status and evidence record](../PRE_PRODUCTION_BLOCKERS.md#phase-08-review-status-and-outstanding-testing-conditions). This acceptance does not authorize runtime implementation, production or live automation.
+
+| Condition                                                        | Status     | Accepted evidence (owner-reported)                                                                                                                                                                                             |
+| ---------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 08D-T1: migration 0008 raw-SQL constraint regressions            | **CLOSED** | Isolated PostgreSQL 17, **14/14 passed** in outbound-schema.db.test.ts; integrated verification and independent closure acceptance reported by owner.                                                                          |
+| 08D-T2: real acceptance-wrapper COMMIT-stage failure regressions | **CLOSED** | Isolated PostgreSQL 17, **6/6 passed** for RT7a–RT7e plus fallback fencing; accepted-state preservation and one transport attempt covered. RT7e logging is a separate confirmed nonblocking finding, not a reopened condition. |
+| 08D-T3: Inbox interactive-rendering regressions                  | **CLOSED** | Isolated PostgreSQL 17, **45/45 passed** in inbox-interactive.db.test.ts; integrated verification and independent closure acceptance reported by owner.                                                                        |
+
+The owner reports full database verification **1,669/1,669 passed, 86 files** on isolated PostgreSQL 17. Claude-reported checks supplied by the owner: **2,076/2,076 unit tests, 87 files**, plus typecheck, lint, formatting and Drizzle metadata checks passed. This documentation task did not execute or observe the database runs. The [testing strategy](../TESTING_STRATEGY.md#phase-08e-0-test-condition-closure) records coverage/provenance; no reviewer identity, reference URL or execution date is invented.
+
+**CONFIRMED, nonblocking:** when RT7e commits but its acknowledgement is lost, the fallback can update zero rows and return fence_lost while still logging accepted_but_not_recorded as an unknown outcome. The committed ACCEPTED row/wamid are preserved. Track a later narrowly scoped logging fix, requiring separate owner authorization and independent review; production dispatcher logic is unchanged here.
+
+BOT hold-reason wording and malformed outbound interactive-message labeling remain deferred to Phase 08F. Phase 08E runtime concurrency/recovery regressions, the accepted post-final-authorization transport window, other limitations above, and first-message history-retention requirements remain in force. No unrelated blocker is closed. Phase 08E-0 is accepted for an owner-operated checkpoint; Phase 08E runtime implementation is neither approved nor completed, and Phase 08E-1 must not begin without separate authorization. All automation gates remain OFF.
