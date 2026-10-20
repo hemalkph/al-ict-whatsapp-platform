@@ -32,7 +32,7 @@ Unit: permission matrix (every role x permission, explicit expectations), same-o
 
 `npm run test:e2e` (never `playwright test` directly: the config refuses to start without the values the orchestrator provides). `scripts/e2e.ts` owns one run:
 
-1. Creates a dedicated database `al_ict_e2e_<random>` on a **local** server (same harness and host guard as the DB tests; `TEST_DATABASE_ADMIN_URL` overrides the default) and migrates it from the committed migrations. It never reads `DATABASE_URL`, so a developer's application database cannot be reached.
+1. Creates a dedicated database `al_ict_e2e_<random>` on a **local** server (same harness and connection preflight as the DB tests; `TEST_DATABASE_ADMIN_URL` is required) and migrates it from the committed migrations. It never reads `DATABASE_URL`, so a developer's application database cannot be reached.
 2. Seeds the minimum identities (`e2e/support/identities.ts`): the first admin through the real bootstrap workflow (so it must change its password), everything else through the private provisioning instance plus a membership row (the integration tests' `provisionUser` pattern).
 3. Builds the app (skipped with `E2E_SKIP_BUILD=1`, which CI uses after its own build step) and serves the **production build** with `NODE_ENV=production` through `e2e/server.mjs`. Production requires an https `BETTER_AUTH_URL` and `next start` has no https option, so the same build is served over HTTPS by Next's documented custom-server API with a throwaway self-signed certificate (created with `openssl` in a temp directory and deleted afterwards). The browser therefore also exercises `Secure` / `__Secure-` cookies.
 4. Runs Playwright (config: `playwright.config.ts`, specs in `e2e/`), then scans the application server's output for errors and fails the run on any.
@@ -185,7 +185,16 @@ Disposable PostgreSQL databases only, **one database per test** (the reconciler 
 
 ## Requirements
 
-Lint, typecheck, test and build must pass with no `.env`, database or Docker. Database integration tests run on real PostgreSQL via `npm run test:db` (`vitest.db.config.mts`, files `src/**/*.db.test.ts`) and are never part of `npm test`. Each test file creates and drops its own empty database on a **local** server (default `postgresql://postgres:postgres@localhost:5432/postgres`, override with `TEST_DATABASE_ADMIN_URL`; non-local hosts are refused) and migrates it from the committed migration files. Start it with `docker compose up -d`.
+Lint, typecheck, test and build must pass with no `.env`, database or Docker. Database integration tests run on real PostgreSQL via `npm run test:db` (`vitest.db.config.mts`, files `src/**/*.db.test.ts`) and are never part of `npm test`. Each test file creates and drops its own empty database on a **local** server (`TEST_DATABASE_ADMIN_URL` is required and has no default, e.g. `postgresql://postgres:postgres@localhost:5432/postgres`; it must be a plain local `postgres`-database URL with no query options, and anything else is refused before connecting, see ADR 0019) and migrates it from the committed migration files. Start it with `docker compose up -d`.
+
+**Bot dispatch (Phase 08D, ADR 0020).**
+
+- `src/modules/bot-control/dispatch.db.test.ts`: BOT claim and final authorization (W1–W9), hold codes, the default-off gate and staff-starvation, lossless interactive round trips and restarts, idempotent enqueue, the guard, and the acceptance-record retry (RT1–RT6, RT8, RT9).
+- `src/modules/bot-control/suppression.db.test.ts`: the three-participant READ COMMITTED Stop-suppression regression (cursor barrier with proofs P1–P6, a legacy negative control with retries on and off, real-Stop orders O1–O8, the I.3 invariant).
+- `src/modules/bot-control/staff-control.db.test.ts`: staff control sequences and lock order.
+- `src/db/__tests__/migration-0008-dispatch.db.test.ts`: the upgrade from 0007.
+
+Pure checks live in `src/modules/messaging/interactive.test.ts` and in the boundary tests. Every BOT dispatch test uses a fake transport.
 
 ## Phase 07D-4 review corrections tests
 

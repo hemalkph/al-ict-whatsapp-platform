@@ -85,11 +85,33 @@ export function describeMessage(input: { type: string; body: string | null; cont
       return { text: where || null, placeholder: "Location" };
     }
     case "INTERACTIVE":
-    case "BUTTON":
+    case "BUTTON": {
+      // An interactive message SENT by a bot (Phase 08D) stores its payload under content.interactive: show its body and the
+      // option titles it offered, never ids. An inbound interactive reply keeps the reply rendering below.
+      const sent = input.type === "INTERACTIVE" ? record(content?.interactive) : null;
+      if (sent) {
+        const rows = Array.isArray(sent.buttons)
+          ? sent.buttons
+          : Array.isArray(sent.sections)
+            ? sent.sections.flatMap((s) => {
+                const rows = record(s)?.rows;
+                return Array.isArray(rows) ? rows : [];
+              })
+            : [];
+        const options = rows
+          .map((o) => safeLine(record(o)?.title, 24))
+          .filter(Boolean)
+          .join(" / ");
+        return {
+          text: [body, safeLine(options, 240)].filter(Boolean).join(" · ") || null,
+          placeholder: "Interactive message",
+        };
+      }
       return {
         text: body || safeLine(content?.text ?? content?.title, 200) || null,
         placeholder: PLACEHOLDERS[input.type] ?? null,
       };
+    }
     case "REACTION":
       return { text: safeLine(content?.emoji, 16) || null, placeholder: "Reaction" };
     case "TEMPLATE": {

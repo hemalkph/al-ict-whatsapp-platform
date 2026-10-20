@@ -124,6 +124,21 @@ A request is recorded as definitively refused **only** when the answer is a well
 
 Fixed-field events through `emitWebhookLog` only (`outbound.*`), carrying ids, state and reason codes. Never a token, body, recipient, template parameter or provider payload.
 
+### 13. Phase 08D: bot requests (ADR 0020)
+
+Requests now have an origin. STAFF requests behave as described above, with two deliberate changes:
+
+- staff submission locks the conversation row first;
+- the ACCEPTED record is retried, database-only, at most twice, on a deadlock or serialization failure raised inside it.
+
+BOT requests (TEXT or INTERACTIVE, created only by `enqueueAutomatedMessage`) differ in four ways:
+
+- they are claimed only while `BOTS_RUNTIME_ENABLED` is exactly `true`;
+- they pass the bot rule `bot_request_hold_code` at claim and at a final authorization that also re-checks the window, contact
+  and recipient with a fresh clock;
+- they are never re-queued after their claim (HELD instead);
+- they are suppressed by Stop through a non-blocking `SKIP LOCKED` primitive.
+
 ## Consequences
 
 - Real sending needs two deliberate configuration changes and a separately deployed process; none exists yet.

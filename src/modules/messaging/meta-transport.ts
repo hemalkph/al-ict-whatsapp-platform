@@ -10,6 +10,7 @@ import {
   type SendResult,
 } from "./transport";
 import { readOutboundConfig } from "./config";
+import { providerInteractive } from "./interactive";
 
 // The ONLY file in the application that can make an HTTP request to Meta. It talks to one fixed host over HTTPS, builds the
 // request from a typed SendRequest (never from browser text), uses the account's trusted phone_number_id, reads the access
@@ -191,6 +192,8 @@ export function buildPayload(
     if (m.replyToWamid) payload.context = { message_id: m.replyToWamid };
     return payload;
   }
+  if (m.type === "interactive")
+    return { ...base, type: "interactive", interactive: providerInteractive(m.payload) };
   return {
     ...base,
     type: "template",

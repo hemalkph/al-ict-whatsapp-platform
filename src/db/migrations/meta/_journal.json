@@ -50,6 +50,20 @@
       "when": 1791786873175,
       "tag": "0006_leads_lifecycle_and_attribution_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792332632415,
+      "tag": "0007_bot_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792413044845,
+      "tag": "0008_bot_outbound_dispatch",
+      "breakpoints": true
     }
   ]
 }

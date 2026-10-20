@@ -27,7 +27,7 @@ export {
   type StaffDeps,
   type StaffMember,
 } from "./staff";
-export { revalidateActor } from "./staff/guards";
+export { lockAndRevalidateActor, revalidateActor } from "./staff/guards";
 export {
   getPageAccess,
   loginDestination,

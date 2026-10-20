@@ -154,9 +154,60 @@ export const OUTBOUND_REQUEST_STATES = [
   "HELD", // not sent, and will not be: a policy check failed (window, consent, recipient, deadline). A new request is needed
   "UNKNOWN_OUTCOME", // may or may not have been sent: manual reconciliation, never an automatic resend
 ] as const;
-export const OUTBOUND_MESSAGE_TYPES = ["TEXT", "TEMPLATE"] as const;
+export const OUTBOUND_MESSAGE_TYPES = ["TEXT", "TEMPLATE", "INTERACTIVE"] as const;
+// Who asked for an outbound request (Phase 08D, ADR 0020). STAFF: a member through the Inbox (TEXT or TEMPLATE). BOT: the bot
+// runtime for one session step (TEXT or INTERACTIVE, never a template). The database enforces the shape of each.
+export const OUTBOUND_ORIGINS = ["STAFF", "BOT"] as const;
 export const RECIPIENT_KINDS = ["PHONE", "BSUID"] as const;
 export const TEMPLATE_CATEGORIES = ["UTILITY", "MARKETING", "AUTHENTICATION"] as const;
 // PENDING_ATTESTATION: registered, never confirmed approved. APPROVED: an operator attested, in the Meta dashboard, that this
 // exact template (name + language) is approved for this WhatsApp account. The platform never calls Meta to verify it.
 export const TEMPLATE_STATUSES = ["PENDING_ATTESTATION", "APPROVED", "DISABLED"] as const;
+
+// Bots (Phase 08C, ADR 0019). Deployment lifecycle per WhatsApp account (V3.2 F.2): RETIRED is terminal.
+export const BOT_DEPLOYMENT_STATUSES = ["ACTIVE", "PAUSED", "STOPPED", "RETIRED"] as const;
+export const BOT_DEPLOYMENT_EVENT_KINDS = [
+  "ACTIVATED",
+  "VERSION_CHANGED",
+  "PAUSED",
+  "RESUMED",
+  "SESSIONS_STOPPED",
+  "STOPPED",
+  "RETIRED",
+] as const;
+// Session states (V3.2 G.1). ACTIVE is engine-internal: a committed step never leaves a session in it.
+export const BOT_LIVE_SESSION_STATES = ["ACTIVE", "WAITING_FOR_SEND", "WAITING_FOR_INPUT"] as const;
+export const BOT_TERMINAL_SESSION_STATES = ["COMPLETED", "HANDED_OVER", "FAILED"] as const;
+export const BOT_SESSION_STATES = [
+  ...BOT_LIVE_SESSION_STATES,
+  ...BOT_TERMINAL_SESSION_STATES,
+] as const;
+export const BOT_SESSION_END_REASONS = [
+  "flow_end",
+  "flow_handover",
+  "idle_timeout",
+  "conversation_resolved",
+  "system_handover",
+  "error",
+] as const;
+// The only end reasons that may carry a terminal notice (V3.2 G.4 terminal-row rule).
+export const BOT_FLOW_END_REASONS = ["flow_end", "flow_handover"] as const;
+// The reasons a HANDOVER node may configure. A copy of HANDOVER_REASON_CODES (src/modules/bots/limits.ts), kept equal by a
+// unit test: the database uses it to keep configured reasons and system reasons apart.
+export const BOT_FLOW_HANDOVER_REASONS = [
+  "student_requested",
+  "needs_staff",
+  "out_of_scope",
+  "invalid_input",
+  "error_fallback",
+  "other",
+] as const;
+export const BOT_SESSION_EVENT_KINDS = [
+  "INPUT_ACCEPTED",
+  "INPUT_REJECTED",
+  "PROMPT_INTERACTION",
+  "HANDED_OVER",
+  "TERMINAL_NOTICE_NOT_QUEUED",
+  "ERROR",
+] as const;
+export const BOT_TRIGGER_STATUSES = ["PENDING", "PROCESSED", "IGNORED", "DEAD"] as const;

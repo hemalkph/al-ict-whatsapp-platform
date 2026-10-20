@@ -92,6 +92,23 @@ export async function submitOutboundMessage(
     const context = await loadConversationContext(tx, ctx.organizationId, input.conversationId);
     if (!context) throw new NotFoundError();
 
+    // Lock order (Phase 08D, V3.2 J.1 / L.2): the conversation row FIRST, before the idempotency lock and before any insert.
+    // The request insert allocates the conversation's control_seq (a database trigger updates this row). Taking the row lock
+    // here keeps the conversation-first order every other writer uses (Inbox workflow, Stop, bot step) and makes the allocation
+    // update a row this transaction already holds, so no row lock is strengthened mid-transaction; staff submissions to one
+    // conversation are serialized here, and control_seq follows their commit order. The replay path below takes the same
+    // lock, so it is ordered identically.
+    await tx
+      .select({ id: schema.conversations.id })
+      .from(schema.conversations)
+      .where(
+        and(
+          eq(schema.conversations.organizationId, ctx.organizationId),
+          eq(schema.conversations.id, input.conversationId),
+        ),
+      )
+      .for("update");
+
     // One logical operation per (organization, account, requester, key): concurrent submissions queue up here, and the
     // unique constraint behind it is the backstop.
     const scope = `${ctx.organizationId}:${context.accountId}:${ctx.membershipId}:${input.idempotencyKey}`;
@@ -216,7 +233,7 @@ export type OutboundRequestView = {
   readonly requestId: string;
   readonly messageId: string;
   readonly conversationId: string;
-  readonly type: "TEXT" | "TEMPLATE";
+  readonly type: "TEXT" | "TEMPLATE" | "INTERACTIVE";
   readonly state: string;
   readonly holdReason: string | null;
   readonly failureCode: string | null;

@@ -47,6 +47,7 @@ export type WebhookLogEvent =
   | "outbound.accepted"
   | "outbound.rejected"
   | "outbound.retry_scheduled"
+  | "outbound.record_retry"
   | "outbound.unknown_outcome"
   | "outbound.recovered_unknown"
   | "outbound.worker_started"

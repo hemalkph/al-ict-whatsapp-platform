@@ -78,7 +78,7 @@ describe("migration 0002 precondition: webhook_requests must be empty", () => {
         "created_at",
       ]);
       await migrate(t.db, { migrationsFolder: FULL }); // applies 0002 and every later migration
-      expect(await tableCount(t)).toBe(31); // 0002 adds contact_bsuids; 0004 two outbound tables; 0005 four staff-inbox tables; 0006 two lead tables
+      expect(await tableCount(t)).toBe(38); // 0002 adds contact_bsuids; 0004 two outbound tables; 0005 four staff-inbox tables; 0006 two lead tables; 0007 seven bot tables
       expect(await recorded(t)).toBe(TOTAL);
       const cols = await columns(t, "webhook_requests");
       expect(cols).toContain("raw_body");
@@ -140,7 +140,7 @@ describe("migration 0002 precondition: webhook_requests must be empty", () => {
       await expect(migrate(t.db, { migrationsFolder: FULL })).rejects.toBeDefined();
       await t.pool.query("delete from webhook_requests"); // an operator decision, never done by the migration
       await migrate(t.db, { migrationsFolder: FULL });
-      expect(await tableCount(t)).toBe(31); // 0002 adds contact_bsuids; 0004 two outbound tables; 0005 four staff-inbox tables; 0006 two lead tables
+      expect(await tableCount(t)).toBe(38); // 0002 adds contact_bsuids; 0004 two outbound tables; 0005 four staff-inbox tables; 0006 two lead tables; 0007 seven bot tables
       expect(await recorded(t)).toBe(TOTAL);
     } finally {
       await t.close();

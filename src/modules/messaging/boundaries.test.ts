@@ -36,12 +36,15 @@ const appSources = () =>
 describe("outbound boundaries", () => {
   it("has exactly the expected production files", () => {
     expect(sources.map((s) => s.file).sort()).toEqual([
+      "bot-authorization.ts",
       "classify.ts",
       "config.ts",
       "dispatch.ts",
       "eligibility.ts",
+      "enqueue.ts",
       "errors.ts",
       "index.ts",
+      "interactive.ts",
       "meta-transport.ts",
       "operator.ts",
       "policy.ts",
@@ -174,11 +177,14 @@ describe("outbound boundaries", () => {
       expect(
         d.lastIndexOf('result.kind === "throttled" || result.kind === "not_sent"', at),
       ).toBeGreaterThan(0);
-      // no other module writes request state; submit.ts only INSERTs the first QUEUED row and never updates the table
+      // no other module writes request state; submit.ts (staff) and enqueue.ts (bot, Phase 08D) only INSERT the first QUEUED
+      // row and never update the table
       for (const { file, text } of sources) {
         if (file === "dispatch.ts") continue;
-        if (file === "submit.ts")
-          expect(text).not.toMatch(/\.update\(schema\.outboundRequests|\.update\(t\)/);
+        if (file === "submit.ts" || file === "enqueue.ts")
+          expect(text, file).not.toMatch(
+            /\.update\(schema\.outboundRequests|\.update\(t\)|UPDATE outbound_requests/i,
+          );
         else
           expect(text, file).not.toMatch(
             /state: "(QUEUED|SENDING|ACCEPTED|REJECTED|UNKNOWN_OUTCOME)"/,
@@ -319,6 +325,95 @@ describe("outbound boundaries", () => {
 
     it("the dispatcher never claims anything while outbound is disabled", () => {
       expect(source("dispatch.ts")).toMatch(/if \(!deps\.config\.outboundEnabled\) return summary/);
+    });
+  });
+
+  describe("BOT requests (Phase 08D, ADR 0020)", () => {
+    it("BOT rows are not even candidates while the runtime gate is off, so they can neither be sent nor starve staff rows", () => {
+      const claim = source("dispatch.ts").slice(
+        source("dispatch.ts").indexOf("export async function claimNext"),
+        source("dispatch.ts").indexOf("const fenced"),
+      );
+      expect(claim).toContain("const botsEnabled = deps.config.botsRuntimeEnabled === true;");
+      expect(claim).toMatch(
+        /AND \(origin = 'STAFF' OR \$\{botsEnabled\}\)\s*ORDER BY next_attempt_at, id/,
+      );
+      expect(claim).toContain("bot_request_hold_code(");
+      expect(source("config.ts")).toContain(
+        'botsRuntimeEnabled: flag(env, "BOTS_RUNTIME_ENABLED")',
+      );
+    });
+
+    it("the BOT final authorization is one statement, then a fresh clock, then the bot rule, window and recipient", () => {
+      const b = source("bot-authorization.ts");
+      expect(b.match(/db\.execute</g)).toHaveLength(1);
+      for (const field of [
+        "c.last_inbound_at",
+        "k.archived_at",
+        "k.wa_id",
+        "k.marketing_consent_status",
+        "contact_bsuids",
+        "a.status",
+        "bot_request_hold_code(r.organization_id, r.id)",
+      ])
+        expect(b, field).toContain(field);
+      const auth = b.slice(b.indexOf("export async function authorizeBotSend"));
+      expect(auth.indexOf("readFinalState(")).toBeLessThan(auth.indexOf("const now = (deps.now"));
+      const verdict = b.slice(b.indexOf("export function botFinalVerdict"));
+      const order = [
+        'row.state !== "SENDING"',
+        "config.botsRuntimeEnabled",
+        "account_inactive_before_dispatch",
+        "claim_expired_before_dispatch",
+        "deadline_passed_before_dispatch",
+        "row.bot_hold_code !== null",
+        "assess({",
+        '"recipient_changed"',
+      ].map((x) => verdict.indexOf(x));
+      expect(order.every((i) => i > 0)).toBe(true);
+      expect([...order].sort((x, y) => x - y)).toEqual(order);
+      // staff requests never take this path; theirs is the unchanged read in dispatch.ts
+      expect(source("dispatch.ts")).toMatch(
+        /if \(claim\.origin === "BOT"\)\s*return authorizeBotSend\(/,
+      );
+    });
+
+    it("a BOT request is HELD (never re-queued) on every refusal, and the acceptance retry is bounded and database-only", () => {
+      const d = source("dispatch.ts");
+      const notSent = d.slice(
+        d.indexOf('result.kind === "throttled" || result.kind === "not_sent"'),
+      );
+      expect(notSent.indexOf('claim.origin === "BOT"')).toBeLessThan(
+        notSent.indexOf('state: "QUEUED"'),
+      );
+      expect(d).toContain('const RETRYABLE_RECORD_STATES = new Set(["40P01", "40001"]);');
+      expect(d).toContain("export const RECORD_RETRY_LIMIT = 2;");
+      const accepted = d.slice(
+        d.indexOf('if (result.kind === "accepted") {'),
+        d.indexOf('if (result.kind === "rejected") {'),
+      );
+      // reset on every attempt, inside the loop; set on both normal return paths; checked before retrying
+      expect(accepted).toMatch(
+        /for \(let attempt = 1; ; attempt\+\+\) \{[\s\S]{0,400}let bodyCompleted = false;/,
+      );
+      expect(accepted.match(/bodyCompleted = true;/g)).toHaveLength(2);
+      expect(accepted).toMatch(
+        /retryableRecordFailure\(error, bodyCompleted\) && attempt <= retries/,
+      );
+      expect(d).toMatch(/!bodyCompleted &&\s*states\.length > 0 &&\s*states\.every/);
+      expect(accepted).not.toMatch(/transport|\.send\(/);
+    });
+
+    it("enqueueAutomatedMessage has no production or script caller in 08D, and messaging never imports the bot modules", () => {
+      const callers = appSources().filter(
+        (f) =>
+          !f.startsWith("src/modules/messaging/") &&
+          /enqueueAutomatedMessage|messaging\/enqueue/.test(read(join(repo, f))),
+      );
+      expect(callers).toEqual([]);
+      for (const { file, text } of sources)
+        expect(text, file).not.toMatch(/@\/modules\/(bots|bot-control)\b/);
+      expect(source("enqueue.ts")).not.toMatch(/process\.env/);
     });
   });
 
@@ -505,9 +600,11 @@ export { IdempotencyConflictError, OutboundRefusedError } from "./errors";`,
         "WHATSAPP_OUTBOUND_ENABLED",
         "WHATSAPP_LIVE_SEND_ENABLED",
         "WHATSAPP_BSUID_RECIPIENT_ENABLED",
+        "BOTS_RUNTIME_ENABLED",
       ])
         expect(example).toMatch(new RegExp(`^# ${name}=false$`, "m"));
       expect(example).not.toMatch(/^WHATSAPP_(OUTBOUND|LIVE_SEND|BSUID_RECIPIENT)_ENABLED=true/m);
+      expect(example).not.toMatch(/^BOTS_RUNTIME_ENABLED=true/m);
       expect(example).not.toMatch(/EAA[A-Za-z0-9]{10,}/);
     });
   });

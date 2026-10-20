@@ -14,6 +14,12 @@ export type OutboundConfig = {
   readonly bsuidRecipientEnabled: boolean;
   /** Graph API version such as v25.0. Required for a live send; deliberately has no default. */
   readonly graphApiVersion: string | null;
+  /**
+   * BOTS_RUNTIME_ENABLED (Phase 08D, ADR 0020). Off: the dispatcher never claims an origin-BOT request (so queued bot rows
+   * can neither be sent nor starve staff requests), the final authorization refuses any it holds, and no BOT request can be
+   * created. Phase 08D ships no production caller that creates BOT requests.
+   */
+  readonly botsRuntimeEnabled: boolean;
 };
 
 type Env = Record<string, string | undefined>;
@@ -27,5 +33,6 @@ export function readOutboundConfig(env: Env): OutboundConfig {
     liveSendEnabled: flag(env, "WHATSAPP_LIVE_SEND_ENABLED"),
     bsuidRecipientEnabled: flag(env, "WHATSAPP_BSUID_RECIPIENT_ENABLED"),
     graphApiVersion: version !== undefined && VERSION.test(version) ? version : null,
+    botsRuntimeEnabled: flag(env, "BOTS_RUNTIME_ENABLED"),
   };
 }

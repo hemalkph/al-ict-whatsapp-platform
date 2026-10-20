@@ -21,6 +21,8 @@ export const TEMPLATE_PARAMETER_COUNT_MAX = 20;
 
 /** A request that has not been dispatched within this time is HELD (deadline_passed): staff must send again deliberately. */
 export const DISPATCH_DEADLINE_MS = 15 * MINUTE;
+/** A BOT request (Phase 08D, V3.2 I.2) that has not been dispatched within 120 s is HELD (deadline_passed): the bot is no longer timely. */
+export const BOT_DISPATCH_DEADLINE_MS = 120_000;
 
 /** Per-request HTTP budget, and how long a SENDING row may exist before it is declared UNKNOWN_OUTCOME (never retried). */
 export const HTTP_TIMEOUT_MS = 15_000;

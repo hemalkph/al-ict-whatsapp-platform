@@ -44,6 +44,45 @@ export async function revalidateActor(
   }
 }
 
+/**
+ * Re-validates the actor UNDER LOCK, for operations that must be ordered against a concurrent revocation (bot management,
+ * Phase 08C, ADR 0019). Locks the organization FOR KEY SHARE (which conflicts with the FOR UPDATE every staff membership
+ * change takes first, see lockOrganization) and then the actor's membership row FOR SHARE (which blocks any update of that
+ * row), and only then checks status and permission. A revocation that committed first is seen and refused; one that comes
+ * later waits until this transaction ends. Call it FIRST in the transaction, before any domain lock. Unlike lockOrganization,
+ * it does not serialize operations of the same organization with one another.
+ */
+export async function lockAndRevalidateActor(
+  tx: Tx,
+  ctx: AccessContext,
+  permission: Permission,
+): Promise<void> {
+  const [organization] = await tx
+    .select({ id: schema.organizations.id })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.id, ctx.organizationId))
+    .for("key share");
+  const [actor] = organization
+    ? await tx
+        .select({
+          role: schema.organizationMemberships.role,
+          status: schema.organizationMemberships.status,
+        })
+        .from(schema.organizationMemberships)
+        .where(
+          and(
+            eq(schema.organizationMemberships.id, ctx.membershipId),
+            eq(schema.organizationMemberships.organizationId, ctx.organizationId),
+            eq(schema.organizationMemberships.userId, ctx.userId),
+          ),
+        )
+        .for("share")
+    : [];
+  if (!actor || actor.status !== "ACTIVE" || !can(actor.role, permission)) {
+    throw new ForbiddenError("stale_actor");
+  }
+}
+
 export type TargetMembership = {
   readonly id: string;
   readonly userId: string;

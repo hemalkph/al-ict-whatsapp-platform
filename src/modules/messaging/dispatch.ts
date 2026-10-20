@@ -5,6 +5,7 @@ import { backResolveReplies } from "@/db/ops/inbound-message";
 import { resolveStatusEventsForMessage } from "@/db/ops/message-status";
 import { sqlState } from "@/modules/whatsapp/ingest";
 import { emitWebhookLog } from "@/modules/whatsapp/logging";
+import { authorizeBotSend } from "./bot-authorization";
 import type { OutboundConfig } from "./config";
 import {
   assess,
@@ -13,6 +14,7 @@ import {
   loadTemplate,
   type HoldCode,
 } from "./eligibility";
+import { parseInteractivePayload } from "./interactive";
 import {
   CLAIM_LOCK_TIMEOUT_MS,
   DEFAULT_ACCOUNT_MIN_INTERVAL_MS,
@@ -49,6 +51,18 @@ import type { OutboundTransport, SendMessage, SendRequest, SendResult } from "./
 //      refusal that came BEFORE any HTTP attempt began: gates, credentials, payload, abort, authorization), HELD, or UNKNOWN_OUTCOME. An answer that came back from Meta is
 //      never queued again (a throttle is UNKNOWN_OUTCOME while THROTTLE_RETRY_VERIFIED is false). The fence is (id, state = SENDING, claimed_by).
 // A process that dies between 1 and 3 leaves a SENDING row; recoverStuck() turns it into UNKNOWN_OUTCOME. It is never retried.
+//
+// Phase 08D (ADR 0020) adds origin-BOT requests. They are claimed only while BOTS_RUNTIME_ENABLED is on (the candidate query
+// filters them out otherwise, so they can never starve staff requests); the claim and the final authorization also apply the
+// bot rule bot_request_hold_code() and, at the final read, the window, contact and recipient with a fresh clock
+// (bot-authorization.ts). A BOT request is never re-queued after its claim: every refusal, and every result that proves
+// nothing was sent, makes it HELD. Staff requests keep exactly the behaviour described above.
+//
+// RECORDING ACCEPTANCE (both origins): the ACCEPTED transaction is retried, at most twice, when a statement INSIDE it failed
+// with a deadlock (40P01) or serialization failure (40001) and nothing else in the error chain says otherwise. Never on an error
+// raised at COMMIT (ambiguous: it may have committed), never on a connection failure or any other code. Each attempt uses the
+// same claim fence and the same wamid; the transport is never called again. Exhausted or not retryable: the existing fenced
+// UNKNOWN_OUTCOME accepted_but_not_recorded.
 
 export type DispatchDeps = {
   readonly db: Database;
@@ -63,10 +77,20 @@ export type DispatchDeps = {
   readonly throttleRetryVerified?: boolean;
   /** How long the claim transaction may wait for a database lock (default CLAIM_LOCK_TIMEOUT_MS). */
   readonly lockTimeoutMs?: number;
+  /** TEST ONLY: retries of the ACCEPTED record after a retryable failure (default RECORD_RETRY_LIMIT; 0 disables). */
+  readonly recordRetryLimit?: number;
+  /** TEST ONLY: observes each ACCEPTED-record transaction: "ok", "fence_lost", or the SQLSTATE (or null) it failed with. */
+  readonly onRecordAttempt?: (attempt: number, outcome: string | null) => void | Promise<void>;
 };
+
+/** Retries of the ACCEPTED record transaction (at most three transactions in total). */
+export const RECORD_RETRY_LIMIT = 2;
+const RETRYABLE_RECORD_STATES = new Set(["40P01", "40001"]);
 
 export type Claim = {
   readonly requestId: string;
+  readonly origin: "STAFF" | "BOT";
+  readonly messageType: Row["messageType"];
   readonly organizationId: string;
   readonly accountId: string;
   readonly conversationId: string;
@@ -159,10 +183,11 @@ async function hold(
   log("outbound.held", "denied", row, code);
 }
 
+/** What the transport sends, rebuilt only from the stored row. Null for an interactive payload that no longer validates. */
 function sendMessage(
   row: Row,
   template: { name: string; languageCode: string } | null,
-): SendMessage {
+): SendMessage | null {
   const payload = row.payload as {
     body?: string;
     replyToWamid?: string | null;
@@ -170,6 +195,10 @@ function sendMessage(
   };
   if (row.messageType === "TEXT")
     return { type: "text", body: payload.body ?? "", replyToWamid: payload.replyToWamid ?? null };
+  if (row.messageType === "INTERACTIVE") {
+    const interactive = parseInteractivePayload(row.payload);
+    return interactive === null ? null : { type: "interactive", payload: interactive };
+  }
   return {
     type: "template",
     name: template!.name,
@@ -202,9 +231,12 @@ export async function claimNext(
       await tx.execute(sql`SELECT set_config('lock_timeout', ${String(lockTimeout)}, true)`);
       // Candidates are READ without locks; each one is then locked individually (SKIP LOCKED) just before it is examined, so a
       // claimer only ever holds the row it is working on and other dispatchers can take the others at the same time.
+      // While the bot runtime gate is off, BOT rows are not candidates at all: they can neither be sent nor fill the 20 slots.
+      const botsEnabled = deps.config.botsRuntimeEnabled === true;
       const candidates = await tx.execute<{ id: string }>(sql`
       SELECT id FROM outbound_requests
       WHERE state = 'QUEUED' AND next_attempt_at <= ${iso(clock())}::timestamptz
+        AND (origin = 'STAFF' OR ${botsEnabled})
       ORDER BY next_attempt_at, id
       LIMIT 20`);
       let held = 0;
@@ -259,7 +291,9 @@ export async function claimNext(
           message:
             row.messageType === "TEXT"
               ? { type: "text" }
-              : { type: "template", template, parameterCount: payload.parameters?.length ?? 0 },
+              : row.messageType === "INTERACTIVE"
+                ? { type: "interactive" }
+                : { type: "template", template, parameterCount: payload.parameters?.length ?? 0 },
           bsuidRecipientEnabled: deps.config.bsuidRecipientEnabled,
           now,
         });
@@ -274,6 +308,24 @@ export async function claimNext(
           assessment.recipient.id !== row.recipientId
         ) {
           await hold(tx, row, "recipient_changed", now);
+          held++;
+          continue;
+        }
+        // The bot rule (deployment, epoch, archive, suppression, step / terminal notice, staff control), a plain read.
+        if (row.origin === "BOT") {
+          const verdict = await tx.execute<{ code: string | null }>(
+            sql`SELECT bot_request_hold_code(${row.organizationId}, ${row.id}) AS code`,
+          );
+          const code = verdict.rows[0]?.code ?? null;
+          if (code !== null) {
+            await hold(tx, row, code, now);
+            held++;
+            continue;
+          }
+        }
+        const message = sendMessage(row, template);
+        if (message === null) {
+          await hold(tx, row, "payload_invalid", now);
           held++;
           continue;
         }
@@ -294,6 +346,8 @@ export async function claimNext(
           held,
           claim: {
             requestId: row.id,
+            origin: row.origin,
+            messageType: row.messageType,
             organizationId: row.organizationId,
             accountId: row.whatsappAccountId,
             conversationId: row.conversationId,
@@ -304,7 +358,7 @@ export async function claimNext(
               phoneNumberId: account!.phoneNumberId,
               credentialRef: account!.credentialRef,
               recipient: assessment.recipient,
-              message: sendMessage(row, template),
+              message,
             },
           },
         };
@@ -348,84 +402,102 @@ async function record(deps: DispatchDeps, claim: Claim, answer: SendResult): Pro
   const db = deps.db;
 
   if (result.kind === "accepted") {
-    try {
-      const done = await db.transaction(async (tx) => {
-        // The SAME per-message lock the STATUS handler takes: a status for this wamid is either stored before this
-        // transaction (and reconciled below) or waits until it commits, then links directly.
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wa-message:${claim.organizationId}:${claim.accountId}:${result.wamid}`}, 0))`,
-        );
-        const updated = await tx
-          .update(t)
-          .set({
-            state: "ACCEPTED",
-            acceptedAt: now,
-            finishedAt: now,
-            providerHttpStatus: result.httpStatus,
-            providerMessageStatus: result.providerStatus,
-          })
-          .where(fenced(claim))
-          .returning({ id: t.id });
-        if (updated.length === 0) return false;
-        await tx
-          .update(schema.messages)
-          .set({ wamid: result.wamid })
-          .where(
-            and(
-              eq(schema.messages.organizationId, claim.organizationId),
-              eq(schema.messages.id, claim.messageId),
-              eq(schema.messages.direction, "OUTBOUND"),
-              sql`${schema.messages.wamid} IS NULL`,
-            ),
+    const retries = Math.max(0, deps.recordRetryLimit ?? RECORD_RETRY_LIMIT);
+    for (let attempt = 1; ; attempt++) {
+      // Reset for EVERY attempt; set on every path on which the callback returns normally. An error thrown while it is still
+      // false came from a statement inside the transaction; one thrown after it is true came from COMMIT (ambiguous).
+      let bodyCompleted = false;
+      try {
+        const done = await db.transaction(async (tx) => {
+          // The SAME per-message lock the STATUS handler takes: a status for this wamid is either stored before this
+          // transaction (and reconciled below) or waits until it commits, then links directly.
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wa-message:${claim.organizationId}:${claim.accountId}:${result.wamid}`}, 0))`,
           );
-        await resolveStatusEventsForMessage(tx, {
-          id: claim.messageId,
-          organizationId: claim.organizationId,
-          whatsappAccountId: claim.accountId,
-          wamid: result.wamid,
+          const updated = await tx
+            .update(t)
+            .set({
+              state: "ACCEPTED",
+              acceptedAt: now,
+              finishedAt: now,
+              providerHttpStatus: result.httpStatus,
+              providerMessageStatus: result.providerStatus,
+            })
+            .where(fenced(claim))
+            .returning({ id: t.id });
+          if (updated.length === 0) {
+            bodyCompleted = true;
+            return false;
+          }
+          await tx
+            .update(schema.messages)
+            .set({ wamid: result.wamid })
+            .where(
+              and(
+                eq(schema.messages.organizationId, claim.organizationId),
+                eq(schema.messages.id, claim.messageId),
+                eq(schema.messages.direction, "OUTBOUND"),
+                sql`${schema.messages.wamid} IS NULL`,
+              ),
+            );
+          await resolveStatusEventsForMessage(tx, {
+            id: claim.messageId,
+            organizationId: claim.organizationId,
+            whatsappAccountId: claim.accountId,
+            wamid: result.wamid,
+          });
+          // A customer may have replied to this message before its id was stored here: link those replies (the existing
+          // inbound operation: same conversation and organization only, never to itself, never over an existing link).
+          await backResolveReplies(tx, {
+            organizationId: claim.organizationId,
+            conversationId: claim.conversationId,
+            messageId: claim.messageId,
+            wamid: result.wamid,
+          });
+          // Sending moves the conversation's message / outbound timestamps forward and nothing else: not last_inbound_at
+          // (so it never opens or extends the service window), not the status, not resolved_at (it does not reopen).
+          await tx
+            .update(schema.conversations)
+            .set({
+              lastOutboundAt: sql`GREATEST(${schema.conversations.lastOutboundAt}, ${now.toISOString()}::timestamptz)`,
+              lastMessageAt: sql`GREATEST(${schema.conversations.lastMessageAt}, ${now.toISOString()}::timestamptz)`,
+            })
+            .where(
+              and(
+                eq(schema.conversations.organizationId, claim.organizationId),
+                eq(schema.conversations.id, claim.conversationId),
+              ),
+            );
+          bodyCompleted = true;
+          return true;
         });
-        // A customer may have replied to this message before its id was stored here: link those replies (the existing
-        // inbound operation: same conversation and organization only, never to itself, never over an existing link).
-        await backResolveReplies(tx, {
-          organizationId: claim.organizationId,
-          conversationId: claim.conversationId,
-          messageId: claim.messageId,
-          wamid: result.wamid,
-        });
-        // Sending moves the conversation's message / outbound timestamps forward and nothing else: not last_inbound_at
-        // (so it never opens or extends the service window), not the status, not resolved_at (it does not reopen).
-        await tx
-          .update(schema.conversations)
-          .set({
-            lastOutboundAt: sql`GREATEST(${schema.conversations.lastOutboundAt}, ${now.toISOString()}::timestamptz)`,
-            lastMessageAt: sql`GREATEST(${schema.conversations.lastMessageAt}, ${now.toISOString()}::timestamptz)`,
-          })
-          .where(
-            and(
-              eq(schema.conversations.organizationId, claim.organizationId),
-              eq(schema.conversations.id, claim.conversationId),
-            ),
-          );
-        return true;
-      });
-      if (!done) return "fence_lost";
-      log("outbound.accepted", "success", row);
-      return "accepted";
-    } catch {
-      // Meta DID accept it, but the id could not be recorded (for example the id already belongs to another message). We
-      // do not invent a link: the request is UNKNOWN_OUTCOME and an operator reconciles it.
-      const moved = await db
-        .update(t)
-        .set({
-          state: "UNKNOWN_OUTCOME",
-          failureCode: "accepted_but_not_recorded",
-          finishedAt: now,
-        })
-        .where(fenced(claim))
-        .returning({ id: t.id });
-      log("outbound.unknown_outcome", "failure", row, "accepted_but_not_recorded");
-      return moved.length === 0 ? "fence_lost" : "unknown";
+        await deps.onRecordAttempt?.(attempt, done ? "ok" : "fence_lost");
+        if (!done) return "fence_lost";
+        log("outbound.accepted", "success", row);
+        return "accepted";
+      } catch (error) {
+        const states = sqlStates(error);
+        await deps.onRecordAttempt?.(attempt, states[0] ?? null);
+        if (retryableRecordFailure(error, bodyCompleted) && attempt <= retries) {
+          log("outbound.record_retry", "failure", row, states[0], attempt);
+          continue;
+        }
+        break;
+      }
     }
+    // Meta DID accept it, but the id could not be recorded (for example the id already belongs to another message, or the
+    // retries were exhausted). We do not invent a link: the request is UNKNOWN_OUTCOME and an operator reconciles it.
+    const moved = await db
+      .update(t)
+      .set({
+        state: "UNKNOWN_OUTCOME",
+        failureCode: "accepted_but_not_recorded",
+        finishedAt: now,
+      })
+      .where(fenced(claim))
+      .returning({ id: t.id });
+    log("outbound.unknown_outcome", "failure", row, "accepted_but_not_recorded");
+    return moved.length === 0 ? "fence_lost" : "unknown";
   }
 
   if (result.kind === "rejected") {
@@ -460,6 +532,24 @@ async function record(deps: DispatchDeps, claim: Claim, answer: SendResult): Pro
 
   if (result.kind === "throttled" || result.kind === "not_sent") {
     const reason = result.kind === "throttled" ? "rate_limited" : result.reason;
+    // A BOT request is never queued again after its claim (V3.2 I.4; the database guard forbids it too): every refusal before
+    // an HTTP attempt began, including the final authorization's, is HELD with its code.
+    if (claim.origin === "BOT") {
+      const moved = await db
+        .update(t)
+        .set({
+          state: "HELD",
+          holdReason: reason.replace(/[^a-z0-9_]/g, "_").slice(0, 64) || "not_sent",
+          finishedAt: now,
+          providerErrorCode: result.kind === "throttled" ? result.providerErrorCode : null,
+          providerHttpStatus: result.kind === "throttled" ? result.httpStatus : null,
+        })
+        .where(fenced(claim))
+        .returning({ id: t.id });
+      if (moved.length === 0) return "fence_lost";
+      log("outbound.held", "denied", row, reason, claim.attempt);
+      return "held";
+    }
     if (claim.attempt >= MAX_NOT_SENT_ATTEMPTS) {
       // Refused before any HTTP attempt began, but out of attempts: HELD (a new request is the next action), not an endless loop.
       const moved = await db
@@ -518,6 +608,31 @@ async function record(deps: DispatchDeps, claim: Claim, answer: SendResult): Pro
   return "unknown";
 }
 
+/**
+ * Whether a failed ACCEPTED-record transaction may be retried: only when the failure came from a statement INSIDE the
+ * transaction (the callback had not completed; an error after it completed came from COMMIT and is ambiguous) and every
+ * SQLSTATE in the error chain is a deadlock (40P01) or serialization failure (40001). A connection failure (no SQLSTATE, or
+ * class 08 / 57 such as 57P01 anywhere in the chain) or any other code is never retried.
+ */
+export function retryableRecordFailure(error: unknown, bodyCompleted: boolean): boolean {
+  const states = sqlStates(error);
+  return (
+    !bodyCompleted && states.length > 0 && states.every((code) => RETRYABLE_RECORD_STATES.has(code))
+  );
+}
+
+/** Every SQLSTATE in an error's cause chain (Drizzle wraps the driver error), outermost first. */
+function sqlStates(error: unknown): string[] {
+  const states: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) states.push(code);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return states;
+}
+
 // ------------------------------------------------------------------------------------------------ execute
 
 /**
@@ -531,6 +646,16 @@ async function authorizeSend(
   deps: DispatchDeps,
   claim: Claim,
 ): Promise<{ kind: "ok" } | { kind: "stale" } | { kind: "refused"; reason: string }> {
+  // BOT requests: one statement over the request, account, conversation, contact, aliases and the bot rule, then a fresh
+  // clock (bot-authorization.ts). Staff requests: the read below, unchanged.
+  if (claim.origin === "BOT")
+    return authorizeBotSend(deps, {
+      requestId: claim.requestId,
+      organizationId: claim.organizationId,
+      owner: claim.owner,
+      recipient: claim.request.recipient,
+      messageType: claim.messageType === "INTERACTIVE" ? "INTERACTIVE" : "TEXT",
+    });
   const [row] = await deps.db
     .select({
       state: t.state,

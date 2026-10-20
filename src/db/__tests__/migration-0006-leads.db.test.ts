@@ -244,7 +244,7 @@ describe("migration 0006: applying it to a database that already has leads and a
             "select count(*)::int n from information_schema.tables where table_schema = 'public'",
           )
         ).rows[0].n,
-      ).toBe(31);
+      ).toBe(38); // every migration applied, including 0007's seven bot tables
 
       // existing linked touches stay linked exactly as they were, and are now protected like every other touch
       const leadOf = async (id: string) =>

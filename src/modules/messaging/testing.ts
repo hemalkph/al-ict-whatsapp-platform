@@ -14,6 +14,7 @@ export const ON: OutboundConfig = {
   liveSendEnabled: true,
   bsuidRecipientEnabled: false,
   graphApiVersion: "v25.0",
+  botsRuntimeEnabled: false,
 };
 
 export class FakeTransport implements OutboundTransport {

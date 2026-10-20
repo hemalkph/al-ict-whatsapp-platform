@@ -182,7 +182,7 @@ export type Assessment = { ok: true; recipient: Recipient } | { ok: false; code:
 
 /**
  * The full decision. `now` is passed in (never read here) so the window is testable at its boundary.
- *  - TEXT needs the customer service window to be open.
+ *  - TEXT (and INTERACTIVE) needs the customer service window to be open.
  *  - TEMPLATE to a phone-only contact additionally needs the window to be open (see the end of this function).
  *  - TEMPLATE needs a registered, operator-attested APPROVED template of this account; UTILITY additionally needs a prior
  *    inbound message from this contact (a customer-initiated relationship); MARKETING additionally needs recorded
@@ -193,7 +193,9 @@ export function assess(input: {
   account: AccountState | null;
   context: ConversationContext;
   message:
-    { type: "text" } | { type: "template"; template: TemplateRow | null; parameterCount: number };
+    | { type: "text" }
+    | { type: "interactive" }
+    | { type: "template"; template: TemplateRow | null; parameterCount: number };
   bsuidRecipientEnabled: boolean;
   now: Date;
 }): Assessment {
@@ -202,7 +204,9 @@ export function assess(input: {
     return { ok: false, code: "account_inactive" };
   if (context.contact.archivedAt !== null) return { ok: false, code: "contact_archived" };
 
-  if (message.type === "text") {
+  // An interactive message (Phase 08D, BOT only) is a free-form message: exactly the TEXT rules (window-bound, no template,
+  // no consent path).
+  if (message.type === "text" || message.type === "interactive") {
     const window = serviceWindow(context.lastInboundAt, input.now);
     if (!window.open) return { ok: false, code: window.reason };
   } else {
