@@ -1,5 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { schema } from "@/db";
+import type { BotTriggerInput } from "@/db/ops/bot-trigger";
+import { emitBotRuntimeLog } from "@/modules/bot-runtime";
 import {
   advanceInboundActivity,
   backResolveReplies,
@@ -13,7 +15,7 @@ import {
 } from "@/db/ops/inbound-message";
 import { resolveInboundContact } from "../identity";
 import { isRecord } from "../parse";
-import { PermanentWebhookError } from "../queue/errors";
+import { PermanentWebhookError, classifyFailure } from "../queue/errors";
 import { emitWebhookLog } from "../logging";
 import type { WebhookHandler, WebhookHandlerRegistry } from "../queue/process";
 import { FUTURE_SKEW_MS, effectiveActivityTime } from "../time";
@@ -42,151 +44,183 @@ class DuplicateMessage extends Error {
 
 const STALE_MS = 8 * 24 * 60 * 60 * 1000;
 
-export const handleInboundMessage: WebhookHandler = async (tx, event) => {
-  // A sender / reply / media identifier that the ingest-time cleaning had to alter (a NUL or lone surrogate) is no longer
-  // the identifier the provider sent, and might equal another contact's. Nothing is resolved or written from it.
-  if (isRecord(event.payload) && event.payload.identifierIntegrity === "altered")
-    throw new PermanentWebhookError("invalid_provider_identifier");
-  const message = mapInboundMessage(event.payload);
-  const org = event.organizationId;
-  const accountId = event.whatsappAccountId;
+export type InboundMessageDeps = {
+  captureBotTrigger?: (sp: Parameters<WebhookHandler>[0], input: BotTriggerInput) => Promise<void>;
+};
 
-  // The queue rechecked the account just before calling us; this closes the small gap and proves org/account agree.
-  const [account] = await tx
-    .select({
-      status: schema.whatsappAccounts.status,
-      archivedAt: schema.whatsappAccounts.archivedAt,
-    })
-    .from(schema.whatsappAccounts)
-    .where(
-      and(
-        eq(schema.whatsappAccounts.id, accountId),
-        eq(schema.whatsappAccounts.organizationId, org),
-      ),
-    );
-  if (!account || account.status !== "ACTIVE" || account.archivedAt !== null)
-    throw new Error("account_not_active"); // transient: the next claim's account check holds or ignores the event
+export const createInboundMessageHandler = (deps: InboundMessageDeps = {}): WebhookHandler =>
+  async function handleInboundMessage(tx, event) {
+    // A sender / reply / media identifier that the ingest-time cleaning had to alter (a NUL or lone surrogate) is no longer
+    // the identifier the provider sent, and might equal another contact's. Nothing is resolved or written from it.
+    if (isRecord(event.payload) && event.payload.identifierIntegrity === "altered")
+      throw new PermanentWebhookError("invalid_provider_identifier");
+    const message = mapInboundMessage(event.payload);
+    const org = event.organizationId;
+    const accountId = event.whatsappAccountId;
 
-  const effectiveAt = effectiveActivityTime(message.occurredAt, event.receivedAt);
-  const providerSkew = message.occurredAt.getTime() - event.receivedAt.getTime();
-  if (providerSkew > FUTURE_SKEW_MS || -providerSkew > STALE_MS) {
-    emitWebhookLog({
-      event: "webhook.timestamp_anomaly",
-      outcome: "denied",
-      webhookEventId: event.id,
-      organizationId: org,
-      whatsappAccountId: accountId,
-      eventType: "MESSAGE",
-      reason: providerSkew > 0 ? "timestamp_future" : "timestamp_stale",
-    });
-  }
+    // The queue rechecked the account just before calling us; this closes the small gap and proves org/account agree.
+    const [account] = await tx
+      .select({
+        status: schema.whatsappAccounts.status,
+        archivedAt: schema.whatsappAccounts.archivedAt,
+      })
+      .from(schema.whatsappAccounts)
+      .where(
+        and(
+          eq(schema.whatsappAccounts.id, accountId),
+          eq(schema.whatsappAccounts.organizationId, org),
+        ),
+      );
+    if (!account || account.status !== "ACTIVE" || account.archivedAt !== null)
+      throw new Error("account_not_active"); // transient: the next claim's account check holds or ignores the event
 
-  // The lock on this logical message, and, for a reply, on the message it answers: an outbound message is given its wamid
-  // under that same lock (the outbound module), so either this handler sees the parent's wamid, or the outbound
-  // acceptance runs after this transaction commits and back-resolves this reply. Keys are taken in sorted order so two
-  // handlers can never wait on each other.
-  const keys = [message.wamid, ...(message.replyToWamid ? [message.replyToWamid] : [])]
-    .map((wamid) => `wa-message:${org}:${accountId}:${wamid}`)
-    .filter((key, i, all) => all.indexOf(key) === i)
-    .sort();
-  for (const key of keys)
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-  const duplicate = () =>
-    emitWebhookLog({
-      event: "webhook.message_duplicate",
-      outcome: "success",
-      webhookEventId: event.id,
-      organizationId: org,
-      whatsappAccountId: accountId,
-      eventType: "MESSAGE",
-    });
-  if (
-    await findMessageId(tx, {
-      organizationId: org,
-      whatsappAccountId: accountId,
-      wamid: message.wamid,
-    })
-  ) {
-    duplicate();
-    return;
-  }
-
-  const isReaction = message.type === "REACTION";
-  try {
-    // A savepoint inside the worker's transaction (never a separate one): a late duplicate undoes the provisional writes.
-    await tx.transaction(async (sp) => {
-      const contact = await resolveInboundContact(sp, event, { observedAt: message.occurredAt });
-      const conversation = await getOrCreateConversation(sp, {
+    const effectiveAt = effectiveActivityTime(message.occurredAt, event.receivedAt);
+    const providerSkew = message.occurredAt.getTime() - event.receivedAt.getTime();
+    if (providerSkew > FUTURE_SKEW_MS || -providerSkew > STALE_MS) {
+      emitWebhookLog({
+        event: "webhook.timestamp_anomaly",
+        outcome: "denied",
+        webhookEventId: event.id,
         organizationId: org,
         whatsappAccountId: accountId,
-        contactId: contact.contactId,
-        initialLastMessageAt: effectiveAt,
-        // a reaction is recorded but is not customer activity (whether it opens the service window is unresolved, G0)
-        initialLastInboundAt: isReaction ? null : effectiveAt,
+        eventType: "MESSAGE",
+        reason: providerSkew > 0 ? "timestamp_future" : "timestamp_stale",
       });
+    }
 
-      const parentId = message.replyToWamid
-        ? await findReplyParent(sp, {
-            organizationId: org,
-            conversationId: conversation.id,
-            wamid: message.replyToWamid,
-          })
-        : null;
-      const messageId = await insertInboundMessage(sp, {
+    // The lock on this logical message, and, for a reply, on the message it answers: an outbound message is given its wamid
+    // under that same lock (the outbound module), so either this handler sees the parent's wamid, or the outbound
+    // acceptance runs after this transaction commits and back-resolves this reply. Keys are taken in sorted order so two
+    // handlers can never wait on each other.
+    const keys = [message.wamid, ...(message.replyToWamid ? [message.replyToWamid] : [])]
+      .map((wamid) => `wa-message:${org}:${accountId}:${wamid}`)
+      .filter((key, i, all) => all.indexOf(key) === i)
+      .sort();
+    for (const key of keys)
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+    const duplicate = () =>
+      emitWebhookLog({
+        event: "webhook.message_duplicate",
+        outcome: "success",
+        webhookEventId: event.id,
         organizationId: org,
         whatsappAccountId: accountId,
-        conversationId: conversation.id,
-        wamid: message.wamid,
-        type: message.type,
-        body: message.body,
-        content: message.content,
-        replyToWamid: message.replyToWamid,
-        replyToMessageId: parentId,
-        occurredAt: message.occurredAt,
-        sourceWebhookEventId: event.id,
+        eventType: "MESSAGE",
       });
-      if (!messageId) throw new DuplicateMessage();
-
-      // Only now, with a NEW message in hand, may derived conversation state change.
-      if (!isReaction && !conversation.created) {
-        await advanceInboundActivity(sp, {
-          organizationId: org,
-          conversationId: conversation.id,
-          effectiveAt,
-        });
-        await reopenIfNewer(sp, {
-          organizationId: org,
-          conversationId: conversation.id,
-          effectiveAt,
-        });
-      }
-      if (message.media) {
-        await insertPendingAttachment(sp, { organizationId: org, messageId, ...message.media });
-      }
-      await backResolveReplies(sp, {
+    if (
+      await findMessageId(tx, {
         organizationId: org,
-        conversationId: conversation.id,
-        messageId,
+        whatsappAccountId: accountId,
         wamid: message.wamid,
-      });
-      if (message.referral) {
-        await insertAttributionOnce(sp, {
-          organizationId: org,
-          contactId: contact.contactId,
-          messageId,
-          receivedAt: event.receivedAt,
-          ...message.referral,
-        });
-      }
-    });
-  } catch (error) {
-    if (error instanceof DuplicateMessage) {
+      })
+    ) {
       duplicate();
       return;
     }
-    throw error;
-  }
-};
+
+    const isReaction = message.type === "REACTION";
+    try {
+      // A savepoint inside the worker's transaction (never a separate one): a late duplicate undoes the provisional writes.
+      await tx.transaction(async (sp) => {
+        const contact = await resolveInboundContact(sp, event, { observedAt: message.occurredAt });
+        const conversation = await getOrCreateConversation(sp, {
+          organizationId: org,
+          whatsappAccountId: accountId,
+          contactId: contact.contactId,
+          initialLastMessageAt: effectiveAt,
+          // a reaction is recorded but is not customer activity (whether it opens the service window is unresolved, G0)
+          initialLastInboundAt: isReaction ? null : effectiveAt,
+        });
+
+        const parentId = message.replyToWamid
+          ? await findReplyParent(sp, {
+              organizationId: org,
+              conversationId: conversation.id,
+              wamid: message.replyToWamid,
+            })
+          : null;
+        const messageId = await insertInboundMessage(sp, {
+          organizationId: org,
+          whatsappAccountId: accountId,
+          conversationId: conversation.id,
+          wamid: message.wamid,
+          type: message.type,
+          body: message.body,
+          content: message.content,
+          replyToWamid: message.replyToWamid,
+          replyToMessageId: parentId,
+          occurredAt: message.occurredAt,
+          sourceWebhookEventId: event.id,
+        });
+        if (!messageId) throw new DuplicateMessage();
+
+        // Only now, with a NEW message in hand, may derived conversation state change.
+        if (!isReaction && !conversation.created) {
+          await advanceInboundActivity(sp, {
+            organizationId: org,
+            conversationId: conversation.id,
+            effectiveAt,
+          });
+          await reopenIfNewer(sp, {
+            organizationId: org,
+            conversationId: conversation.id,
+            effectiveAt,
+          });
+        }
+        if (message.media) {
+          await insertPendingAttachment(sp, { organizationId: org, messageId, ...message.media });
+        }
+        await backResolveReplies(sp, {
+          organizationId: org,
+          conversationId: conversation.id,
+          messageId,
+          wamid: message.wamid,
+        });
+        if (message.referral) {
+          await insertAttributionOnce(sp, {
+            organizationId: org,
+            contactId: contact.contactId,
+            messageId,
+            receivedAt: event.receivedAt,
+            ...message.referral,
+          });
+        }
+        if (deps.captureBotTrigger) {
+          try {
+            // A capture SQL error must be rolled back before any more statements use this transaction.
+            await sp.transaction((captureSp) =>
+              deps.captureBotTrigger!(captureSp, {
+                organizationId: org,
+                whatsappAccountId: accountId,
+                conversationId: conversation.id,
+                messageId,
+                messageType: message.type,
+                inputOccurredAt: effectiveAt,
+              }),
+            );
+          } catch (error) {
+            emitBotRuntimeLog({
+              event: "bots.trigger_capture_failed",
+              outcome: "failure",
+              organizationId: org,
+              whatsappAccountId: accountId,
+              conversationId: conversation.id,
+              messageId,
+              reason: classifyFailure(error).code,
+            });
+          }
+        }
+      });
+    } catch (error) {
+      if (error instanceof DuplicateMessage) {
+        duplicate();
+        return;
+      }
+      throw error;
+    }
+  };
+
+export const handleInboundMessage: WebhookHandler = createInboundMessageHandler();
 
 /**
  * The handler registry for the MESSAGE event type alone (tests compose it with others). Production uses the fixed MESSAGE +

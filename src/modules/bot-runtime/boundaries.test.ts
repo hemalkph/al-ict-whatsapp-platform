@@ -10,7 +10,7 @@ import {
 
 // Structural guards for the bot runtime core (Phase 08E-1, plan sections C, M and N.1). Decision helpers are pure;
 // emitBotRuntimeLog intentionally writes logs and reads the clock through the shared logger. The source checks below do not
-// prove transitive purity. The core reads no database, sends nothing, has no production caller, and models default-off gates.
+// prove transitive purity. The core reads no database, sends nothing, and models default-off gates.
 // Later checkpoints (08E-2 and on) add files and change the file list below on purpose, as visible edits to this test.
 
 const root = new URL(".", import.meta.url).pathname;
@@ -100,13 +100,31 @@ describe("bot runtime core boundaries (08E-1)", () => {
     expect(log).not.toMatch(/JSON\.stringify|\.\.\.\s*e\b|Object\.(assign|entries|keys)/); // no spreading of caller objects
   });
 
-  it("has NO production caller: nothing outside the module imports it yet (tests excepted)", () => {
+  it("has only the approved 08E-2 production callers for gates and capture logging", () => {
     const importers = [...walk("src"), ...walk("scripts")].filter(
       (f) =>
         !f.includes("/src/modules/bot-runtime/") &&
         /(from|import)\s*\(?\s*"[^"]*modules\/bot-runtime(\/[^"]*)?"/.test(read(f)),
     );
-    expect(importers.map((f) => relative(repo, f))).toEqual([]);
+    expect(importers.map((f) => relative(repo, f)).sort()).toEqual([
+      "src/modules/whatsapp/inbound/handler.ts",
+      "src/modules/whatsapp/worker/registry.ts",
+    ]);
+    for (const f of importers) {
+      const imports = [
+        ...read(f).matchAll(/import\s*\{([^}]+)\}\s*from\s*"@\/modules\/bot-runtime"/g),
+      ];
+      expect(imports, f).toHaveLength(1);
+      const names = imports[0]![1]!
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean);
+      expect(names, f).toEqual(
+        f.endsWith("handler.ts")
+          ? ["emitBotRuntimeLog"]
+          : ["emitBotRuntimeLog", "triggerCaptureEnabled"],
+      );
+    }
   });
 
   it("no worker script, package script or environment example for the runtime exists yet (08E-7)", () => {
@@ -117,9 +135,14 @@ describe("bot runtime core boundaries (08E-1)", () => {
     expect(readdirSync(join(repo, "scripts"))).not.toContain("bots-worker.ts");
   });
 
-  it("the inbound pipeline and the dispatcher do not know the runtime", () => {
+  it("the dispatcher and database ops do not know the runtime; inbound imports only at its approved capture boundaries", () => {
     for (const dir of ["src/modules/whatsapp", "src/modules/messaging", "src/db/ops"])
-      for (const f of walk(dir).filter((p) => !/\.test\.ts$/.test(p)))
+      for (const f of walk(dir).filter(
+        (p) =>
+          !/\.test\.ts$/.test(p) &&
+          !p.endsWith("/inbound/handler.ts") &&
+          !p.endsWith("/worker/registry.ts"),
+      ))
         expect(read(f), f).not.toMatch(/bot-runtime/);
   });
 });

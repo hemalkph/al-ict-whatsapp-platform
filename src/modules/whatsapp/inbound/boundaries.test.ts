@@ -16,7 +16,12 @@ const sources = readdirSync(root)
   .map((f) => ({ file: f, text: code(read(join(root, f))) }));
 const source = (file: string) => sources.find((s) => s.file === file)!.text;
 const ops = code(read(join(repo, "src/db/ops/inbound-message.ts")));
-const all = [...sources, { file: "db/ops/inbound-message.ts", text: ops }];
+const captureOps = code(read(join(repo, "src/db/ops/bot-trigger.ts")));
+const all = [
+  ...sources,
+  { file: "db/ops/inbound-message.ts", text: ops },
+  { file: "db/ops/bot-trigger.ts", text: captureOps },
+];
 const before = (text: string, a: string, b: string) => {
   const ia = text.indexOf(a);
   const ib = text.indexOf(b);
@@ -58,14 +63,18 @@ describe("inbound message handler boundaries", () => {
     expect(ops).toMatch(/INSERT INTO lead_attributions[\s\S]*?\bNULL\b/); // lead_id is NULL
   });
 
-  it("opens no transaction of its own and uses no connection but the one it is given (one savepoint, nothing else)", () => {
+  it("uses only the caller's transaction: inbound savepoint plus an optional nested capture savepoint", () => {
     for (const { file, text } of all) {
       expect(text, file).not.toMatch(/getDb|new Pool|\bconnect\s*\(|\bBEGIN\b|\bCOMMIT\b/);
       expect(text, file).not.toMatch(/from\s+"pg"|from\s+"@\/db\/client"/);
     }
-    expect(source("handler.ts").match(/\.transaction\s*\(/g)).toHaveLength(1); // the savepoint inside the worker's transaction
+    expect(source("handler.ts").match(/\.transaction\s*\(/g)).toHaveLength(2);
     expect(ops).not.toMatch(/\.transaction\s*\(/);
+    expect(captureOps).not.toMatch(/\.transaction\s*\(|from\s+"@\/modules\//);
     expect(source("handler.ts")).toContain("await tx.transaction(async (sp)");
+    expect(source("handler.ts")).toMatch(
+      /if \(deps.captureBotTrigger\)\s*\{\s*try\s*\{\s*await sp.transaction/,
+    );
   });
 
   it("never decides the event's final state: no completion, failure, hold, claim or PROCESSED anywhere", () => {
@@ -88,6 +97,7 @@ describe("inbound message handler boundaries", () => {
     before(handler, "insertInboundMessage(", "insertPendingAttachment(");
     before(handler, "insertInboundMessage(", "backResolveReplies(");
     before(handler, "insertInboundMessage(", "insertAttributionOnce(");
+    before(handler, "insertAttributionOnce(", "deps.captureBotTrigger!");
     expect(handler).toContain("if (!messageId) throw new DuplicateMessage()");
     // the lock key is the shared per-message namespace; a reply also locks the wamid it answers (the outbound module stores a
     // wamid under that same lock and then back-resolves earlier replies), keys taken in sorted order so waits cannot cycle

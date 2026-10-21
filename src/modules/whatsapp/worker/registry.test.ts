@@ -1,9 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { handleInboundMessage } from "../inbound/handler";
 import { handleMessageStatus } from "../status/handler";
-import { webhookWorkerHandlers } from "./registry";
+import { buildWebhookWorkerHandlers, webhookWorkerHandlers } from "./registry";
 
 describe("production handler registry", () => {
+  it.each([undefined, "", "false", "TRUE", "1", "yes", " true", "true "])(
+    "capture stays off for %s even when unrelated flags are on",
+    (value) => {
+      expect(
+        buildWebhookWorkerHandlers({
+          BOTS_RUNTIME_ENABLED: value,
+          WHATSAPP_WORKER_ENABLED: "true",
+          WHATSAPP_OUTBOUND_ENABLED: "true",
+          WHATSAPP_LIVE_SEND_ENABLED: "true",
+        }),
+      ).toBe(webhookWorkerHandlers);
+    },
+  );
+
+  it("only exact true in this worker's injected environment builds capture; it changes MESSAGE only", () => {
+    const registry = buildWebhookWorkerHandlers({ BOTS_RUNTIME_ENABLED: "true" });
+    expect(registry.MESSAGE).not.toBe(handleInboundMessage);
+    expect(registry.STATUS).toBe(handleMessageStatus);
+    expect(Object.keys(registry).sort()).toEqual(["MESSAGE", "STATUS"]);
+    expect(Object.isFrozen(registry)).toBe(true);
+    expect(buildWebhookWorkerHandlers({})).toBe(webhookWorkerHandlers);
+  });
+
   it("contains exactly MESSAGE and STATUS, mapped to the real handlers", () => {
     expect(Object.keys(webhookWorkerHandlers).sort()).toEqual(["MESSAGE", "STATUS"]);
     expect(webhookWorkerHandlers.MESSAGE).toBe(handleInboundMessage);

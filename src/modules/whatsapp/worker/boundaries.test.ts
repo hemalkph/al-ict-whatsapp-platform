@@ -82,7 +82,12 @@ describe("worker boundaries", () => {
       );
     }
     // the registry is the only source of handlers for the real run
-    expect(source("run.ts")).toContain("options.handlers ?? webhookWorkerHandlers");
+    expect(source("run.ts")).toContain(
+      "options.handlers ?? buildWebhookWorkerHandlers(options.env)",
+    );
+    expect(registry).toContain("if (!triggerCaptureEnabled(env)) return webhookWorkerHandlers");
+    expect(registry).toContain("captureBotTrigger: async (sp, input)");
+    expect(registry).toContain("insertBotTriggerIfAdmitted(sp, input)");
     expect(source("run.ts")).not.toMatch(/handleInboundMessage|handleMessageStatus/);
     expect(script).not.toMatch(/handlers|createDatabase|sleep/); // the script cannot override anything
   });

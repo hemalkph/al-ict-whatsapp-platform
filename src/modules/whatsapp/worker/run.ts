@@ -8,7 +8,7 @@ import { SchemaNotReadyError } from "./errors";
 import { readWorkerConfig, type WorkerConfig } from "./config";
 import { runWorkerLoop } from "./loop";
 import { SHUTDOWN_GRACE_MS } from "./policy";
-import { webhookWorkerHandlers } from "./registry";
+import { buildWebhookWorkerHandlers } from "./registry";
 
 // Process-level orchestration of the standalone WhatsApp worker: validate configuration, open ITS OWN bounded connection
 // pool, verify the database is migrated, poll until told to stop, close the pool. It never calls Meta, never sends
@@ -81,7 +81,7 @@ export async function runWorker(options: RunOptions): Promise<number> {
     return EXIT_REFUSED;
   }
   const { config } = read;
-  const handlers = options.handlers ?? webhookWorkerHandlers;
+  const handlers = options.handlers ?? buildWebhookWorkerHandlers(options.env);
   const database = (options.createDatabase ?? defaultDatabase)(config);
   const { db } = database;
   const { signal } = options;
