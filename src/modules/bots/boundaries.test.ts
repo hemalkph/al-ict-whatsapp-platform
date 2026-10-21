@@ -47,6 +47,7 @@ describe("bots module boundaries (08A, 08B)", () => {
       "session.ts",
       "simulate.ts",
       "text.ts",
+      "trigger-match.ts",
       "types.ts",
       "urls.ts",
       "validate.ts",
@@ -113,7 +114,7 @@ describe("bots module boundaries (08A, 08B)", () => {
     }
   });
 
-  it("is imported only by bot-control, and only for its pure validation and canonicalization (no runtime before 08E)", () => {
+  it("is imported only by bot-control (validation, canonicalization) and, from 08E-1, bot-runtime (trigger matching and session types); never the engine or simulator by anything else", () => {
     const repo = join(root, "../../..");
     const walk = (dir: string): string[] =>
       (
@@ -131,9 +132,26 @@ describe("bots module boundaries (08A, 08B)", () => {
     );
     const production = importers.filter((f) => !/\.(db\.)?test\.ts$|\/testing\.ts$/.test(f));
     expect(production.length).toBeGreaterThan(0); // the scan really finds the bot-control importers
-    for (const f of production) expect(f, f).toContain("/src/modules/bot-control/");
-    // The approved pure surface: validation, canonicalization, limits and types. Never the engine or the simulator.
-    const allowed = new Set([
+    for (const f of production) expect(f, f).toMatch(/\/src\/modules\/(bot-control|bot-runtime)\//);
+    // bot-runtime's approved surface at 08E-1: the pure trigger matcher and the engine's data types. The engine itself
+    // (`step`) joins the list only at the checkpoint that runs it (08E-4), as a visible change to this test.
+    const runtimeAllowed = new Set([
+      "matchTrigger",
+      "TRIGGER_ELIGIBLE_TYPES",
+      "isTriggerEligibleType",
+      "Trigger",
+      "type Trigger",
+      "TriggerKind",
+      "type TriggerKind",
+      "StudentInput",
+      "type StudentInput",
+      "BotSession",
+      "type BotSession",
+      "Awaiting",
+      "type Awaiting",
+    ]);
+    // bot-control's approved pure surface: validation, canonicalization, limits and types. Never the engine or the simulator.
+    const controlAllowed = new Set([
       "validateFlow",
       "canonicalFlowJson",
       "checkJsonShape",
@@ -151,7 +169,10 @@ describe("bots module boundaries (08A, 08B)", () => {
           .split(",")
           .map((n) => n.trim())
           .filter(Boolean))
-          expect(allowed.has(name), `${f}: ${name}`).toBe(true);
+          expect(
+            (f.includes("/src/modules/bot-runtime/") ? runtimeAllowed : controlAllowed).has(name),
+            `${f}: ${name}`,
+          ).toBe(true);
       }
       expect(read(f), f).not.toMatch(/@\/modules\/bots\//); // no deep imports
     }

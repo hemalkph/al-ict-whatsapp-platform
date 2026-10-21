@@ -35,6 +35,18 @@ export {
 } from "./graph";
 export type { Edge, GraphAnalysis } from "./graph";
 export { getNode, getVariable } from "./lookup";
+export {
+  TRIGGER_ELIGIBLE_TYPES,
+  isTriggerEligibleType,
+  matchTrigger,
+  triggerKey,
+} from "./trigger-match";
+export type {
+  TriggerEligibleType,
+  TriggerFacts,
+  TriggerMatch,
+  TriggerMessage,
+} from "./trigger-match";
 export { DIAGNOSTIC_CODES, compareDiagnostics, severityOf, templateOf } from "./diagnostics";
 export type { DiagnosticCode } from "./diagnostics";
 export {

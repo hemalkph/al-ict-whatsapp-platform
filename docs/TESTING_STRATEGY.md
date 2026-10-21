@@ -221,6 +221,12 @@ The coverage requirements below are retained from the gap analysis, with accepte
 
 Condition closure follows the owner-reported independent acceptance, not tests alone. Historical coverage and other production blockers remain unchanged. Phase 08E-0 is ready for the owner-operated checkpoint; no database access or live sending in this documentation step, all gates remain OFF, no Git mutation, and no Phase 08E-1 work without separate authorization.
 
+## Phase 08E-1 nonblocking clarifications
+
+Decision helpers are pure; `emitBotRuntimeLog` intentionally writes logs and reads the clock through the shared logger. Logger reason-code validation checks format only, not membership in a fixed trusted-code registry; callers must supply approved fixed reason codes and never put user content in the reason field.
+
+**PostgreSQL EXPLAIN/index evaluation: DEFERRED** from 08E-1 to the SQL implementation milestone that introduces each query: 08E-3 queue primitives, 08E-4 session-cap/cooldown/hourly-cap queries, and 08E-6 sweeper queries. No Phase 08E runtime EXPLAIN evidence exists yet. Evaluate the actual SQL on representative disposable PostgreSQL data when separately authorized; migration 0009 is not authorized. This records the deferral of the plan's 08E-1/O-4 evidence requirement without authorizing later implementation or a migration.
+
 ## Phase 07D-4 review corrections tests
 
 - _Unit_ (`lead-detail-controller.test.ts`): `acceptStatusResult` accepts the documented envelope and refuses 26 malformed or contradictory ones (no lead, null lead, no or non-integer revision, a revision that did not move or went backwards, a status that was not asked for or is unsupported, another lead's answer, wrong field types, a body that is not an object); each such answer is an unknown outcome (one POST, a recovery read, the control waits, the lead on screen untouched, a new decision only after the read, uncertainty kept if the read fails too); a defect while applying a believed answer recovers and is reported; a malformed lead read or history page is a retryable failure and not a hang; a confirmed change followed by someone else's newer status keeps the notice about THIS change; `lead-status.test.ts` pins the historical wording.
