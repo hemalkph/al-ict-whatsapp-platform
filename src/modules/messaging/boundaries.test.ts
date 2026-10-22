@@ -404,15 +404,15 @@ describe("outbound boundaries", () => {
       expect(accepted).not.toMatch(/transport|\.send\(/);
     });
 
-    it("enqueueAutomatedMessage has no production or script caller in 08D, and messaging never imports the bot modules", () => {
+    it("enqueueAutomatedMessage has exactly one production importer (bot-runtime/outbound.ts, 08E-4), and messaging never imports the bot modules", () => {
       const callers = appSources().filter(
         (f) =>
           !f.startsWith("src/modules/messaging/") &&
           /enqueueAutomatedMessage|messaging\/enqueue/.test(read(join(repo, f))),
       );
-      expect(callers).toEqual([]);
+      expect(callers).toEqual(["src/modules/bot-runtime/outbound.ts"]);
       for (const { file, text } of sources)
-        expect(text, file).not.toMatch(/@\/modules\/(bots|bot-control)\b/);
+        expect(text, file).not.toMatch(/@\/modules\/(bots|bot-control|bot-runtime)\b/);
       expect(source("enqueue.ts")).not.toMatch(/process\.env/);
     });
   });
@@ -504,6 +504,7 @@ describe("outbound boundaries", () => {
         "scripts/whatsapp-outbound.ts",
         "src/app/api/conversations/[conversationId]/messages/route.ts",
         "src/app/api/outbound-requests/[requestId]/route.ts",
+        "src/modules/bot-runtime/outbound.ts",
         "src/modules/inbox/detail.ts",
       ]);
       for (const f of importers.filter((x) => x.startsWith("src/app/")))

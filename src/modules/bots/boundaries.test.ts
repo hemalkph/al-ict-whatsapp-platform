@@ -133,8 +133,9 @@ describe("bots module boundaries (08A, 08B)", () => {
     const production = importers.filter((f) => !/\.(db\.)?test\.ts$|\/testing\.ts$/.test(f));
     expect(production.length).toBeGreaterThan(0); // the scan really finds the bot-control importers
     for (const f of production) expect(f, f).toMatch(/\/src\/modules\/(bot-control|bot-runtime)\//);
-    // bot-runtime's approved surface at 08E-1: the pure trigger matcher and the engine's data types. The engine itself
-    // (`step`) joins the list only at the checkpoint that runs it (08E-4), as a visible change to this test.
+    // bot-runtime's approved surface: the pure trigger matcher and the engine's data types (08E-1), and from 08E-4 the engine
+    // itself (`step`), the validator (to load a pinned version) and the engine's result types, as a visible change to this test.
+    // The simulator and every other export stay unavailable to the runtime.
     const runtimeAllowed = new Set([
       "matchTrigger",
       "TRIGGER_ELIGIBLE_TYPES",
@@ -149,6 +150,16 @@ describe("bots module boundaries (08A, 08B)", () => {
       "type BotSession",
       "Awaiting",
       "type Awaiting",
+      "step",
+      "validateFlow",
+      "FlowConfig",
+      "type FlowConfig",
+      "StepResult",
+      "type StepResult",
+      "SendEffect",
+      "type SendEffect",
+      "RequestState",
+      "type RequestState",
     ]);
     // bot-control's approved pure surface: validation, canonicalization, limits and types. Never the engine or the simulator.
     const controlAllowed = new Set([

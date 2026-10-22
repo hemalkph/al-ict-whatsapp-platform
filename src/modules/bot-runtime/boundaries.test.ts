@@ -17,6 +17,17 @@ const root = new URL(".", import.meta.url).pathname;
 const repo = join(root, "../../..");
 const read = (p: string) => readFileSync(p, "utf8");
 const code = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+// 08E-4: the files that reach the database, each ONLY through the SQL primitives of db/ops (no SQL text, driver or ORM here).
+const OPS_IMPORTS: Record<string, readonly string[]> = {
+  "trigger-queue.ts": ["@/db/ops/bot-trigger-queue", "@/db/ops/executor"],
+  "apply.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
+  "context.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
+  "continue.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
+  "flow-cache.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
+  "outbound.ts": ["@/db/ops/bot-session-store", "@/db/ops/executor"],
+  "start.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
+  "step.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
+};
 const sources = readdirSync(root)
   .filter((f) => f.endsWith(".ts") && !/\.(db\.)?test\.ts$/.test(f) && f !== "testing.ts")
   .map((f) => ({ file: f, text: code(read(join(root, f))) }));
@@ -33,14 +44,21 @@ const walk = (dir: string): string[] =>
 describe("bot runtime core boundaries (08E-1)", () => {
   it("has exactly the expected production files and no subdirectory", () => {
     expect(sources.map((s) => s.file).sort()).toEqual([
+      "apply.ts",
       "backoff.ts",
       "config.ts",
+      "context.ts",
+      "continue.ts",
       "eligibility.ts",
+      "flow-cache.ts",
       "index.ts",
       "input.ts",
       "log.ts",
+      "outbound.ts",
       "policy.ts",
       "session-row.ts",
+      "start.ts",
+      "step.ts",
       "takeover.ts",
       "trigger-queue.ts",
     ]);
@@ -50,8 +68,8 @@ describe("bot runtime core boundaries (08E-1)", () => {
     expect(dirs.map((d) => d.name)).toEqual([]);
   });
 
-  it("reads no database and issues no SQL: no database, driver, ORM or query text (trigger-queue.ts excepted, see below)", () => {
-    for (const { file, text } of sources.filter((s) => s.file !== "trigger-queue.ts")) {
+  it("reads no database and issues no SQL: no database, driver, ORM or query text (the files in OPS_IMPORTS excepted, see below)", () => {
+    for (const { file, text } of sources.filter((s) => !(s.file in OPS_IMPORTS))) {
       expect(text, file).not.toMatch(
         /@\/db\b|drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/,
       );
@@ -73,9 +91,79 @@ describe("bot runtime core boundaries (08E-1)", () => {
       (p) =>
         !p.includes("/src/modules/bot-runtime/") &&
         !p.endsWith("/src/db/ops/bot-trigger-queue.ts") &&
+        !p.endsWith("/src/db/ops/bot-step.ts") &&
+        !p.endsWith("/src/db/ops/bot-session-store.ts") &&
         !/\.test\.ts$/.test(p),
     ))
       expect(read(f), f).not.toMatch(/bot-runtime\/trigger-queue|bot-trigger-queue/);
+  });
+
+  it("the 08E-4 step files reach the database only through db/ops primitives: no SQL text, driver, ORM or transaction call", () => {
+    for (const [file, allowed] of Object.entries(OPS_IMPORTS)) {
+      const text = sources.find((s) => s.file === file)!.text;
+      expect(text, file).not.toMatch(
+        /drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/,
+      );
+      expect(text, file).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM)\b/);
+      for (const m of text.matchAll(/from\s+"(@\/db[^"]*)"/g))
+        expect(allowed, `${file}: ${m[1]}`).toContain(m[1]);
+    }
+    // the step is not part of the public index and nothing outside the module imports it
+    expect(sources.find((s) => s.file === "index.ts")!.text).not.toMatch(
+      /step|apply|start|continue|outbound|flow-cache|context/,
+    );
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) => !p.includes("/src/modules/bot-runtime/") && !/\.test\.ts$/.test(p),
+    ))
+      expect(read(f), f).not.toMatch(
+        /bot-runtime\/(step|apply|start|continue|outbound|flow-cache|context)/,
+      );
+  });
+
+  it("the step SQL never reads a transaction-start time, locks an outbound request, or waits for an advisory lock", () => {
+    for (const f of ["src/db/ops/bot-step.ts", "src/db/ops/bot-session-store.ts"]) {
+      const text = code(read(join(repo, f)));
+      expect(text, f).not.toMatch(/\bnow\s*\(\s*\)|current_timestamp|transaction_timestamp/i);
+      expect(text, f).not.toMatch(/pg_advisory_xact_lock\s*\(|pg_advisory_lock\s*\(/);
+      expect(text, f).not.toMatch(/FROM outbound_requests[^;`]*FOR (UPDATE|SHARE)/i);
+      expect(text, f).not.toMatch(/UPDATE outbound_requests|INSERT INTO outbound_requests/i);
+      expect(text, f).not.toMatch(/bot-runtime|@\/modules\//);
+    }
+    const ops = code(read(join(repo, "src/db/ops/bot-step.ts")));
+    expect(ops).toMatch(/pg_try_advisory_xact_lock/);
+    // the lock order of K.1 is the order of these calls in the step
+    const step = code(read(join(root, "step.ts")));
+    const order = [
+      "lockStepTrigger(",
+      "tryAdvisoryLock(tx, conversationLockKey",
+      "tryAdvisoryLock(tx, contactLockKey",
+      "lockDeploymentsShare(",
+      "lockConversation(",
+      "lockLiveSession(",
+      "lockAccountShare(",
+      "await clockOf(deps)(tx);",
+    ].map((n) => step.indexOf(n));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it("enqueueAutomatedMessage has exactly one production importer in the runtime: outbound.ts, and it writes no request state", () => {
+    const importers = sources
+      .filter((s) => /enqueueAutomatedMessage/.test(s.text))
+      .map((s) => s.file);
+    expect(importers).toEqual(["outbound.ts"]);
+    const out = sources.find((s) => s.file === "outbound.ts")!.text;
+    const specs = [...out.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    expect(specs.filter((x) => x.startsWith("@/modules/")).sort()).toEqual([
+      "@/modules/bots",
+      "@/modules/messaging/config",
+      "@/modules/messaging/enqueue",
+      "@/modules/messaging/errors",
+    ]);
+    for (const { file, text } of sources)
+      expect(text, file).not.toMatch(
+        /state\s*=\s*'(SENDING|ACCEPTED|REJECTED|UNKNOWN_OUTCOME|HELD|QUEUED)'/,
+      );
   });
 
   it("the queue primitives never touch outbound requests, messages or any transport, and know no module", () => {
@@ -94,9 +182,15 @@ describe("bot runtime core boundaries (08E-1)", () => {
       expect(text, file).not.toMatch(
         /\bfetch\s*\(|undici|axios|graph\.facebook\.com|XMLHttpRequest|node:https?|node:net/,
       );
-      expect(text, file).not.toMatch(
-        /@\/modules\/(messaging|bot-control|whatsapp|inbox|leads|access|auth)\b|@\/app\/|next\/|enqueueAutomatedMessage|meta-transport|dispatchBatch|claimNext|executeClaim|authorizeSend|OutboundTransport/,
+      expect(
+        file === "outbound.ts"
+          ? text.replace(/@\/modules\/messaging\/(config|enqueue|errors)"/g, '"')
+          : text,
+        file,
+      ).not.toMatch(
+        /@\/modules\/(messaging|bot-control|whatsapp|inbox|leads|access|auth)\b|@\/app\/|next\/|meta-transport|dispatchBatch|claimNext|executeClaim|authorizeSend|OutboundTransport/,
       );
+      if (file !== "outbound.ts") expect(text, file).not.toMatch(/enqueueAutomatedMessage/);
     }
   });
 
@@ -118,8 +212,9 @@ describe("bot runtime core boundaries (08E-1)", () => {
           spec.startsWith("./") ||
             spec === "@/modules/bots" ||
             (spec === "@/shared/logging/logger" && file === "log.ts") ||
-            (file === "trigger-queue.ts" &&
-              (spec === "@/db/ops/bot-trigger-queue" || spec === "@/db/ops/executor")),
+            (spec.startsWith("@/db/ops/") && (OPS_IMPORTS[file] ?? []).includes(spec)) ||
+            (file === "outbound.ts" &&
+              ["config", "enqueue", "errors"].some((m) => spec === `@/modules/messaging/${m}`)),
           `${file}: ${spec}`,
         ).toBe(true);
       }

@@ -110,3 +110,71 @@ export async function makeDue(t: TestDb, id: string): Promise<void> {
     [id],
   );
 }
+
+// ------------------------------------------------------------------------------------------------ Phase 08E-4 flows
+// TEST DATA only: the runtime hard-codes no wording, menu or branch.
+
+type Json = Record<string, unknown>;
+
+const base = (triggers: Json[], start: string, nodes: Json): Json => ({
+  schemaVersion: 1,
+  name: "Test flow",
+  startNodeId: start,
+  errorNodeId: "fallback",
+  triggers,
+  nodes: {
+    fallback: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
+    ...nodes,
+  },
+});
+
+/** Two button prompts, an END with a notice and a HANDOVER with a notice; starts on first_message or the keyword "menu". */
+export function menuFlow(): Json {
+  return base([{ kind: "first_message" }, { kind: "keyword", words: ["menu"] }], "ask", {
+    ask: {
+      type: "BUTTONS",
+      body: "Pick one",
+      options: [
+        { key: "a", title: "A", next: "ask2" },
+        { key: "b", title: "B", next: "staff" },
+      ],
+      onInvalid: "staff",
+    },
+    ask2: {
+      type: "BUTTONS",
+      body: "Again",
+      options: [
+        { key: "ok", title: "OK", next: "done" },
+        { key: "no", title: "No", next: "staff" },
+      ],
+      onInvalid: "staff",
+    },
+    done: { type: "END", message: "Bye" },
+    staff: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
+  });
+}
+
+/** The start node is an END (with or without a notice). */
+export function endFirstFlow(
+  message?: string,
+  trigger: Json = { kind: "keyword", words: ["menu"] },
+): Json {
+  return base([trigger], "done", {
+    done: message === undefined ? { type: "END" } : { type: "END", message },
+  });
+}
+
+/** The start node is a HANDOVER with a notice. */
+export function handoverFirstFlow(): Json {
+  return base([{ kind: "keyword", words: ["menu"] }], "staff", {
+    staff: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
+  });
+}
+
+/** A text message then an END with a notice; the trigger is the keyword "menu" or first_message. */
+export function messageFlow(trigger: Json = { kind: "keyword", words: ["menu"] }): Json {
+  return base([trigger], "welcome", {
+    welcome: { type: "MESSAGE", text: "Hello", next: "done" },
+    done: { type: "END", message: "Bye" },
+  });
+}

@@ -240,17 +240,30 @@ export function deriveFirstEligibleFact(input: {
     (h) =>
       h.id !== input.candidate.id && isEligibleInbound(h) && recordOrderBefore(h, input.candidate),
   );
-  const noPreviousSessionStart = input.priorSessionStarts.length === 0;
-  const evidenceDefect = input.priorSessionStarts.some(
-    (s) => s.startMessage === null || !isEligibleInbound(s.startMessage),
-  );
-  return {
+  return combineFirstEligibleFact({
     candidateEligible,
     firstInRecordHistory,
-    noPreviousSessionStart,
-    evidenceDefect,
+    noPreviousSessionStart: input.priorSessionStarts.length === 0,
+    evidenceDefect: input.priorSessionStarts.some(
+      (s) => s.startMessage === null || !isEligibleInbound(s.startMessage),
+    ),
+  });
+}
+
+/**
+ * The same fact from the four booleans the step transaction's database statement computes under the conversation lock
+ * (record order is compared inside the database at full precision; see readFirstEligibleRows). One rule, two inputs.
+ */
+export function combineFirstEligibleFact(
+  parts: Omit<FirstEligibleFact, "firstEligible">,
+): FirstEligibleFact {
+  return {
+    ...parts,
     firstEligible:
-      candidateEligible && firstInRecordHistory && noPreviousSessionStart && !evidenceDefect,
+      parts.candidateEligible &&
+      parts.firstInRecordHistory &&
+      parts.noPreviousSessionStart &&
+      !parts.evidenceDefect,
   };
 }
 
