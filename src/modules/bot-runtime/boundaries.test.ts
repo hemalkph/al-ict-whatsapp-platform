@@ -42,6 +42,7 @@ describe("bot runtime core boundaries (08E-1)", () => {
       "policy.ts",
       "session-row.ts",
       "takeover.ts",
+      "trigger-queue.ts",
     ]);
     const dirs = (readdirSync(root, { withFileTypes: true }) as import("node:fs").Dirent[]).filter(
       (d) => d.isDirectory(),
@@ -49,13 +50,43 @@ describe("bot runtime core boundaries (08E-1)", () => {
     expect(dirs.map((d) => d.name)).toEqual([]);
   });
 
-  it("reads no database and issues no SQL: no database, driver, ORM or query text", () => {
-    for (const { file, text } of sources) {
+  it("reads no database and issues no SQL: no database, driver, ORM or query text (trigger-queue.ts excepted, see below)", () => {
+    for (const { file, text } of sources.filter((s) => s.file !== "trigger-queue.ts")) {
       expect(text, file).not.toMatch(
         /@\/db\b|drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/,
       );
       expect(text, file).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM)\b/);
     }
+  });
+
+  it("trigger-queue.ts (08E-3) is the one file that reaches the database, and only through the db/ops queue primitives", () => {
+    const queue = sources.find((s) => s.file === "trigger-queue.ts")!.text;
+    const specs = [...queue.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    expect(specs.sort()).toEqual(
+      ["./backoff", "./log", "./policy", "@/db/ops/bot-trigger-queue", "@/db/ops/executor"].sort(),
+    );
+    expect(queue).not.toMatch(/drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/);
+    expect(queue).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM)\b/);
+    // it is not part of the public index (the webhook worker imports the index), and nothing outside the module imports it
+    expect(sources.find((s) => s.file === "index.ts")!.text).not.toMatch(/trigger-queue/);
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) =>
+        !p.includes("/src/modules/bot-runtime/") &&
+        !p.endsWith("/src/db/ops/bot-trigger-queue.ts") &&
+        !/\.test\.ts$/.test(p),
+    ))
+      expect(read(f), f).not.toMatch(/bot-runtime\/trigger-queue|bot-trigger-queue/);
+  });
+
+  it("the queue primitives never touch outbound requests, messages or any transport, and know no module", () => {
+    const ops = code(read(join(repo, "src/db/ops/bot-trigger-queue.ts")));
+    expect(ops).not.toMatch(
+      /outbound_requests|\bmessages\b|@\/modules\/|fetch\s*\(|transport|Math\.random|process\./,
+    );
+    // the fence on every write to a claimed trigger names organization, id, PENDING and the exact claim token
+    expect(ops).toMatch(/status = 'PENDING' AND claim_token = \$\{uuid\(f\.claimToken/);
+    // nothing in the queue file holds a request or message row lock
+    expect(ops).not.toMatch(/FROM bot_triggers[^;]*JOIN\s+outbound/);
   });
 
   it("sends nothing and reaches no one: no network, transport, outbound service, enqueue, inbox, inbound pipeline, admin services or UI", () => {
@@ -86,7 +117,9 @@ describe("bot runtime core boundaries (08E-1)", () => {
         expect(
           spec.startsWith("./") ||
             spec === "@/modules/bots" ||
-            (spec === "@/shared/logging/logger" && file === "log.ts"),
+            (spec === "@/shared/logging/logger" && file === "log.ts") ||
+            (file === "trigger-queue.ts" &&
+              (spec === "@/db/ops/bot-trigger-queue" || spec === "@/db/ops/executor")),
           `${file}: ${spec}`,
         ).toBe(true);
       }
