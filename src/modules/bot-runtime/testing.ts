@@ -3,7 +3,9 @@ import { sql } from "drizzle-orm";
 import { seedMessage, type TestDb } from "@/db/__tests__/helpers";
 import type { DbExecutor } from "@/db/ops/executor";
 import { assignConversation } from "@/modules/inbox";
-import type { DispatchDeps } from "@/modules/messaging/dispatch";
+import type { ReconcileCandidate } from "@/db/ops/bot-session-store";
+import { dbClock } from "@/db/ops/bot-step";
+import { claimNext, executeClaim, type DispatchDeps } from "@/modules/messaging/dispatch";
 import { submitOutboundMessage } from "@/modules/messaging/submit";
 import { FakeTransport, ON, textInput } from "@/modules/messaging/testing";
 import type { SendResult } from "@/modules/messaging/transport";
@@ -12,6 +14,7 @@ import { BOTS_ON, botWorld, publishedBot, type BotWorld } from "../bot-control/t
 import type { StepSummary } from "./context";
 import { FlowCache } from "./flow-cache";
 import type { StepDeps } from "./outbound";
+import { reconcileSession, type ReconcileOutcome } from "./reconcile";
 import { processTrigger } from "./step";
 import { claimTriggers, type ClaimedTrigger } from "./trigger-queue";
 
@@ -181,6 +184,14 @@ export function endFirstFlow(
 /** The start node is a HANDOVER with a notice. */
 export function handoverFirstFlow(): Json {
   return base([{ kind: "keyword", words: ["menu"] }], "staff", {
+    staff: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
+  });
+}
+
+/** A text message then a HANDOVER with a notice; the trigger is the keyword "menu". */
+export function messageHandoverFlow(): Json {
+  return base([{ kind: "keyword", words: ["menu"] }], "welcome", {
+    welcome: { type: "MESSAGE", text: "Hello", next: "staff" },
     staff: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
   });
 }
@@ -440,6 +451,98 @@ export function runtimeKit(t: TestDb) {
       now: () => new Date(),
     });
 
+  // ---------------------------------------------------------------------------------- 08E-6 reconciler helpers
+
+  /** One real dispatcher pass for the next QUEUED request, with the given fake transport result. Returns its outcome. */
+  /**
+   * One real dispatcher pass with the given fake transport result. The claim takes the GLOBALLY earliest QUEUED request, so the
+   * caller names the request it means: claiming any other one fails here instead of silently sending another world's request.
+   */
+  async function dispatchWith(
+    result: SendResult | Error,
+    expectedRequestId: string,
+    over: Partial<DispatchDeps> = {},
+  ) {
+    const transport = new FakeTransport().next(result);
+    const d = dispatchDeps(transport, over);
+    const { claim } = await claimNext(d);
+    if (!claim) throw new Error("dispatchWith: nothing was claimed");
+    if (claim.requestId !== expectedRequestId)
+      throw new Error(
+        "dispatchWith: the dispatcher claimed a different request (an earlier QUEUED one)",
+      );
+    return { outcome: await executeClaim(d, claim), transport, claim };
+  }
+  /** menuFlow started and its prompt ACCEPTED by the real dispatcher: S WAITING_FOR_SEND, R ACCEPTED (not yet reconciled). */
+  async function acceptedPrompt(f: RuntimeFx) {
+    const x = await startedPrompt(f);
+    const { outcome } = await dispatchWith(
+      accepted(`wamid.TEST08E6.${randomUUID()}`),
+      x.request.id as string,
+    );
+    if (outcome !== "accepted") throw new Error(`fixture: prompt not accepted (${outcome})`);
+    return x;
+  }
+  const candidateOf = (s: Record<string, unknown>): ReconcileCandidate => ({
+    organizationId: s.organization_id as string,
+    sessionId: s.id as string,
+    conversationId: s.conversation_id as string,
+    deploymentId: s.deployment_id as string,
+  });
+  const reconcile = (
+    s: Record<string, unknown>,
+    over: Partial<StepDeps> = {},
+  ): Promise<ReconcileOutcome> =>
+    reconcileSession(t.db as unknown as DbExecutor, candidateOf(s), deps(over));
+  /**
+   * A reconciliation whose backend is TERMINATED while it holds its locks (after its decision clock, before any write): the
+   * expected connection error is consumed by a termination watch and verified (anything else fails the test). Returns the
+   * rejected outcome and checks that the conversation row and its advisory lock were released with the dead session.
+   */
+  async function interruptedReconcile(s: Record<string, unknown>) {
+    const watch = terminationWatch(t.pool);
+    const p = pause();
+    const running = reconcile(s, { hooks: { afterDecisionClock: p.hook } }).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    const pid = await p.reached;
+    watch.stopCapturing();
+    await watch.terminate(pid);
+    p.release();
+    const result = await running;
+    await watch.verify();
+    const conversationId = s.conversation_id as string;
+    const free = await q("select 1 from conversations where id = $1 for update nowait", [
+      conversationId,
+    ]).then(
+      () => true,
+      () => false,
+    );
+    const advisory = (
+      await one("select pg_try_advisory_xact_lock(hashtextextended($1, 0)) ok", [
+        `bot-conv:${s.organization_id as string}:${conversationId}`,
+      ])
+    ).ok as boolean;
+    return { result, pid, locksReleased: free && advisory === true };
+  }
+
+  /** A decision clock `ms` after the database clock (the reconciler's time rules without sleeping). */
+  const shifted = (ms: number) => async (tx: DbExecutor) =>
+    new Date((await dbClock(tx)).getTime() + ms);
+  /** A decision clock fixed at an exact instant (boundary tests). */
+  const at = (d: Date) => async () => new Date(d.getTime());
+  const sessionJson = async (id: string) =>
+    (await one("select to_jsonb(s) j from bot_sessions s where id = $1", [id])).j as Record<
+      string,
+      unknown
+    >;
+  const requestJson = async (id: string) =>
+    (await one("select to_jsonb(r) j from outbound_requests r where id = $1", [id])).j as Record<
+      string,
+      unknown
+    >;
+
   return {
     q,
     rows,
@@ -467,5 +570,82 @@ export function runtimeKit(t: TestDb) {
     replyTrigger,
     assign,
     submit,
+    dispatchWith,
+    acceptedPrompt,
+    candidateOf,
+    reconcile,
+    interruptedReconcile,
+    shifted,
+    at,
+    sessionJson,
+    requestJson,
+  };
+}
+
+// ------------------------------------------------------------------------------------------------ backend termination
+
+type WatchedClient = {
+  readonly processID?: number | null;
+  on(event: "error", listener: (error: Error) => void): unknown;
+  removeListener(event: "error", listener: (error: Error) => void): unknown;
+};
+
+/**
+ * Connection-loss regressions terminate a backend while a pooled client is CHECKED OUT (pg-pool removes its idle error listener
+ * on checkout). Without a listener the client's `error` event throws ("Connection terminated unexpectedly", an unhandled error)
+ * from inside its connection-end handler, which then never emits `end`, so the harness pool cannot close. This watch attaches a
+ * listener to the clients acquired while it is capturing; it records the ONE expected termination (that backend, that message)
+ * and records anything else as unexpected, which `verify()` turns into a test failure. It never swallows other errors silently.
+ */
+export function terminationWatch(pool: TestDb["pool"]) {
+  const clients: WatchedClient[] = [];
+  const expected: Error[] = [];
+  const unexpected: unknown[] = [];
+  let target: number | null = null;
+  let capturing = true;
+  const listenerFor = (client: WatchedClient) => (error: Error) => {
+    if (
+      target !== null &&
+      client.processID === target &&
+      /Connection terminated/.test(error.message)
+    )
+      expected.push(error);
+    else unexpected.push(error);
+  };
+  const listeners = new Map<WatchedClient, (error: Error) => void>();
+  const onAcquire = (client: WatchedClient) => {
+    if (!capturing || listeners.has(client)) return;
+    const l = listenerFor(client);
+    listeners.set(client, l);
+    clients.push(client);
+    client.on("error", l);
+  };
+  pool.on("acquire", onAcquire as never);
+  return {
+    /** Stop attaching to newly acquired clients (call once the transaction under test has its connection). */
+    stopCapturing() {
+      capturing = false;
+      pool.removeListener("acquire", onAcquire as never);
+    },
+    /** Terminates the backend from a separate connection; the watched client's error becomes the expected one. */
+    async terminate(pid: number) {
+      if (!clients.some((c) => c.processID === pid))
+        throw new Error("terminationWatch: the backend to terminate is not a watched client");
+      target = pid;
+      const r = await pool.query("select pg_terminate_backend($1) ok", [pid]);
+      if (r.rows[0]?.ok !== true) throw new Error("terminationWatch: pg_terminate_backend failed");
+    },
+    /** Waits for the expected error, asserts there was nothing else, and detaches every listener. */
+    async verify() {
+      for (let i = 0; i < 500 && expected.length === 0 && unexpected.length === 0; i++)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      this.stopCapturing();
+      for (const [client, l] of listeners) client.removeListener("error", l);
+      listeners.clear();
+      if (unexpected.length > 0)
+        throw new AggregateError(unexpected as Error[], "unexpected client error");
+      if (expected.length !== 1)
+        throw new Error(`expected exactly one termination error, saw ${expected.length}`);
+    },
   };
 }

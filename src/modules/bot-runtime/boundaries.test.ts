@@ -27,11 +27,39 @@ const OPS_IMPORTS: Record<string, readonly string[]> = {
   "outbound.ts": ["@/db/ops/bot-session-store", "@/db/ops/executor"],
   "start.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
   "step.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
+  "reconcile.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step", "@/db/ops/executor"],
 };
-// 08E-5: the two files allowed to reach bot-control, and the ONE import they may make (the session-scoped hold, plan I.5).
-const SUPPRESSION_IMPORTERS: readonly string[] = ["continue.ts", "trigger-queue.ts"];
-const SUPPRESSION_IMPORT =
-  /import \{ OUTPUT_SUPPRESSED_HOLD_CODE, suppressSessionQueuedRequests \} from "@\/modules\/bot-control";/;
+// 08E-5/08E-6: the files allowed to reach bot-control, the ONLY names each may import from its index (the session-scoped hold,
+// plan I.5) and how many times each calls it. The deadline hold code belongs to the reconciler alone.
+const SUPPRESSION_USES: Record<
+  string,
+  { readonly names: readonly string[]; readonly uses: number }
+> = {
+  "continue.ts": {
+    names: ["OUTPUT_SUPPRESSED_HOLD_CODE", "suppressSessionQueuedRequests"],
+    uses: 2,
+  },
+  "trigger-queue.ts": {
+    names: ["OUTPUT_SUPPRESSED_HOLD_CODE", "suppressSessionQueuedRequests"],
+    uses: 1,
+  },
+  "reconcile.ts": {
+    names: [
+      "OUTPUT_SUPPRESSED_HOLD_CODE",
+      "SEND_DEADLINE_HOLD_CODE",
+      "suppressSessionQueuedRequests",
+    ],
+    uses: 3,
+  },
+};
+const SUPPRESSION_IMPORTERS: readonly string[] = Object.keys(SUPPRESSION_USES);
+const SUPPRESSION_IMPORT = /import\s*\{([^}]+)\}\s*from\s*"@\/modules\/bot-control";/;
+const importedNames = (text: string) =>
+  (text.match(SUPPRESSION_IMPORT)?.[1] ?? "")
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean)
+    .sort();
 const sources = readdirSync(root)
   .filter((f) => f.endsWith(".ts") && !/\.(db\.)?test\.ts$/.test(f) && f !== "testing.ts")
   .map((f) => ({ file: f, text: code(read(join(root, f))) }));
@@ -60,6 +88,7 @@ describe("bot runtime core boundaries (08E-1)", () => {
       "log.ts",
       "outbound.ts",
       "policy.ts",
+      "reconcile.ts",
       "session-row.ts",
       "start.ts",
       "step.ts",
@@ -121,13 +150,13 @@ describe("bot runtime core boundaries (08E-1)", () => {
     }
     // the step is not part of the public index and nothing outside the module imports it
     expect(sources.find((s) => s.file === "index.ts")!.text).not.toMatch(
-      /step|apply|start|continue|outbound|flow-cache|context/,
+      /step|apply|start|continue|outbound|flow-cache|context|reconcile/,
     );
     for (const f of [...walk("src"), ...walk("scripts")].filter(
       (p) => !p.includes("/src/modules/bot-runtime/") && !/\.test\.ts$/.test(p),
     ))
       expect(read(f), f).not.toMatch(
-        /bot-runtime\/(step|apply|start|continue|outbound|flow-cache|context)/,
+        /bot-runtime\/(step|apply|start|continue|outbound|flow-cache|context|reconcile)/,
       );
   });
 
@@ -180,13 +209,15 @@ describe("bot runtime core boundaries (08E-1)", () => {
   it("08E-5: request rows are held only through the session-scoped primitive, with its fixed code and no test seam", () => {
     for (const { file, text } of sources) {
       const uses = text.match(/suppressSessionQueuedRequests\(/g)?.length ?? 0;
-      expect(uses, file).toBe(SUPPRESSION_IMPORTERS.includes(file) ? 1 : 0);
+      expect(uses, file).toBe(SUPPRESSION_USES[file]?.uses ?? 0);
       if (uses === 0) continue;
-      expect(text, file).toMatch(SUPPRESSION_IMPORT);
-      // always the dispatcher's own suppression code, never a caller-supplied seam
-      expect(text, file).toMatch(
-        /suppressSessionQueuedRequests\(tx, [a-zA-Z.]+, [a-zA-Z.]+, OUTPUT_SUPPRESSED_HOLD_CODE\)/,
-      );
+      expect(importedNames(text), file).toEqual([...SUPPRESSION_USES[file]!.names].sort());
+      // every call passes a fixed approved code (the deadline code only in the reconciler), never a caller-supplied seam
+      const fixed =
+        file === "reconcile.ts"
+          ? /suppressSessionQueuedRequests\(\s*(this\.)?tx,\s*[\w.]+,\s*[\w.]+,\s*(OUTPUT_SUPPRESSED_HOLD_CODE|SEND_DEADLINE_HOLD_CODE),?\s*\)/g
+          : /suppressSessionQueuedRequests\(\s*tx,\s*[\w.]+,\s*[\w.]+,\s*OUTPUT_SUPPRESSED_HOLD_CODE,?\s*\)/g;
+      expect(text.match(fixed)?.length ?? 0, file).toBe(uses);
       expect(text, file).not.toMatch(/lockSessionSuppressionCandidates|lockSuppressionCandidates/);
     }
     // the takeover branch suppresses before it ends the session, inside the same step transaction
@@ -201,6 +232,58 @@ describe("bot runtime core boundaries (08E-1)", () => {
     );
     expect(branch).toMatch(/endConversationTriggers\(/);
     expect(branch).not.toMatch(/terminalNotice|enqueueEffect|applyEngineResult/);
+    // 08E-6: the flow_invalid hand-over holds the QUEUED request too, before it ends the session
+    const invalid = cont.slice(
+      cont.indexOf("if (!loaded.ok)"),
+      cont.indexOf('"flow_invalid", live.id'),
+    );
+    expect(invalid.indexOf("suppressSessionQueuedRequests(")).toBeGreaterThan(-1);
+    expect(invalid.indexOf("suppressSessionQueuedRequests(")).toBeLessThan(
+      invalid.indexOf("endSession("),
+    );
+  });
+
+  it("08E-6: the reconciler takes the sweeper lock order, locks no request row itself, and never touches a terminal session", () => {
+    const r = sources.find((s) => s.file === "reconcile.ts")!.text;
+    const order = [
+      "tryAdvisoryLock(tx, conversationLockKey",
+      "lockDeploymentsShare(",
+      "lockConversation(",
+      "lockLiveSession(",
+      "(deps.readClock ?? dbClock)(tx)",
+      "readStepRequest(",
+    ].map((n) => r.indexOf(n));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // never waits for an advisory lock, never writes a request, never re-queues or recreates one, never calls a transport
+    expect(r).not.toMatch(
+      /pg_advisory_xact_lock|enqueueEffect|enqueueAutomatedMessage|claimNext|executeClaim/,
+    );
+    // a skipped QUEUED request leaves the session as it is (no transition after a skip)
+    expect(r).toMatch(
+      /if \(!heldIds\.includes\(request\.id\)\) return \{ kind: "skipped", reason: "request_locked" \};/,
+    );
+    // 08E-6 P2 fix: the post-apply hold of a terminal session skips EXACTLY the notice the result authorized
+    expect(r).toMatch(
+      /if \(!LIVE\.has\(applied\.finalState\) && applied\.noticeRequestId === null\)\s*await suppressSessionQueuedRequests\(/,
+    );
+    // the reconciler is gated like T1
+    expect(r).toMatch(/if \(!gatesOn\(deps\)\) return \{ kind: "gates_off" \};/);
+  });
+
+  it("08E-6: no production transaction overrides the isolation level (every participant runs READ COMMITTED, the default)", () => {
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) => !/\.test\.ts$/.test(p) && !/(^|\/)testing\.ts$/.test(p) && !p.includes("__tests__"),
+    ))
+      expect(code(read(f)), f).not.toMatch(
+        /isolationLevel|SET\s+(LOCAL\s+|SESSION\s+)?TRANSACTION\b|default_transaction_isolation/,
+      );
+  });
+
+  it("08E-6 J.5a: a missing request FAILS the session with end_reason error and NO handover reason (send_state_missing is an event code only)", () => {
+    const r = sources.find((s) => s.file === "reconcile.ts")!.text;
+    expect(r).toContain('this.runtimeEnd("FAILED", "error", null, "send_state_missing")');
+    expect(r).not.toMatch(/"HANDED_OVER",\s*"system_handover",\s*"send_state_missing"/);
   });
 
   it("the queue primitives never touch outbound requests, messages or any transport, and know no module", () => {

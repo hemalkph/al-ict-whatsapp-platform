@@ -93,6 +93,8 @@ export async function continuationPath(
   // The pinned flow. Missing or invalid: a defect an immutable version cannot cure; hand over, do not retry.
   const loaded = await c.deps.flows.load(tx, org, live.botId, live.botVersionId);
   if (!loaded.ok) {
+    // 08E-6 (08E-5 review condition): the session's QUEUED request is held here too, never waiting on a dispatcher's row.
+    await suppressSessionQueuedRequests(tx, org, live.id, OUTPUT_SUPPRESSED_HOLD_CODE);
     await endSession(tx, {
       organizationId: org,
       id: live.id,

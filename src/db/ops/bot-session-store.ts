@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { DbExecutor } from "./executor";
 import { timestampToDate } from "./bot-trigger-queue";
 import { LIVE_STATES_SQL, uuid } from "./bot-step";
@@ -187,7 +187,12 @@ export async function insertSessionEvent(tx: DbExecutor, e: SessionEventWrite): 
 // ------------------------------------------------------------------------------------- plain reads of the BOT requests
 
 export type StepRequest = {
+  readonly id: string;
   readonly state: "QUEUED" | "SENDING" | "ACCEPTED" | "HELD" | "REJECTED" | "UNKNOWN_OUTCOME";
+  /** The dispatcher's deadline for the request (the reconciler's QUEUED rule adds its grace to it). */
+  readonly dispatchDeadline: Date;
+  /** The delivery status of the request's message (FAILED decides an idle prompt's delivery_failed). */
+  readonly messageStatus: string | null;
   /** The hold code of a HELD request. */
   readonly holdReason: string | null;
   /** The provider message id of the request's message, once Meta accepted it (the prompt a reply may answer). */
@@ -202,17 +207,29 @@ export async function readStepRequest(
   stepSeq: number,
 ): Promise<StepRequest | null> {
   const r = await tx.execute<{
+    id: string;
     state: StepRequest["state"];
     hold_reason: string | null;
     wamid: string | null;
+    dispatch_deadline: string | Date;
+    latest_status: string | null;
   }>(sql`
-    SELECT r.state, r.hold_reason, m.wamid
+    SELECT r.id, r.state, r.hold_reason, m.wamid, r.dispatch_deadline, m.latest_status
       FROM outbound_requests r
       LEFT JOIN messages m ON m.organization_id = r.organization_id AND m.id = r.message_id
      WHERE r.organization_id = ${uuid(org, "organizationId")} AND r.origin = 'BOT'
        AND r.bot_session_id = ${uuid(sessionId, "sessionId")} AND r.bot_step_seq = ${stepSeq}`);
   const x = r.rows[0];
-  return x ? { state: x.state, holdReason: x.hold_reason, wamid: x.wamid } : null;
+  return x
+    ? {
+        id: x.id,
+        state: x.state,
+        holdReason: x.hold_reason,
+        wamid: x.wamid,
+        dispatchDeadline: timestampToDate(x.dispatch_deadline),
+        messageStatus: x.latest_status,
+      }
+    : null;
 }
 
 /**
@@ -241,3 +258,59 @@ export async function countRecentBotRequests(
 
 /** The instant a timestamp read from the database denotes (re-exported so the runtime needs no second converter). */
 export const toDate = timestampToDate;
+
+// --------------------------------------------------------------------------- reconciliation candidates (08E-6, J.4)
+
+export type ReconcileCandidate = {
+  readonly organizationId: string;
+  readonly sessionId: string;
+  readonly conversationId: string;
+  readonly deploymentId: string;
+};
+
+/**
+ * J.4 candidates, a PLAIN read (no locks): live sessions of a stopped or retired deployment, idle sessions whose input window
+ * has expired, and sessions waiting for a send whose step request is terminal, missing, QUEUED past its deadline plus the grace,
+ * or SENDING past send_wait_expires_at. Every observation is re-checked under the locks; this only chooses whom to look at.
+ */
+export function reconcileCandidatesSql(p: { queuedGraceMs: number; limit: number }): SQL {
+  const grace = Math.trunc(p.queuedGraceMs);
+  const limit = Math.trunc(p.limit);
+  if (!Number.isSafeInteger(grace) || grace < 0 || grace > 3_600_000)
+    throw new RangeError("queuedGraceMs");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new RangeError("limit");
+  return sql`
+    SELECT s.organization_id, s.id, s.conversation_id, s.deployment_id
+      FROM bot_sessions s
+      JOIN bot_deployments d ON d.organization_id = s.organization_id AND d.id = s.deployment_id
+      LEFT JOIN outbound_requests r ON r.organization_id = s.organization_id AND r.origin = 'BOT'
+                                   AND r.bot_session_id = s.id AND r.bot_step_seq = s.step_seq
+     WHERE s.state IN (${LIVE_STATES_SQL})
+       AND (d.status IN ('STOPPED', 'RETIRED')
+            OR (s.state = 'WAITING_FOR_INPUT' AND s.expires_at <= clock_timestamp())
+            OR (s.state = 'WAITING_FOR_SEND'
+                AND (r.id IS NULL
+                     OR r.state IN ('ACCEPTED', 'HELD', 'REJECTED', 'UNKNOWN_OUTCOME')
+                     OR (r.state = 'QUEUED' AND r.dispatch_deadline + ${grace} * interval '1 millisecond' < clock_timestamp())
+                     OR (r.state = 'SENDING' AND s.send_wait_expires_at < clock_timestamp()))))
+     ORDER BY s.id
+     LIMIT ${limit}`;
+}
+
+export async function listReconcileCandidates(
+  db: DbExecutor,
+  p: { queuedGraceMs: number; limit: number },
+): Promise<ReconcileCandidate[]> {
+  const r = await db.execute<{
+    organization_id: string;
+    id: string;
+    conversation_id: string;
+    deployment_id: string;
+  }>(reconcileCandidatesSql(p));
+  return r.rows.map((x) => ({
+    organizationId: x.organization_id,
+    sessionId: x.id,
+    conversationId: x.conversation_id,
+    deploymentId: x.deployment_id,
+  }));
+}

@@ -41,8 +41,16 @@ export type LiveRef = {
   readonly state: string;
 };
 
+/**
+ * What applyEngineResult needs from its caller: the step transaction and decision clock, plus the organization and, for a
+ * step, the trigger it is processing (excluded from the conversation's wake/end pass). The reconciler (08E-6) has no trigger.
+ */
+export type ApplyContext = Pick<StepContext, "tx" | "deps" | "nowDate" | "nowMs"> & {
+  readonly trigger: { readonly organizationId: string; readonly id?: string };
+};
+
 export type ApplyInput = {
-  readonly c: StepContext;
+  readonly c: ApplyContext;
   readonly session: LiveRef;
   /** The deployment's send_epoch read under its FOR SHARE lock. */
   readonly sendEpoch: number;
@@ -51,6 +59,11 @@ export type ApplyInput = {
   readonly input: { readonly messageId: string; readonly occurredAt: Date } | null;
   /** The fixed code recorded on a HANDED_OVER event when it differs from the handover reason (send_held_<hold code>). */
   readonly handoverEventCode?: string;
+  /**
+   * The reconciler (08E-6): a terminal result WITHOUT a terminal notice also sets output_suppressed_at (send_held, send_rejected,
+   * send_outcome_unknown, idle_timeout, delivery_failed, an error end). A step leaves it as before.
+   */
+  readonly suppressOnEnd?: boolean;
 };
 
 export type ApplyOutcome = {
@@ -63,6 +76,11 @@ export type ApplyOutcome = {
   readonly sendRefusedHandover: boolean;
   readonly requestId: string | null;
   readonly replayed: boolean;
+  /**
+   * The request of the terminal notice this result AUTHORIZED (enqueued, and recorded as the session's terminal_notice_step_seq),
+   * or null. A caller that holds a terminal session's queued output must leave exactly this request alone (08E-6 P2 fix).
+   */
+  readonly noticeRequestId: string | null;
 };
 
 const CODE = /^[a-z0-9_]{1,64}$/;
@@ -119,6 +137,7 @@ export async function applyEngineResult(a: ApplyInput): Promise<ApplyOutcome> {
       sendRefusedHandover: false,
       requestId: null,
       replayed: false,
+      noticeRequestId: null,
     };
   }
 
@@ -164,7 +183,7 @@ export async function applyEngineResult(a: ApplyInput): Promise<ApplyOutcome> {
     await endConversationTriggers(c.tx, {
       organizationId: org,
       conversationId: session.conversationId,
-      exceptId: c.trigger.id,
+      ...(c.trigger.id === undefined ? {} : { exceptId: c.trigger.id }),
     });
     return {
       committed: true,
@@ -173,6 +192,7 @@ export async function applyEngineResult(a: ApplyInput): Promise<ApplyOutcome> {
       sendRefusedHandover: true,
       requestId: null,
       replayed: false,
+      noticeRequestId: null,
     };
   }
 
@@ -198,7 +218,10 @@ export async function applyEngineResult(a: ApplyInput): Promise<ApplyOutcome> {
     sendWaitExpiresAt:
       final.state === "WAITING_FOR_SEND" ? new Date(sendWaitExpiresAtMs(c.nowMs)) : null,
     lastInput: consumed ? input : null,
-    suppressOutput: false,
+    suppressOutput:
+      a.suppressOnEnd === true &&
+      !LIVE_AFTER.has(final.state) &&
+      final.terminalNoticeStepSeq === null,
   });
 
   if (final.state === "HANDED_OVER" && final.handoverReason !== null)
@@ -219,7 +242,7 @@ export async function applyEngineResult(a: ApplyInput): Promise<ApplyOutcome> {
   const conv = {
     organizationId: org,
     conversationId: session.conversationId,
-    exceptId: c.trigger.id,
+    ...(c.trigger.id === undefined ? {} : { exceptId: c.trigger.id }),
   };
   if (!LIVE_AFTER.has(final.state)) await endConversationTriggers(c.tx, conv);
   else if (session.state === "WAITING_FOR_SEND" && final.state !== "WAITING_FOR_SEND")
@@ -232,5 +255,7 @@ export async function applyEngineResult(a: ApplyInput): Promise<ApplyOutcome> {
     sendRefusedHandover: false,
     requestId,
     replayed,
+    noticeRequestId:
+      final.terminalNoticeStepSeq !== null && effect?.terminalNotice === true ? requestId : null,
   };
 }

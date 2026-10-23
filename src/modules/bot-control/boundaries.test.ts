@@ -109,6 +109,7 @@ describe("bot-control boundaries", () => {
       /AND o\.state = 'QUEUED'\s+AND o\.origin = 'BOT' AND o\.bot_session_id = \$\{sessionId\}/,
     );
     expect(s).toContain('export const OUTPUT_SUPPRESSED_HOLD_CODE = "bot_output_suppressed";');
+    expect(s).toContain('export const SEND_DEADLINE_HOLD_CODE = "bot_send_deadline";');
   });
 
   it("has no HTTP route or page: only the operator script and (08E-5) the runtime's session-scoped hold use it", () => {
@@ -120,6 +121,7 @@ describe("bot-control boundaries", () => {
     expect(users.map((f) => f.slice(repo.length)).sort()).toEqual([
       "/scripts/bots-admin.ts",
       "/src/modules/bot-runtime/continue.ts",
+      "/src/modules/bot-runtime/reconcile.ts",
       "/src/modules/bot-runtime/trigger-queue.ts",
     ]);
     // the runtime imports exactly the session primitive and its hold code, through the module index, nothing else
@@ -136,7 +138,15 @@ describe("bot-control boundaries", () => {
           .filter(Boolean)
           .sort(),
         f,
-      ).toEqual(["OUTPUT_SUPPRESSED_HOLD_CODE", "suppressSessionQueuedRequests"]);
+      ).toEqual(
+        f.endsWith("reconcile.ts")
+          ? [
+              "OUTPUT_SUPPRESSED_HOLD_CODE",
+              "SEND_DEADLINE_HOLD_CODE",
+              "suppressSessionQueuedRequests",
+            ]
+          : ["OUTPUT_SUPPRESSED_HOLD_CODE", "suppressSessionQueuedRequests"],
+      );
     }
   });
 

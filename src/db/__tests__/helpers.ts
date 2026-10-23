@@ -290,6 +290,16 @@ export async function createTestDatabase(
 }
 
 /**
+ * A SECOND owned pool on the same disposable database with its own session timeouts (for example a short lock_timeout in a
+ * mutation check). Test-only; close it with end() before the test database is closed (its sessions would otherwise be reported
+ * as a leak by close()).
+ */
+export function extraTestDb(t: TestDb, timeouts: SessionTimeouts, max = 2) {
+  const owned = ownedPool(t.target, max, timeouts);
+  return { db: drizzle(owned.pool, { schema }), end: () => owned.end() };
+}
+
+/**
  * Cancels (or, as a last resort, terminates) every non-idle session of a disposable test database except its own, over a
  * dedicated connection outside the test pool (which may be exhausted by the very statements being stopped). This stops the
  * SQL on the server; abandoning a JavaScript promise would not. Returns how many backends were signalled.

@@ -556,3 +556,40 @@ export async function terminalizeTrigger(
     return { kind: "dead", handedOverSessionId, endedTriggers } as const;
   });
 }
+
+// ------------------------------------------------------------------------------------------- overdue audit (J.4a)
+
+export type OverdueTriggers = {
+  readonly organizationId: string;
+  readonly conversationId: string;
+  readonly count: number;
+};
+
+/**
+ * J.4a audit, a PLAIN read: PENDING triggers enqueued longer ago than `ageMs` (maxInputAge + 2 x lease), counted per
+ * conversation. Correctness never depends on the end/wake pass catching every row; a non-empty result is an operator alert.
+ */
+export function overdueTriggersSql(p: { ageMs: number; limit: number }): SQL {
+  return sql`
+    SELECT t.organization_id, t.conversation_id, count(*)::int AS n FROM bot_triggers t
+     WHERE t.status = 'PENDING' AND t.enqueued_at < clock_timestamp() - ${int(p.ageMs, 1, 86_400_000, "ageMs")} * interval '1 millisecond'
+     GROUP BY t.organization_id, t.conversation_id
+     ORDER BY t.organization_id, t.conversation_id
+     LIMIT ${int(p.limit, 1, 1_000, "limit")}`;
+}
+
+export async function listOverdueTriggers(
+  db: DbExecutor,
+  p: { ageMs: number; limit: number },
+): Promise<OverdueTriggers[]> {
+  const rows = (
+    await db.execute<{ organization_id: string; conversation_id: string; n: number }>(
+      overdueTriggersSql(p),
+    )
+  ).rows;
+  return rows.map((r) => ({
+    organizationId: r.organization_id,
+    conversationId: r.conversation_id,
+    count: Number(r.n),
+  }));
+}

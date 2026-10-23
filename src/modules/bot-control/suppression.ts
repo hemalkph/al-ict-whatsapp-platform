@@ -111,6 +111,8 @@ export async function suppressQueuedBotRequests(
 
 /** The hold code of a session-scoped suppression: the code the dispatcher itself uses for a suppressed session. */
 export const OUTPUT_SUPPRESSED_HOLD_CODE = "bot_output_suppressed";
+/** The hold code of the reconciler's deadline sweep (08E-6, plan J.4): a BOT request still QUEUED past its deadline + grace. */
+export const SEND_DEADLINE_HOLD_CODE = "bot_send_deadline";
 
 /** Only the executor is needed, so a Drizzle transaction or the runtime's DbExecutor both fit. */
 export type SuppressionExecutor = Pick<Tx, "execute">;

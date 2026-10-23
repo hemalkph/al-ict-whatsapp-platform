@@ -4,6 +4,7 @@ import {
   deferTrigger as deferTriggerOp,
   endConversationTriggers as endConversationTriggersOp,
   finishTrigger as finishTriggerOp,
+  listOverdueTriggers as listOverdueTriggersOp,
   listTerminalizationCandidates as listCandidatesOp,
   recordTriggerFailure as recordTriggerFailureOp,
   terminalizeTrigger as terminalizeTriggerOp,
@@ -197,4 +198,21 @@ export async function terminalizeTrigger(
       count: result.endedTriggers,
     });
   return result;
+}
+
+/** The J.4a overdue audit: maxInputAge + 2 x lease. Logs one bots.trigger_overdue line per conversation (count and ids only). */
+export const TRIGGER_OVERDUE_AGE_MS =
+  RUNTIME_POLICY.maxInputAgeMs + 2 * RUNTIME_POLICY.claimLeaseMs;
+
+export async function auditOverdueTriggers(db: DbExecutor, limit = 100): Promise<number> {
+  const overdue = await listOverdueTriggersOp(db, { ageMs: TRIGGER_OVERDUE_AGE_MS, limit });
+  for (const o of overdue)
+    emitBotRuntimeLog({
+      event: "bots.trigger_overdue",
+      outcome: "failure",
+      organizationId: o.organizationId,
+      conversationId: o.conversationId,
+      count: o.count,
+    });
+  return overdue.length;
 }

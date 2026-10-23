@@ -284,6 +284,7 @@ export type LiveSessionRow = {
   readonly revision: number;
   readonly startedControlSeq: number;
   readonly expiresAt: Date | null;
+  readonly sendWaitExpiresAt: Date | null;
   readonly endReason: string | null;
   readonly handoverReason: string | null;
   readonly terminalNoticeStepSeq: number | null;
@@ -312,6 +313,7 @@ type SessionSqlRow = {
   revision: number;
   started_control_seq: string | number;
   expires_at: string | Date | null;
+  send_wait_expires_at: string | Date | null;
   end_reason: string | null;
   handover_reason: string | null;
   terminal_notice_step_seq: number | null;
@@ -329,7 +331,8 @@ export async function lockLiveSession(
   const r = await tx.execute<SessionSqlRow>(sql`
     SELECT id, organization_id, bot_id, bot_version_id, deployment_id, whatsapp_account_id, contact_id, conversation_id,
            state, current_node_id, variables, awaiting, awaiting_token, last_consumed_token, step_seq, transition_count,
-           send_count, invalid_attempts, revision, started_control_seq, expires_at, end_reason, handover_reason,
+           send_count, invalid_attempts, revision, started_control_seq, expires_at, send_wait_expires_at, end_reason,
+           handover_reason,
            terminal_notice_step_seq, output_suppressed_at
       FROM bot_sessions
      WHERE organization_id = ${uuid(org, "organizationId")} AND conversation_id = ${uuid(conversationId, "conversationId")}
@@ -359,6 +362,7 @@ export async function lockLiveSession(
     revision: x.revision,
     startedControlSeq: Number(x.started_control_seq),
     expiresAt: opt(x.expires_at),
+    sendWaitExpiresAt: opt(x.send_wait_expires_at),
     endReason: x.end_reason,
     handoverReason: x.handover_reason,
     terminalNoticeStepSeq: x.terminal_notice_step_seq,
