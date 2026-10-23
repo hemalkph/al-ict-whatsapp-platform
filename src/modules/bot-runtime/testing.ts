@@ -1,5 +1,19 @@
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { seedMessage, type TestDb } from "@/db/__tests__/helpers";
+import type { DbExecutor } from "@/db/ops/executor";
+import { assignConversation } from "@/modules/inbox";
+import type { DispatchDeps } from "@/modules/messaging/dispatch";
+import { submitOutboundMessage } from "@/modules/messaging/submit";
+import { FakeTransport, ON, textInput } from "@/modules/messaging/testing";
+import type { SendResult } from "@/modules/messaging/transport";
+import { activateDeployment } from "../bot-control";
+import { BOTS_ON, botWorld, publishedBot, type BotWorld } from "../bot-control/testing";
+import type { StepSummary } from "./context";
+import { FlowCache } from "./flow-cache";
+import type { StepDeps } from "./outbound";
+import { processTrigger } from "./step";
+import { claimTriggers, type ClaimedTrigger } from "./trigger-queue";
 
 // TEST-ONLY fixtures for the trigger queue's database tests (Phase 08E-3; excluded from the boundary scans). Triggers are
 // written with raw SQL, exactly as the capture primitive or any other writer reaches the table, so the table's own CHECKs and
@@ -177,4 +191,281 @@ export function messageFlow(trigger: Json = { kind: "keyword", words: ["menu"] }
     welcome: { type: "MESSAGE", text: "Hello", next: "done" },
     done: { type: "END", message: "Bye" },
   });
+}
+
+// ------------------------------------------------------------------------------------------------ Phase 08E-5 kit
+// The 08E-4 step fixtures, shared by the 08E-5 suites (R7-F, R3-P, R3-S, R5): a send-eligible world with a deployed flow, real
+// inbound rows and triggers, real claims and real T1, the real dispatcher with a FakeTransport only, and pause points inside
+// T1 (its test-only hooks) so order between transactions is proved by lock ownership, never by sleeping.
+
+type Deferred<T> = { promise: Promise<T>; resolve: (v: T) => void };
+export function deferred<T = void>(): Deferred<T> {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+export type RuntimeFx = {
+  w: BotWorld;
+  bot: { id: string };
+  version: { id: string };
+  deployment: { id: string };
+};
+
+/** A pause inside T1: `hook` publishes the backend pid and waits until `release()` (or the kit's releaseAll). */
+export type PausePoint = {
+  hook: (tx: DbExecutor) => Promise<void>;
+  reached: Promise<number>;
+  release: () => void;
+};
+
+export function runtimeKit(t: TestDb) {
+  let tokens = 0;
+  // Head-of-line orders PENDING triggers by (input_occurred_at, id): two triggers created in the same millisecond would be
+  // ordered by their random ids. Input times are therefore strictly increasing in creation order.
+  let lastInputMs = 0;
+  const pauses: PausePoint[] = [];
+  const q = (text: string, params: unknown[] = []) => t.pool.query(text, params);
+  const rows = async (text: string, params: unknown[] = []) =>
+    (await q(text, params)).rows as Record<string, unknown>[];
+  const one = async (text: string, params: unknown[] = []) => (await rows(text, params))[0]!;
+
+  const deps = (over: Partial<StepDeps> = {}): StepDeps => ({
+    config: BOTS_ON,
+    flows: new FlowCache(),
+    newPromptToken: () => `T${String(++tokens).padStart(21, "A")}`,
+    random: () => 0.5,
+    ...over,
+  });
+
+  function pause(): PausePoint {
+    const reached = deferred<number>();
+    const go = deferred();
+    const p: PausePoint = {
+      hook: async (tx) => {
+        const pid = (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() pid`)).rows[0]!
+          .pid;
+        reached.resolve(pid);
+        await go.promise;
+      },
+      reached: reached.promise,
+      release: () => go.resolve(),
+    };
+    pauses.push(p);
+    return p;
+  }
+  const releaseAll = () => {
+    for (const p of pauses.splice(0)) p.release();
+  };
+
+  /** A world with a send-eligible account, an open window, and `flow` published and deployed on it. */
+  async function fixture(flow: Record<string, unknown> = menuFlow()): Promise<RuntimeFx> {
+    const w = await botWorld(t.db);
+    await q(
+      "update whatsapp_accounts set status = 'ACTIVE', credential_ref = 'WA_TOKEN_TEST', archived_at = NULL where id = $1",
+      [w.account.id],
+    );
+    await q(
+      "update conversations set last_inbound_at = clock_timestamp() - interval '1 minute' where id = $1",
+      [w.student.conversation.id],
+    );
+    const { bot, version } = await publishedBot(t.db, w, flow);
+    const deployment = (
+      await activateDeployment(
+        w.admin.ctx,
+        { botId: bot.id, versionId: version.id, whatsappAccountId: w.account.id, priority: 1 },
+        { db: t.db },
+      )
+    ).value;
+    return { w, bot, version, deployment };
+  }
+
+  async function inbound(
+    f: RuntimeFx,
+    o: { type?: string; body?: string; content?: Record<string, unknown> } = {},
+  ): Promise<string> {
+    const r = await q(
+      `insert into messages (organization_id, conversation_id, whatsapp_account_id, wamid, direction, type, body, content, occurred_at)
+       values ($1, $2, $3, $4, 'INBOUND', $5, $6, $7::jsonb, clock_timestamp()) returning id`,
+      [
+        f.w.org.id,
+        f.w.student.conversation.id,
+        f.w.account.id,
+        `wamid.${randomUUID()}`,
+        o.type ?? "TEXT",
+        o.body ?? "hi",
+        o.content ? JSON.stringify(o.content) : null,
+      ],
+    );
+    return r.rows[0].id as string;
+  }
+
+  const ctxOf = (f: RuntimeFx): QueueCtx => ({
+    organizationId: f.w.org.id,
+    accountId: f.w.account.id,
+    conversationId: f.w.student.conversation.id,
+  });
+
+  /** The first trigger of the world's student uses its seeded (first eligible) message; later ones get a fresh inbound row. */
+  async function trigger(
+    f: RuntimeFx,
+    o: {
+      first?: boolean;
+      body?: string;
+      type?: string;
+      content?: Record<string, unknown>;
+      observed?: number;
+    } = {},
+  ): Promise<SeededTrigger> {
+    let messageId: string;
+    if (o.first) {
+      messageId = f.w.student.message.id;
+      await q("update messages set type = 'TEXT', body = $2 where id = $1", [
+        messageId,
+        o.body ?? "hi",
+      ]);
+    } else messageId = await inbound(f, o);
+    lastInputMs = Math.max(Date.now() - 1_000, lastInputMs + 1);
+    const seeded = await insertTrigger(t, ctxOf(f), {
+      messageId,
+      inputOccurredAt: new Date(lastInputMs),
+    });
+    if (o.observed !== undefined)
+      await q("update bot_triggers set observed_control_seq = $2 where id = $1", [
+        seeded.id,
+        o.observed,
+      ]);
+    return seeded;
+  }
+
+  async function claimOf(id: string): Promise<ClaimedTrigger> {
+    const c = (await claimTriggers(t.db, 50)).find((x) => x.id === id);
+    if (!c) throw new Error(`trigger ${id} was not claimed`);
+    return c;
+  }
+  const runClaim = (claim: ClaimedTrigger, over: Partial<StepDeps> = {}): Promise<StepSummary> =>
+    processTrigger(t.db as unknown as DbExecutor, claim, deps(over));
+  const run = async (id: string, over: Partial<StepDeps> = {}) => runClaim(await claimOf(id), over);
+
+  /** Real dispatcher deps on the real clock (T1-created requests carry database-clock deadlines). */
+  const dispatchDeps = (
+    transport: FakeTransport,
+    over: Partial<DispatchDeps> = {},
+  ): DispatchDeps => ({
+    db: t.db as never,
+    transport,
+    config: BOTS_ON,
+    now: () => new Date(Date.now() + 1_000),
+    random: () => 0.5,
+    accountMinIntervalMs: 0,
+    conversationMinIntervalMs: 0,
+    ...over,
+  });
+  const accepted = (wamid: string): SendResult => ({
+    kind: "accepted",
+    wamid,
+    providerStatus: "accepted",
+    httpStatus: 200,
+  });
+
+  const session = (id: string) => one("select * from bot_sessions where id = $1", [id]);
+  const request = (id: string) => one("select * from outbound_requests where id = $1", [id]);
+  const botRequests = (f: RuntimeFx) =>
+    rows(
+      "select * from outbound_requests where organization_id = $1 and conversation_id = $2 and origin = 'BOT' order by bot_step_seq",
+      [f.w.org.id, f.w.student.conversation.id],
+    );
+  const events = (sessionId: string) =>
+    rows(
+      "select kind, code, message_id, step_seq from bot_session_events where session_id = $1 order by created_at, id",
+      [sessionId],
+    );
+  /** In-flight BOT requests of a session as an independent READ COMMITTED observer sees them (QUEUED or SENDING). */
+  const inFlight = async (sessionId: string) =>
+    Number(
+      (
+        await one(
+          "select count(*)::int n from outbound_requests where bot_session_id = $1 and origin = 'BOT' and state in ('QUEUED', 'SENDING')",
+          [sessionId],
+        )
+      ).n,
+    );
+  const controlSeq = async (f: RuntimeFx) =>
+    Number(
+      (
+        await one("select control_seq from conversations where id = $1", [
+          f.w.student.conversation.id,
+        ])
+      ).control_seq,
+    );
+  const replyContent = (token: string, key: string) => ({
+    subtype: "button_reply",
+    id: `b1.${token}.${key}`,
+    title: key,
+  });
+
+  /** menuFlow started by real T1: the session WAITING_FOR_SEND at step 1 with its one QUEUED prompt request R. */
+  async function startedPrompt(f: RuntimeFx) {
+    const tr = await trigger(f, { first: true });
+    const summary = await run(tr.id);
+    if (summary.kind !== "finished" || summary.outcome !== "session_started")
+      throw new Error(`the fixture session did not start: ${JSON.stringify(summary)}`);
+    const s = await one(
+      "select * from bot_sessions where organization_id = $1 and conversation_id = $2",
+      [f.w.org.id, f.w.student.conversation.id],
+    );
+    const [r, ...more] = await botRequests(f);
+    if (!r || more.length > 0 || r.state !== "QUEUED")
+      throw new Error("fixture: expected one QUEUED request");
+    return { session: s, request: r };
+  }
+
+  /** A button reply trigger for the session's current prompt. */
+  const replyTrigger = (f: RuntimeFx, token: string, key = "a") =>
+    trigger(f, { type: "INTERACTIVE", body: key, content: replyContent(token, key) });
+
+  /** The real assignment action, as staff in the Inbox makes it. */
+  const assign = (f: RuntimeFx) =>
+    assignConversation(
+      f.w.staff.ctx,
+      f.w.student.conversation.id,
+      { assigneeMembershipId: f.w.staff.membershipId, expectedAssigneeMembershipId: null },
+      { db: t.db as never },
+    );
+  /** The real STAFF outbound submission (it creates a STAFF QUEUED request; its transport is never executed here). */
+  const submit = (f: RuntimeFx, body = "staff reply") =>
+    submitOutboundMessage(f.w.staff.ctx, textInput(f.w.student.conversation.id, body), {
+      db: t.db as never,
+      config: ON,
+      now: () => new Date(),
+    });
+
+  return {
+    q,
+    rows,
+    one,
+    deps,
+    pause,
+    releaseAll,
+    fixture,
+    inbound,
+    ctxOf,
+    trigger,
+    claimOf,
+    run,
+    runClaim,
+    dispatchDeps,
+    accepted,
+    session,
+    request,
+    botRequests,
+    events,
+    inFlight,
+    controlSeq,
+    replyContent,
+    startedPrompt,
+    replyTrigger,
+    assign,
+    submit,
+  };
 }

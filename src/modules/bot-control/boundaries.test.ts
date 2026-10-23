@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -22,6 +24,7 @@ import { draftCanonical } from "./drafts";
 import { BotControlError } from "./errors";
 import { canonicalWithHash } from "./publish";
 import { runBotsCli } from "./operator";
+import { sessionSuppressionCandidatesSql, suppressionCandidatesSql } from "./suppression";
 
 // Structural guards for the bot-control module (Phase 08C, ADR 0019) and unit checks that need no database.
 
@@ -58,14 +61,17 @@ describe("bot-control boundaries", () => {
 
   it("the suppression primitive never waits on a request row and only ever holds QUEUED BOT requests (08D)", () => {
     const s = sources.find((x) => x.file === "suppression.ts")!.text;
-    // the candidate statement locks only the request rows, one at a time in id order, skipping any row another transaction holds
-    expect(s.match(/FOR UPDATE OF r SKIP LOCKED/g)).toHaveLength(1);
-    expect(s).toMatch(/ORDER BY r\.id FOR UPDATE OF r SKIP LOCKED`/);
+    // the candidate statements (deployment-scoped 08D, session-scoped 08E-5) lock only request rows, in id order, skipping any
+    // row another transaction holds
+    expect(s.match(/FOR UPDATE OF r SKIP LOCKED/g)).toHaveLength(2);
+    expect(s.match(/ORDER BY r\.id FOR UPDATE OF r SKIP LOCKED`/g)).toHaveLength(2);
     expect(s).not.toMatch(/FOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)(?! OF r SKIP LOCKED)/);
-    // the only write: QUEUED -> HELD on ids this transaction locked; it never sends, claims, re-queues or finishes a send
-    expect(s.match(/UPDATE outbound_requests/g)).toHaveLength(1);
-    expect(s).toMatch(/SET state = 'HELD'/);
-    expect(s).toMatch(/AND o\.state = 'QUEUED'/);
+    // the only writes: QUEUED -> HELD on ids this transaction locked; they never send, claim, re-queue or finish a send
+    expect(s.match(/UPDATE outbound_requests/g)).toHaveLength(2);
+    expect(s.match(/SET state = 'HELD'/g)).toHaveLength(2);
+    expect(
+      s.match(/= ANY\(\$\{uuidArray\(locked(Ids)?\)\}::uuid\[\]\) AND o\.state = 'QUEUED'/g),
+    ).toHaveLength(2);
     expect(s).not.toMatch(
       /'(SENDING|ACCEPTED|REJECTED|UNKNOWN_OUTCOME)'\s*,?\s*(hold|WHERE)|state = '(SENDING|ACCEPTED|REJECTED|UNKNOWN_OUTCOME)'/,
     );
@@ -78,18 +84,60 @@ describe("bot-control boundaries", () => {
       (f) =>
         !/\.(db\.)?test\.ts$/.test(f) &&
         !/testing\.ts$/.test(f) &&
-        /lockSuppressionCandidates\s*:/.test(read(f)),
+        /lock(Session)?SuppressionCandidates\s*:/.test(read(f)),
     );
     expect(seamUsers).toEqual([]);
   });
 
-  it("has no HTTP route or page: only the operator script uses it", () => {
+  it("the session-scoped candidate statement is the deployment-scoped one with only the session predicate changed (08E-5, plan I.5)", () => {
+    const render = (q: SQL) => new PgDialect().sqlToQuery(q).sql;
+    const org = "00000000-0000-4000-8000-000000000001";
+    const id = "00000000-0000-4000-8000-000000000002";
+    const deployment = render(suppressionCandidatesSql(org, [id]));
+    const session = render(sessionSuppressionCandidatesSql(org, id));
+    const predicate =
+      /AND r\.bot_session_id (IN \(SELECT s\.id FROM bot_sessions s WHERE .*\)|= \$\d+) ORDER BY/;
+    expect(deployment).toMatch(predicate);
+    expect(session).toMatch(
+      /AND r\.bot_session_id = \$2 ORDER BY r\.id FOR UPDATE OF r SKIP LOCKED$/,
+    );
+    const cut = (text: string) => text.replace(predicate, "AND r.bot_session_id <P> ORDER BY");
+    expect(cut(session)).toBe(cut(deployment));
+    // the hold of the session primitive is restricted to the locked ids that are still QUEUED BOT rows of that session
+    const s = sources.find((x) => x.file === "suppression.ts")!.text;
+    expect(s).toMatch(
+      /AND o\.state = 'QUEUED'\s+AND o\.origin = 'BOT' AND o\.bot_session_id = \$\{sessionId\}/,
+    );
+    expect(s).toContain('export const OUTPUT_SUPPRESSED_HOLD_CODE = "bot_output_suppressed";');
+  });
+
+  it("has no HTTP route or page: only the operator script and (08E-5) the runtime's session-scoped hold use it", () => {
     const users = [...walk("src"), ...walk("scripts")].filter(
       (f) =>
         !f.includes("/src/modules/bot-control/") &&
         /from\s+"@\/modules\/bot-control(\/[^"]*)?"/.test(read(f)),
     );
-    expect(users.map((f) => f.slice(repo.length))).toEqual(["/scripts/bots-admin.ts"]);
+    expect(users.map((f) => f.slice(repo.length)).sort()).toEqual([
+      "/scripts/bots-admin.ts",
+      "/src/modules/bot-runtime/continue.ts",
+      "/src/modules/bot-runtime/trigger-queue.ts",
+    ]);
+    // the runtime imports exactly the session primitive and its hold code, through the module index, nothing else
+    for (const f of users.filter((x) => x.includes("/bot-runtime/"))) {
+      const imports = [
+        ...read(f).matchAll(/import\s*\{([^}]+)\}\s*from\s*"@\/modules\/bot-control(\/[^"]*)?"/g),
+      ];
+      expect(imports, f).toHaveLength(1);
+      expect(imports[0]![2], f).toBeUndefined();
+      expect(
+        imports[0]![1]!
+          .split(",")
+          .map((n) => n.trim())
+          .filter(Boolean)
+          .sort(),
+        f,
+      ).toEqual(["OUTPUT_SUPPRESSED_HOLD_CODE", "suppressSessionQueuedRequests"]);
+    }
   });
 
   it("nothing calls the redaction function yet (the 08F retention job will be its only caller)", () => {

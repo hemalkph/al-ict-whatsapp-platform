@@ -13,13 +13,14 @@ import {
   type TerminalizationCandidate,
   type TerminalizationResult,
 } from "@/db/ops/bot-trigger-queue";
+import { OUTPUT_SUPPRESSED_HOLD_CODE, suppressSessionQueuedRequests } from "@/modules/bot-control";
 import { claimFailureBackoffMs } from "./backoff";
 import { emitBotRuntimeLog } from "./log";
 import { RUNTIME_POLICY } from "./policy";
 
-// The trigger queue with the approved runtime policy bound in (Phase 08E-3; plan sections D.3, G.3, J.2, J.3, K.1a). This is
-// the ONLY file of the module that touches the database, and only through the SQL primitives of db/ops/bot-trigger-queue.ts
-// (no SQL text here). It is NOT exported from the module index: the webhook worker imports that index, and nothing in the
+// The trigger queue with the approved runtime policy bound in (Phase 08E-3; plan sections D.3, G.3, J.2, J.3, K.1a). It
+// touches the database only through the SQL primitives of db/ops/bot-trigger-queue.ts and, for terminalization's hold of a
+// QUEUED request, the session-scoped suppression primitive of bot-control (08E-5; no SQL text here). It is NOT exported from the module index: the webhook worker imports that index, and nothing in the
 // inbound path may reach the queue. Nothing calls this file yet; the step transaction (08E-4) and the bot worker (08E-7) will.
 // It starts no loop, creates no session or request, and calls no transport.
 //
@@ -181,6 +182,8 @@ export async function terminalizeTrigger(
   const result = await terminalizeTriggerOp(db, candidate, {
     ...TERMINALIZATION,
     lockTimeoutMs: RUNTIME_POLICY.lockTimeoutMs,
+    suppressSession: (tx, organizationId, sessionId) =>
+      suppressSessionQueuedRequests(tx, organizationId, sessionId, OUTPUT_SUPPRESSED_HOLD_CODE),
   });
   if (result.kind === "dead")
     emitBotRuntimeLog({

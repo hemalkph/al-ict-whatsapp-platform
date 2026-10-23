@@ -26,3 +26,9 @@ export {
   type StopResult,
 } from "./deployments";
 export { EMERGENCY_STOP_PHRASE } from "./schemas";
+// Phase 08E-5: the session-scoped hold, for the bot runtime (step takeover and trigger terminalization) only.
+export {
+  OUTPUT_SUPPRESSED_HOLD_CODE,
+  suppressSessionQueuedRequests,
+  type SuppressionExecutor,
+} from "./suppression";

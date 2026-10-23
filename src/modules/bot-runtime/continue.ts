@@ -5,6 +5,7 @@ import {
   type LiveSessionRow,
   type TriggerMessageRow,
 } from "@/db/ops/bot-step";
+import { OUTPUT_SUPPRESSED_HOLD_CODE, suppressSessionQueuedRequests } from "@/modules/bot-control";
 import { step, type RequestState } from "@/modules/bots";
 import { applyEngineResult } from "./apply";
 import { deferStep, finishStep, type StepContext, type StepSummary } from "./context";
@@ -56,12 +57,15 @@ export async function continuationPath(
     state: live.state,
   };
 
-  // I.1: staff control sequenced after the session started ends it now. The queued request (if any) is held by the
-  // dispatcher because output_suppressed_at is set in this transaction; session-scoped suppression is 08E-5.
+  // I.1 (08E-5): staff control sequenced after the session started ends it now, under the conversation and session locks.
+  // In ONE transaction: the session's QUEUED request is held (session-scoped suppression; a request a dispatcher holds is
+  // skipped, never waited for, and the dispatcher then refuses it because output_suppressed_at commits with this change), the
+  // session ends with no terminal notice, its deferred triggers end. The student's message stays in the Inbox.
   const fate = classifyTakeover(
     await readStaffControlAfter(tx, org, live.conversationId, live.startedControlSeq),
   );
   if (fate !== null) {
+    await suppressSessionQueuedRequests(tx, org, live.id, OUTPUT_SUPPRESSED_HOLD_CODE);
     await endSession(tx, {
       organizationId: org,
       id: live.id,

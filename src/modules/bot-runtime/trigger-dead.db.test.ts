@@ -43,11 +43,10 @@ import { expireClaim, insertTrigger, makeDue, triggerRow, type QueueCtx } from "
 // running sixth attempt, with a live session handed over in the same transaction, and with recovery from a lost sixth claim or a
 // lost failure acknowledgment. Real PostgreSQL 17, real persisted state, real lock ownership barriers (no mocks).
 //
-// KNOWN DEPENDENCY, stated rather than hidden: holding a handed-over session's QUEUED request (QUEUED -> HELD) is the
-// session-scoped suppression primitive of checkpoint 08E-5. Until then the terminalizer suppresses the SESSION (output_suppressed_at
-// in the same transaction) and the approved 08D dispatcher holds the request at its claim (bot_output_suppressed) and again at
-// its final authorization; a test below proves that with the real dispatcher. The assertions that the request is still QUEUED
-// right after the hand-over are deliberate pins of this interim state and change with 08E-5.
+// 08E-5 resolved the interim dependency of 08E-3: the terminalizer now holds a handed-over session's QUEUED request itself
+// (QUEUED -> HELD bot_output_suppressed, the session-scoped primitive, in the same transaction as DEAD and the hand-over). A
+// request a dispatcher claim holds is skipped, never waited for, and the dispatcher's claim/final authorization then refuse it
+// because the session's suppression committed first. A SENDING request is never touched.
 
 const dialect = new PgDialect();
 const random = () => 0.5;
@@ -473,7 +472,7 @@ describe("trigger exhaustion and terminalization (R1)", () => {
       expect(logs.some((l) => l.includes("bots.trigger_dead") && l.includes(s.id))).toBe(true);
     });
 
-    it("a QUEUED request of the handed-over session is NOT recalled by 08E-3 (08E-5), but the real dispatcher holds it and sends nothing", async () => {
+    it("a QUEUED request of the handed-over session is held in the same transaction (08E-5): HELD bot_output_suppressed, nothing to claim, 0 calls", async () => {
       const queued = await queueBotStep(t, fx, s, {
         stepSeq: 1,
         message: textMessage("hello"),
@@ -486,15 +485,71 @@ describe("trigger exhaustion and terminalization (R1)", () => {
         kind: "dead",
         handedOverSessionId: s.id,
       });
-      // pinned interim state (changes with the 08E-5 session-scoped hold): the request is still QUEUED ...
+      // held by the terminalizer itself (the interim QUEUED pin of 08E-3 is gone), with the suppression's own code
+      expect(
+        (
+          await q(
+            "select state, hold_reason, finished_at is not null finished from outbound_requests where id = $1",
+            [queued.requestId],
+          )
+        ).rows[0],
+      ).toEqual({ state: "HELD", hold_reason: "bot_output_suppressed", finished: true });
+      const transport = new FakeTransport();
+      const claimed = await claimNext(dispatchDeps(transport));
+      expect(claimed).toEqual({ claim: null, held: 0 }); // nothing left QUEUED for the dispatcher
+      expect(transport.calls).toHaveLength(0);
+      expect(
+        (
+          await q(
+            "select count(*)::int n from outbound_requests where bot_session_id = $1 and state in ('QUEUED','SENDING')",
+            [s.id],
+          )
+        ).rows[0].n,
+      ).toBe(0);
+    });
+
+    it("a QUEUED request a dispatcher claim holds is SKIPPED, never waited for; the claim then refuses it (bot_output_suppressed), 0 calls", async () => {
+      const queued = await queueBotStep(t, fx, s, {
+        stepSeq: 1,
+        message: textMessage("hello"),
+        now: new Date(),
+      });
+      const ctx = ctxOf(fx.w, s.student.conversation.id);
+      const poison = await insertTrigger(t, ctx, { messageId: s.student.message.id });
+      await failTimes(poison.id, 6);
+      // park a real claim AFTER it locked R (FOR UPDATE SKIP LOCKED) and BEFORE its bot-rule read: it waits for the account row
+      const account = await barriers.hold(
+        "select id from whatsapp_accounts where id = $1 for update",
+        [fx.w.account.id],
+      );
+      const transport = new FakeTransport();
+      const claim = barriers.settle(claimNext(dispatchDeps(transport)));
+      const claimPid = await barriers.waitUntilBlocked(account.pid);
+      const probe = await q("select 1 from outbound_requests where id = $1 for share skip locked", [
+        queued.requestId,
+      ]);
+      expect(probe.rows).toHaveLength(0); // R is locked by the parked claim
+
+      const done = terminalizeTrigger(t.db, candidate(poison.id, ctx));
+      expect(await barriers.within(done, 5_000)).toBe(true); // completes while the claim still holds R
+      expect(await done).toMatchObject({ kind: "dead", handedOverSessionId: s.id });
+      expect(await barriers.blockersOf(claimPid)).toEqual([account.pid]); // the claim never moved
       expect(
         (await q("select state from outbound_requests where id = $1", [queued.requestId])).rows[0]
           .state,
-      ).toBe("QUEUED");
-      // ... and the approved 08D claim holds it because the session's output is suppressed
-      const transport = new FakeTransport();
-      const claimed = await claimNext(dispatchDeps(transport));
-      expect(claimed.claim).toBeNull();
+      ).toBe("QUEUED"); // skipped, not held
+      expect((await triggerRow(t, poison.id)).status).toBe("DEAD");
+      expect(
+        (
+          await q(
+            "select state, output_suppressed_at is not null s from bot_sessions where id = $1",
+            [s.id],
+          )
+        ).rows[0],
+      ).toEqual({ state: "HANDED_OVER", s: true });
+
+      await account.release();
+      expect(await claim).toMatchObject({ ok: true, value: { claim: null, held: 1 } });
       expect(
         (
           await q("select state, hold_reason from outbound_requests where id = $1", [

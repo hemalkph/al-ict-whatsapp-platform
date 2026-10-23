@@ -28,6 +28,10 @@ const OPS_IMPORTS: Record<string, readonly string[]> = {
   "start.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
   "step.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
 };
+// 08E-5: the two files allowed to reach bot-control, and the ONE import they may make (the session-scoped hold, plan I.5).
+const SUPPRESSION_IMPORTERS: readonly string[] = ["continue.ts", "trigger-queue.ts"];
+const SUPPRESSION_IMPORT =
+  /import \{ OUTPUT_SUPPRESSED_HOLD_CODE, suppressSessionQueuedRequests \} from "@\/modules\/bot-control";/;
 const sources = readdirSync(root)
   .filter((f) => f.endsWith(".ts") && !/\.(db\.)?test\.ts$/.test(f) && f !== "testing.ts")
   .map((f) => ({ file: f, text: code(read(join(root, f))) }));
@@ -81,7 +85,14 @@ describe("bot runtime core boundaries (08E-1)", () => {
     const queue = sources.find((s) => s.file === "trigger-queue.ts")!.text;
     const specs = [...queue.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
     expect(specs.sort()).toEqual(
-      ["./backoff", "./log", "./policy", "@/db/ops/bot-trigger-queue", "@/db/ops/executor"].sort(),
+      [
+        "./backoff",
+        "./log",
+        "./policy",
+        "@/db/ops/bot-trigger-queue",
+        "@/db/ops/executor",
+        "@/modules/bot-control", // 08E-5: the session-scoped hold, bound into terminalization
+      ].sort(),
     );
     expect(queue).not.toMatch(/drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/);
     expect(queue).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM)\b/);
@@ -166,6 +177,32 @@ describe("bot runtime core boundaries (08E-1)", () => {
       );
   });
 
+  it("08E-5: request rows are held only through the session-scoped primitive, with its fixed code and no test seam", () => {
+    for (const { file, text } of sources) {
+      const uses = text.match(/suppressSessionQueuedRequests\(/g)?.length ?? 0;
+      expect(uses, file).toBe(SUPPRESSION_IMPORTERS.includes(file) ? 1 : 0);
+      if (uses === 0) continue;
+      expect(text, file).toMatch(SUPPRESSION_IMPORT);
+      // always the dispatcher's own suppression code, never a caller-supplied seam
+      expect(text, file).toMatch(
+        /suppressSessionQueuedRequests\(tx, [a-zA-Z.]+, [a-zA-Z.]+, OUTPUT_SUPPRESSED_HOLD_CODE\)/,
+      );
+      expect(text, file).not.toMatch(/lockSessionSuppressionCandidates|lockSuppressionCandidates/);
+    }
+    // the takeover branch suppresses before it ends the session, inside the same step transaction
+    const cont = sources.find((s) => s.file === "continue.ts")!.text;
+    const branch = cont.slice(
+      cont.indexOf("classifyTakeover("),
+      cont.indexOf("c.deps.flows.load("),
+    );
+    expect(branch.indexOf("suppressSessionQueuedRequests(")).toBeGreaterThan(-1);
+    expect(branch.indexOf("suppressSessionQueuedRequests(")).toBeLessThan(
+      branch.indexOf("endSession("),
+    );
+    expect(branch).toMatch(/endConversationTriggers\(/);
+    expect(branch).not.toMatch(/terminalNotice|enqueueEffect|applyEngineResult/);
+  });
+
   it("the queue primitives never touch outbound requests, messages or any transport, and know no module", () => {
     const ops = code(read(join(repo, "src/db/ops/bot-trigger-queue.ts")));
     expect(ops).not.toMatch(
@@ -173,6 +210,14 @@ describe("bot runtime core boundaries (08E-1)", () => {
     );
     // the fence on every write to a claimed trigger names organization, id, PENDING and the exact claim token
     expect(ops).toMatch(/status = 'PENDING' AND claim_token = \$\{uuid\(f\.claimToken/);
+    // 08E-5: terminalization runs the injected session-scoped hold exactly once, after the hand-over and its event, before the
+    // conversation's other triggers end (one transaction)
+    const term = ops.slice(ops.indexOf("export async function terminalizeTrigger"));
+    expect(term.match(/options\.suppressSession\(/g)).toHaveLength(1);
+    const at = (s: string) => term.indexOf(s);
+    expect(at("'HANDED_OVER', 'bot_error'")).toBeGreaterThan(-1);
+    expect(at("'HANDED_OVER', 'bot_error'")).toBeLessThan(at("options.suppressSession("));
+    expect(at("options.suppressSession(")).toBeLessThan(at("endConversationTriggersSql("));
     // nothing in the queue file holds a request or message row lock
     expect(ops).not.toMatch(/FROM bot_triggers[^;]*JOIN\s+outbound/);
   });
@@ -185,7 +230,9 @@ describe("bot runtime core boundaries (08E-1)", () => {
       expect(
         file === "outbound.ts"
           ? text.replace(/@\/modules\/messaging\/(config|enqueue|errors)"/g, '"')
-          : text,
+          : SUPPRESSION_IMPORTERS.includes(file)
+            ? text.replace(SUPPRESSION_IMPORT, "")
+            : text,
         file,
       ).not.toMatch(
         /@\/modules\/(messaging|bot-control|whatsapp|inbox|leads|access|auth)\b|@\/app\/|next\/|meta-transport|dispatchBatch|claimNext|executeClaim|authorizeSend|OutboundTransport/,
@@ -214,7 +261,8 @@ describe("bot runtime core boundaries (08E-1)", () => {
             (spec === "@/shared/logging/logger" && file === "log.ts") ||
             (spec.startsWith("@/db/ops/") && (OPS_IMPORTS[file] ?? []).includes(spec)) ||
             (file === "outbound.ts" &&
-              ["config", "enqueue", "errors"].some((m) => spec === `@/modules/messaging/${m}`)),
+              ["config", "enqueue", "errors"].some((m) => spec === `@/modules/messaging/${m}`)) ||
+            (spec === "@/modules/bot-control" && SUPPRESSION_IMPORTERS.includes(file)),
           `${file}: ${spec}`,
         ).toBe(true);
       }

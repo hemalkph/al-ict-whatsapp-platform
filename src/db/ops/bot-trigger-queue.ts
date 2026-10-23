@@ -20,7 +20,8 @@ import type { DbExecutor } from "./executor";
 // FOR UPDATE SKIP LOCKED. The terminalizer takes the trigger row first (SKIP LOCKED), then, only when a live session exists,
 // the conversation advisory try-lock, the deployment FOR SHARE, the conversation FOR UPDATE and the session FOR UPDATE: the
 // order a step transaction uses, so the two meet at the trigger row and can never form a cycle. It never touches
-// outbound_requests, so it can neither change a SENDING request nor create a transport attempt.
+// outbound_requests itself: holding a handed-over session's QUEUED request is the caller's injected session-scoped suppression
+// (Phase 08E-5, the bot-control primitive), so this file can neither change a SENDING request nor create a transport attempt.
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CODE = /^[a-z0-9_]{1,64}$/;
@@ -445,6 +446,15 @@ export function lockTerminalizationCandidateSql(
 export type TerminalizeOptions = TerminalizationParams & {
   /** Bound for each lock wait inside the transaction (milliseconds). */
   readonly lockTimeoutMs: number;
+  /**
+   * The session-scoped suppression (08E-5), run on THIS transaction right after the hand-over: it holds the session's QUEUED
+   * BOT requests and skips (never waits for) one a dispatcher holds. Required, so no caller can forget it.
+   */
+  readonly suppressSession: (
+    tx: DbExecutor,
+    organizationId: string,
+    sessionId: string,
+  ) => Promise<unknown>;
 };
 
 export type TerminalizationResult =
@@ -463,12 +473,13 @@ export type TerminalizationResult =
  * session exists: the conversation advisory TRY-lock (busy: skip the round, nothing changed), deployment FOR SHARE,
  * conversation FOR UPDATE, session FOR UPDATE -> DEAD(attempts_exhausted) -> the session HANDED_OVER (system_handover /
  * bot_error, output suppressed, awaiting and tokens cleared; the database stamps ended_at and allocates handover_control_seq
- * on the conversation row already held) with its HANDED_OVER event -> the conversation's other PENDING triggers ended
+ * on the conversation row already held) with its HANDED_OVER event -> the injected session-scoped suppression (QUEUED ->
+ * HELD for rows it can lock; a row a dispatcher holds is skipped) -> the conversation's other PENDING triggers ended
  * (session_ended), without waiting.
  *
- * Requests are NOT touched here (the session-scoped hold of a QUEUED request is the 08E-5 primitive). Output stays safe in
- * the meantime because the session is suppressed in the same transaction: the dispatcher's claim and final authorization hold
- * any request of it (bot_output_suppressed), and a SENDING request is never changed by anyone but the dispatcher.
+ * A skipped request stays safe because the session is suppressed in the same transaction: the dispatcher's claim and final
+ * authorization hold it (bot_output_suppressed). A SENDING request is never changed by anyone but the dispatcher; one whose
+ * final authorization already passed may still be sent (the accepted limit, V3.2 I.4).
  */
 export async function terminalizeTrigger(
   db: DbExecutor,
@@ -535,7 +546,9 @@ export async function terminalizeTrigger(
       await tx.execute(sql`
         INSERT INTO bot_session_events (organization_id, session_id, conversation_id, kind, code)
         VALUES (${org}, ${handedOverSessionId}, ${conversationId}, 'HANDED_OVER', 'bot_error')`);
-      // 7. The other PENDING triggers of the conversation end with the session, never waiting on a held row.
+      // 7. The session's QUEUED request (if any) is held in the same transaction; never a wait on a request row.
+      await options.suppressSession(tx as unknown as DbExecutor, org, handedOverSessionId);
+      // 8. The other PENDING triggers of the conversation end with the session, never waiting on a held row.
       endedTriggers = (
         await tx.execute(endConversationTriggersSql({ organizationId: org, conversationId }))
       ).rows.length;
