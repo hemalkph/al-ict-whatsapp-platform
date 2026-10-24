@@ -5,9 +5,12 @@ import { OUTBOUND_REQUEST_STATES } from "@/db/schema/enums";
 // The migration 0008 objects the bot worker depends on, verified STRUCTURALLY from the catalog (Phase 08E-7 review): a name
 // alone is not enough (a same-name index with other keys, a constraint on another table, a function without its enabled
 // trigger, an incompatible overload). Partial-index predicates and the CHECK condition are compared as the server's own
-// deparsed text (pg_get_expr, search_path pinned to pg_catalog) against the exact 0008 expressions, and only after the
-// catalog shows they reference nothing but outbound_requests' own columns. Nothing taken from the catalog is ever EXECUTED
-// (Phase 08E-8 F-1): a CHECK may call any function, volatile ones included, and a READ ONLY transaction does not stop every
+// deparsed text (pg_get_expr, search_path pinned to pg_catalog) against the exact 0008 expressions, and only after pg_depend
+// shows they reference no unpinned object other than outbound_requests itself. pg_depend omits PINNED objects (PostgreSQL 17:
+// OIDs below FirstUnpinnedObjectId, the bootstrap catalog), so pinned built-ins such as text, = ANY or || are not seen here;
+// the exact deparsed-text comparison is what pins those. Not every built-in is pinned (information_schema objects and the
+// plpgsql handlers, for example, are not): a reference to one counts as foreign, which only fails closed. Nothing taken from
+// the catalog is ever EXECUTED (Phase 08E-8 F-1): a CHECK may call any function, volatile ones included, and a READ ONLY transaction does not stop every
 // side effect such a function can have (signals, advisory locks, notifications, external calls). The pure judge is unit-tested.
 
 type RequestState = (typeof OUTBOUND_REQUEST_STATES)[number];
@@ -228,7 +231,8 @@ async function readFacts(db: DbExecutor): Promise<SchemaFacts> {
       JOIN pg_namespace pn ON pn.oid = p.pronamespace
      WHERE NOT t.tgisinternal
        AND t.tgname IN ('outbound_requests_allocate_control_seq_trg', 'conversation_events_allocate_control_seq_trg')`);
-  // pg_depend records every non-pinned (non-built-in) object an expression uses: anything but the table itself is foreign.
+  // pg_depend records every UNPINNED object an expression uses (pinned bootstrap objects are never recorded; some built-ins are
+  // unpinned and so count as foreign, failing closed): anything but the table itself is foreign.
   const indexes = await db.execute<{
     name: string;
     table_name: string;

@@ -507,10 +507,7 @@ export function runtimeKit(t: TestDb) {
       (error: unknown) => ({ ok: false as const, error }),
     );
     const pid = await p.reached;
-    watch.stopCapturing();
-    await watch.terminate(pid);
-    await watch.terminated(); // resume only once the client knows its connection is dead: one order, not a race
-    p.release();
+    await terminateThenResume(watch, pid, p.release);
     const result = await running;
     await watch.verify();
     const conversationId = s.conversation_id as string;
@@ -584,6 +581,25 @@ export function runtimeKit(t: TestDb) {
 }
 
 // ------------------------------------------------------------------------------------------------ backend termination
+
+/**
+ * Terminates the paused victim's backend, waits until its client has seen the end (resume only then: one order, not a race),
+ * and resumes it. The resume is in `finally`: if the termination or its observation fails, the victim is still released, so it
+ * never keeps its pooled connection checked out (a hung pool close); the original failure propagates unchanged.
+ */
+export async function terminateThenResume(
+  watch: Pick<ReturnType<typeof terminationWatch>, "stopCapturing" | "terminate" | "terminated">,
+  pid: number,
+  resume: () => void,
+): Promise<void> {
+  try {
+    watch.stopCapturing();
+    await watch.terminate(pid);
+    await watch.terminated();
+  } finally {
+    resume();
+  }
+}
 
 type WatchedClient = {
   readonly processID?: number | null;
