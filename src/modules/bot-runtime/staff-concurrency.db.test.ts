@@ -8,9 +8,10 @@ import { deferred, messageFlow, runtimeKit, terminationWatch, type RuntimeFx } f
 // Phase 08E-8D1 on disposable PostgreSQL 17 (READ COMMITTED), real T1 / reconciler / dispatcher, FakeTransport only.
 //   Part 1 STAFF submission versus the bot step T1 at the conversation row (plan I.4, K.1, K.2): staff-first, bot-first, a staff
 //     rollback, and concurrent submissions. Order is proved by lock ownership (pg_blocking_pids), never by sleeping.
-//   Part 2 direct MESSAGE follow-ups after staff intervention: the reconciler continues a MESSAGE whose request was ACCEPTED; a
-//     staff event after the session started makes the enqueue refuse the follow-up (messaging/enqueue.ts), so no unauthorized
-//     BOT request is created. The actual contracts are pinned here (see the per-case comments).
+//   Part 2 direct MESSAGE follow-ups after staff intervention: the reconciler applies a MESSAGE whose request was ACCEPTED; a
+//     staff event after the session started decides the session's fate first (J.2 rules 4-6: HANDED_OVER staff_* or COMPLETED
+//     conversation_resolved), whether the flow would send next, end with a notice or end silently, so no BOT request is
+//     created and no later handover barrier is invented. The actual contracts are pinned here (see the per-case comments).
 // The deterministic B4 for submission (claim parked between its bot-rule read and the staff commit) needs a dispatcher test hook
 // and stays unproven here: docs/TESTING_STRATEGY.md and review-conditions.db.test.ts.
 
@@ -228,8 +229,7 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
   });
 
   // ================================================================================== Part 2: MESSAGE follow-ups
-  /** MESSAGE -> MESSAGE -> END: the first follow-up is an ORDINARY send (a refusal hands the session over). */
-  const chainFlow = () => ({
+  const testFlow = (nodes: Record<string, unknown>) => ({
     schemaVersion: 1,
     name: "Test flow",
     startNodeId: "welcome",
@@ -237,22 +237,29 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
     triggers: [{ kind: "keyword", words: ["menu"] }],
     nodes: {
       fallback: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
+      ...nodes,
+    },
+  });
+  /** MESSAGE -> MESSAGE -> END: the first follow-up is an ORDINARY send. */
+  const chainFlow = () =>
+    testFlow({
       welcome: { type: "MESSAGE", text: "Hello", next: "more" },
       more: { type: "MESSAGE", text: "More", next: "done" },
       done: { type: "END", message: "Bye" },
-    },
-  });
+    });
+  /** MESSAGE -> END with NO message: accepting R1 ends the flow with zero effects (COMPLETED flow_end, nothing to enqueue). */
+  const silentEndFlow = () =>
+    testFlow({
+      welcome: { type: "MESSAGE", text: "Hello", next: "done" },
+      done: { type: "END" },
+    });
+  /** What accepting R1 leads to when no staff acted. */
   const FLOWS = {
-    // follow-up = a terminal END notice: refused => session COMPLETED flow_end WITHOUT a notice + TERMINAL_NOTICE_NOT_QUEUED
-    notice: { flow: messageFlow, state: "COMPLETED", endReason: "flow_end", handover: null },
-    // follow-up = an ordinary MESSAGE: refused => HANDED_OVER system_handover/send_refused + HANDED_OVER event
-    ordinary: {
-      flow: chainFlow,
-      state: "HANDED_OVER",
-      endReason: "system_handover",
-      handover: "send_refused",
-    },
+    notice: { flow: messageFlow, label: "a terminal END notice" },
+    ordinary: { flow: chainFlow, label: "an ordinary MESSAGE" },
+    silent: { flow: silentEndFlow, label: "a silent END (no message, no effect)" },
   } as const;
+  const KINDS = ["notice", "ordinary", "silent"] as const;
 
   async function staffDo(f: RuntimeFx, action: Action) {
     if (action === "assign") expect((await k.assign(f)).changed).toBe(true);
@@ -267,9 +274,12 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
       );
     }
   }
-  /** The refusal code the enqueue gives: a resolution (even with a reply) first, then any other staff event. */
-  const refusalCode = (action: Action) =>
-    action === "resolve" ? "conversation_resolved" : "staff_took_over";
+  /** J.2 rules 4-6: the fate staff control gives a live session (classifyTakeover), applied before the flow moves on. */
+  const FATE = {
+    assign: { state: "HANDED_OVER", endReason: "system_handover", handover: "staff_assigned" },
+    submit: { state: "HANDED_OVER", endReason: "system_handover", handover: "staff_replied" },
+    resolve: { state: "COMPLETED", endReason: "conversation_resolved", handover: null },
+  } as const;
 
   /** A MESSAGE session started by real T1: S WAITING_FOR_SEND, R1 QUEUED, the student's trigger message recorded. */
   async function started(flow: Record<string, unknown>) {
@@ -288,17 +298,16 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
   const accept = async (x: Started, wamid: string) =>
     expect((await k.dispatchWith(k.accepted(wamid), x.r1.id as string)).outcome).toBe("accepted");
 
-  /** Terminal-state invariants every follow-up scenario shares. */
-  async function expectFollowUpRefused(
-    x: Started,
-    kind: keyof typeof FLOWS,
-    action: Action,
-    outcome: unknown,
-  ) {
-    const c = FLOWS[kind];
+  /**
+   * Terminal-state invariants every follow-up scenario shares. 08E-8D1 P2: the staff fate (J.2 rules 4-6) is applied before
+   * the flow moves on, whatever the follow-up is; the flow never continues into a defensive enqueue refusal (send_refused /
+   * TERMINAL_NOTICE_NOT_QUEUED) and never completes flow_end past newer staff control.
+   */
+  async function expectStaffFate(x: Started, action: Action, outcome: unknown) {
+    const c = FATE[action];
     expect(outcome).toEqual({
       kind: "applied",
-      action: "send_result_accepted",
+      action: c.handover ?? c.endReason,
       finalState: c.state,
     });
     const s = await k.session(x.s.id as string);
@@ -310,11 +319,12 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
       awaiting: null,
       awaiting_token: null,
     });
-    if (kind === "notice") expect(s.output_suppressed_at).toBeInstanceOf(Date);
+    expect(s.output_suppressed_at).toBeInstanceOf(Date);
+    // a resolution completes the session: no session event, no handover barrier (handover_control_seq stays NULL)
+    if (c.handover === null) expect(s.handover_control_seq).toBeNull();
+    else expect(Number(s.handover_control_seq)).toBeGreaterThan(Number(s.started_control_seq));
     const events = (await k.events(x.s.id as string)).map((e) => [e.kind, e.code]);
-    expect(events).toEqual([
-      [kind === "notice" ? "TERMINAL_NOTICE_NOT_QUEUED" : "HANDED_OVER", refusalCode(action)],
-    ]);
+    expect(events).toEqual(c.handover === null ? [] : [["HANDED_OVER", c.handover]]);
     // no follow-up BOT request, no duplicate; R1 keeps its truthful ACCEPTED
     const reqs = await k.botRequests(x.f);
     expect(reqs).toHaveLength(1);
@@ -333,14 +343,14 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
     expect(await k.botRequests(x.f)).toHaveLength(1);
   }
 
-  for (const kind of ["notice", "ordinary"] as const) {
-    describe(`follow-up is ${kind === "notice" ? "a terminal END notice" : "an ordinary MESSAGE"}`, () => {
+  for (const kind of KINDS) {
+    describe(`follow-up is ${FLOWS[kind].label}`, () => {
       for (const action of ["assign", "submit", "resolve"] as const) {
-        it(`A/B/C ${action} after R1 ACCEPTED, before the reconciler continues: no follow-up request; ${FLOWS[kind].state}/${FLOWS[kind].endReason}${FLOWS[kind].handover ? "/" + FLOWS[kind].handover : ""}`, async () => {
+        it(`A/B/C ${action} after R1 ACCEPTED, before the reconciler continues: no follow-up request; ${FATE[action].state}/${FATE[action].handover ?? FATE[action].endReason}`, async () => {
           const x = await started(FLOWS[kind].flow());
           await accept(x, `wamid.TEST08D1.${kind}.${action}`);
           await staffDo(x.f, action);
-          await expectFollowUpRefused(x, kind, action, await k.reconcile(x.s));
+          await expectStaffFate(x, action, await k.reconcile(x.s));
         });
       }
 
@@ -374,7 +384,7 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
         expect(await k.reconcile(x.s)).toEqual({ kind: "skipped", reason: "not_live" });
       });
 
-      it("F final authorization already passed (transport paused) when staff acts: the accepted window — one call, R1 ACCEPTED; the follow-up is then refused", async () => {
+      it("F final authorization already passed (transport paused) when staff acts: the accepted window — one call, R1 ACCEPTED; the reconciler then hands over staff_assigned, no follow-up", async () => {
         const x = await started(FLOWS[kind].flow());
         const release = deferred();
         const wamid = `wamid.TEST08D1.F.${kind}`;
@@ -395,7 +405,7 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
         expect(
           (await k.one("select wamid from messages where id = $1", [x.r1.message_id])).wamid,
         ).toBe(wamid);
-        await expectFollowUpRefused(x, kind, "assign", await k.reconcile(x.s));
+        await expectStaffFate(x, "assign", await k.reconcile(x.s));
       });
     });
   }
@@ -436,7 +446,7 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
         expect(transport.calls).toHaveLength(0);
       });
 
-      it(`${action}: staff first — the writer holds K; the reconciler waits, then refuses the follow-up (no request, TERMINAL_NOTICE_NOT_QUEUED staff_took_over)`, async () => {
+      it(`${action}: staff first — the writer holds K; the reconciler waits, then hands over (staff_assigned / staff_replied); no request`, async () => {
         const x = await started(messageFlow());
         await accept(x, `wamid.TEST08D1.E2.${action}`);
         const gate =
@@ -455,18 +465,222 @@ describe("staff intervention versus the bot runtime (08E-8D1)", () => {
         const [sr, rr] = await Promise.all([staff, rec]);
         noDeadlock(sr, rr);
         expect(sr.ok).toBe(true);
-        expect(rr).toMatchObject({ ok: true, value: { kind: "applied", finalState: "COMPLETED" } });
-        await expectFollowUpRefused(x, "notice", action, (rr as { value: unknown }).value);
+        expect(rr).toMatchObject({
+          ok: true,
+          value: { kind: "applied", finalState: "HANDED_OVER" },
+        });
+        await expectStaffFate(x, action, (rr as { value: unknown }).value);
       });
     }
   });
 
-  it("MUTATION GUARD: the enqueue refusal is what stops the follow-up (the assertions above are sensitive to it)", async () => {
-    // Positive control without staff: the same MESSAGE -> END flow DOES enqueue the notice, so the zero-request assertions
-    // above are not vacuous.
+  // ================================================================================== P2 lifecycle correction (08E-8D1)
+  const MIN = 60_000;
+  const statusSeq = async (f: RuntimeFx) =>
+    Number(
+      (
+        await k.one(
+          "select max(control_seq) s from conversation_events where conversation_id = $1 and kind = 'STATUS'",
+          [f.w.student.conversation.id],
+        )
+      ).s,
+    );
+  /** A fresh keyword input committed now, aged so that a decision clock shifted by `ms` sees it as one second old. */
+  async function freshInput(f: RuntimeFx, ms: number) {
+    const tr = await k.trigger(f, { body: "menu", observed: await k.controlSeq(f) });
+    const at = new Date(Date.now() + ms - 1000);
+    await k.q("update bot_triggers set input_occurred_at = $2 where id = $1", [tr.id, at]);
+    await k.q("update messages set occurred_at = $2 where id = $1", [tr.messageId, at]);
+    return tr;
+  }
+
+  // SETUP SHORTCUT: `reopen` sets status OPEN with a raw UPDATE in place of the real inbound reopening transaction
+  // (reopenIfNewer). The bot start (real T1) still runs every eligibility rule on the reopened row; the inbound reopening
+  // path itself is NOT exercised by these tests.
+  const reopen = (f: RuntimeFx) =>
+    k.q("update conversations set status = 'OPEN' where id = $1", [f.w.student.conversation.id]);
+
+  for (const kind of KINDS) {
+    it(`P2 primary (${kind}): staff reply then resolution after R1 ACCEPTED -> HANDED_OVER staff_replied after the resolution; no follow-up; restart only after a later resolution`, async () => {
+      const x = await started(FLOWS[kind].flow());
+      await accept(x, `wamid.TEST08D1.P2.${kind}`);
+      await staffDo(x.f, "submit");
+      await staffDo(x.f, "resolve");
+      const resolutionSeq = await statusSeq(x.f);
+      expect(resolutionSeq).toBeGreaterThan(Number(x.s.started_control_seq) + 1); // reply, then resolution
+
+      expect(await k.reconcile(x.s)).toEqual({
+        kind: "applied",
+        action: "staff_replied",
+        finalState: "HANDED_OVER",
+      });
+      const s = await k.session(x.s.id as string);
+      expect(s).toMatchObject({
+        state: "HANDED_OVER",
+        end_reason: "system_handover",
+        handover_reason: "staff_replied",
+        terminal_notice_step_seq: null,
+        awaiting: null,
+      });
+      expect(s.output_suppressed_at).toBeInstanceOf(Date);
+      expect(Number(s.handover_control_seq)).toBeGreaterThan(resolutionSeq);
+      expect((await k.events(x.s.id as string)).map((e) => [e.kind, e.code])).toEqual([
+        ["HANDED_OVER", "staff_replied"],
+      ]);
+      const reqs = await k.botRequests(x.f);
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0]).toMatchObject({ id: x.r1.id, state: "ACCEPTED", hold_reason: null });
+      expect(await k.inFlight(x.s.id as string)).toBe(0);
+      const transport = new FakeTransport();
+      for (let i = 0; i < 2; i++) {
+        const claimed = await claimNext(k.dispatchDeps(transport)); // only the STAFF request may be claimed (never executed)
+        if (claimed.claim) expect((await k.request(claimed.claim.requestId)).origin).toBe("STAFF");
+      }
+      expect(transport.calls).toHaveLength(0);
+
+      // idempotent: no second transition, no duplicate event
+      const before = await k.sessionJson(x.s.id as string);
+      expect(await k.reconcile(x.s)).toEqual({ kind: "skipped", reason: "not_live" });
+      expect(await k.sessionJson(x.s.id as string)).toEqual(before);
+      expect(await k.events(x.s.id as string)).toHaveLength(1);
+
+      // after the cooldown a fresh input is still blocked: the handover is later than the resolution
+      const blocked = await freshInput(x.f, 31 * MIN);
+      expect(await k.run(blocked.id, { readClock: k.shifted(31 * MIN) })).toMatchObject({
+        status: "IGNORED",
+        outcome: "handover_unresolved",
+      });
+      // a later staff resolution, then eligible fresh input after the cooldown, restarts
+      await reopen(x.f);
+      await staffDo(x.f, "resolve");
+      await reopen(x.f);
+      const again = await freshInput(x.f, 31 * MIN);
+      expect(await k.run(again.id, { readClock: k.shifted(31 * MIN) })).toMatchObject({
+        status: "PROCESSED",
+        outcome: "session_started",
+      });
+    });
+
+    it(`P2 resolution-only (${kind}): resolution after R1 ACCEPTED -> COMPLETED conversation_resolved; no handover barrier; restart after reopening + cooldown needs no second resolution`, async () => {
+      const x = await started(FLOWS[kind].flow());
+      await accept(x, `wamid.TEST08D1.P2R.${kind}`);
+      await staffDo(x.f, "resolve");
+      const resolutionSeq = await statusSeq(x.f);
+      expect(resolutionSeq).toBeGreaterThan(Number(x.s.started_control_seq));
+
+      expect(await k.reconcile(x.s)).toEqual({
+        kind: "applied",
+        action: "conversation_resolved",
+        finalState: "COMPLETED",
+      });
+      const s = await k.session(x.s.id as string);
+      expect(s).toMatchObject({
+        state: "COMPLETED",
+        end_reason: "conversation_resolved",
+        handover_reason: null,
+        handover_control_seq: null, // no handover barrier after the resolution
+        terminal_notice_step_seq: null,
+        awaiting: null,
+        awaiting_token: null,
+      });
+      expect(s.output_suppressed_at).toBeInstanceOf(Date);
+      expect(await k.events(x.s.id as string)).toEqual([]); // no HANDED_OVER / send_refused / notice event
+      const reqs = await k.botRequests(x.f);
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0]).toMatchObject({ id: x.r1.id, state: "ACCEPTED", hold_reason: null });
+      expect(await k.inFlight(x.s.id as string)).toBe(0);
+      const transport = new FakeTransport();
+      expect((await claimNext(k.dispatchDeps(transport))).claim).toBeNull(); // nothing to send
+      expect(transport.calls).toHaveLength(0);
+
+      // idempotent
+      const before = await k.sessionJson(x.s.id as string);
+      expect(await k.reconcile(x.s)).toEqual({ kind: "skipped", reason: "not_live" });
+      expect(await k.sessionJson(x.s.id as string)).toEqual(before);
+
+      // still RESOLVED (no reopening): a fresh input is refused conversation_resolved
+      const closed = await freshInput(x.f, 31 * MIN);
+      expect(await k.run(closed.id, { readClock: k.shifted(31 * MIN) })).toMatchObject({
+        status: "IGNORED",
+        outcome: "conversation_resolved",
+      });
+      // reopened, before the cooldown: refused by the cooldown rule, not by a handover barrier
+      await reopen(x.f);
+      const early = await freshInput(x.f, 2000); // after the resolution, inside the cooldown
+      expect(await k.run(early.id, { readClock: k.shifted(2000) })).toMatchObject({
+        status: "IGNORED",
+        outcome: "cooldown",
+      });
+      // after the cooldown: starts, with no second resolution
+      const again = await freshInput(x.f, 31 * MIN);
+      expect(await k.run(again.id, { readClock: k.shifted(31 * MIN) })).toMatchObject({
+        status: "PROCESSED",
+        outcome: "session_started",
+      });
+    });
+  }
+
+  for (const kind of ["notice", "silent"] as const)
+    for (const [actions, reason] of [
+      [["submit", "assign", "resolve"], "staff_assigned"],
+      [["assign", "resolve"], "staff_assigned"],
+      [["submit", "resolve"], "staff_replied"],
+    ] as const)
+      it(`P2 precedence (${kind}): ${actions.join(" + ")} -> ${reason}; a later resolution never overrides an assignment or reply`, async () => {
+        const x = await started(FLOWS[kind].flow());
+        await accept(x, `wamid.TEST08D1.P2.PREC.${kind}.${actions.join("")}`);
+        for (const a of actions) await staffDo(x.f, a);
+        expect(await k.reconcile(x.s)).toEqual({
+          kind: "applied",
+          action: reason,
+          finalState: "HANDED_OVER",
+        });
+        const s = await k.session(x.s.id as string);
+        expect(s).toMatchObject({ end_reason: "system_handover", handover_reason: reason });
+        expect(Number(s.handover_control_seq)).toBeGreaterThan(await statusSeq(x.f));
+        expect((await k.events(x.s.id as string)).map((e) => [e.kind, e.code])).toEqual([
+          ["HANDED_OVER", reason],
+        ]);
+        expect(await k.botRequests(x.f)).toHaveLength(1);
+      });
+
+  it("P2 Stop precedence: a live session of a STOPPED deployment with a staff reply is handed over deployment_stopped, not staff_replied", async () => {
     const x = await started(messageFlow());
-    await accept(x, "wamid.TEST08D1.CONTROL");
-    expect(await k.reconcile(x.s)).toMatchObject({ kind: "applied", finalState: "COMPLETED" });
-    expect(await k.botRequests(x.f)).toHaveLength(2);
+    await accept(x, "wamid.TEST08D1.P2.STOP");
+    await staffDo(x.f, "submit");
+    await k.q(
+      "update bot_deployments set status = 'STOPPED', send_epoch = send_epoch + 1 where id = $1",
+      [x.f.deployment.id],
+    );
+    expect(await k.reconcile(x.s)).toMatchObject({
+      action: "deployment_stopped",
+      finalState: "HANDED_OVER",
+    });
+    expect(await k.session(x.s.id as string)).toMatchObject({
+      handover_reason: "deployment_stopped",
+    });
+    expect(await k.botRequests(x.f)).toHaveLength(1);
   });
+
+  // Positive controls without staff: each flow DOES move on (a notice, a next MESSAGE, a silent flow_end), so the staff-fate
+  // assertions above are not vacuous.
+  for (const [kind, finalState, requests, endReason] of [
+    ["notice", "COMPLETED", 2, "flow_end"],
+    ["ordinary", "WAITING_FOR_SEND", 2, null],
+    ["silent", "COMPLETED", 1, "flow_end"],
+  ] as const)
+    it(`CONTROL (${kind}): with no staff event the reconciler continues the flow -> ${finalState}`, async () => {
+      const x = await started(FLOWS[kind].flow());
+      await accept(x, `wamid.TEST08D1.CONTROL.${kind}`);
+      expect(await k.reconcile(x.s)).toEqual({
+        kind: "applied",
+        action: "send_result_accepted",
+        finalState,
+      });
+      expect(await k.session(x.s.id as string)).toMatchObject({
+        state: finalState,
+        end_reason: endReason,
+      });
+      expect(await k.botRequests(x.f)).toHaveLength(requests);
+    });
 });

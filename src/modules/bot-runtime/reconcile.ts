@@ -12,6 +12,7 @@ import {
   lockDeploymentsShare,
   lockLiveSession,
   readDeployments,
+  readStaffControlAfter,
   tryAdvisoryLock,
   withStepTransaction,
   type DeploymentRow,
@@ -29,6 +30,7 @@ import { emitBotRuntimeLog } from "./log";
 import type { StepDeps } from "./outbound";
 import { queuedRequestOverdueFromMs, RUNTIME_POLICY } from "./policy";
 import { sessionFromRow } from "./session-row";
+import { classifyTakeover } from "./takeover";
 import {
   auditOverdueTriggers,
   endConversationTriggers,
@@ -211,8 +213,8 @@ class Reconciliation {
 
   /** A runtime-decided end: QUEUED output held, session ended (suppressed, no notice), event, deferred triggers ended. */
   async runtimeEnd(
-    state: "HANDED_OVER" | "FAILED",
-    endReason: "system_handover" | "error",
+    state: "HANDED_OVER" | "FAILED" | "COMPLETED",
+    endReason: "system_handover" | "error" | "conversation_resolved",
     handoverReason: string | null,
     code: string,
   ): Promise<ReconcileOutcome> {
@@ -230,7 +232,9 @@ class Reconciliation {
       endReason,
       handoverReason,
     });
-    await this.event(state === "HANDED_OVER" ? "HANDED_OVER" : "ERROR", code);
+    // A resolution completes the session with no session event, as in continue.ts.
+    if (state !== "COMPLETED")
+      await this.event(state === "HANDED_OVER" ? "HANDED_OVER" : "ERROR", code);
     await endConversationTriggers(this.tx, {
       organizationId: this.org,
       conversationId: this.live.conversationId,
@@ -270,6 +274,31 @@ class Reconciliation {
       promptToken: this.deps.newPromptToken(),
     });
     if (!result.changed) return { kind: "skipped", reason: "not_due" };
+    // I.1 / J.2 rules 4-7 (08E-8D1): an ACCEPTED MESSAGE moves the flow on (a next send, or a terminal transition with or
+    // without a notice). Staff control sequenced after the session started decides its fate first, under these same locks and
+    // with continue.ts's classifier: HANDED_OVER staff_* or COMPLETED conversation_resolved. Only a prompt's acceptance (now
+    // WAITING_FOR_INPUT, no next send) keeps the deferred takeover of plan R-8.
+    if (
+      event.type === "send_result" &&
+      event.state === "ACCEPTED" &&
+      result.outcome !== "WAITING_FOR_INPUT"
+    ) {
+      const fate = classifyTakeover(
+        await readStaffControlAfter(
+          this.tx,
+          this.org,
+          this.live.conversationId,
+          this.live.startedControlSeq,
+        ),
+      );
+      if (fate !== null)
+        return this.runtimeEnd(
+          fate.state,
+          fate.endReason,
+          fate.handoverReason,
+          fate.handoverReason ?? fate.endReason,
+        );
+    }
     const c: ApplyContext = {
       tx: this.tx,
       deps: this.deps,
