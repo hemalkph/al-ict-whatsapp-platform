@@ -15,7 +15,12 @@ import { deliveryBytes } from "@/modules/whatsapp/inbound/testing";
 import { processWebhookBatch } from "@/modules/whatsapp/queue/process";
 import { TEST_APP_SECRET, webhookPost } from "@/modules/whatsapp/testing";
 import { buildWebhookWorkerHandlers } from "@/modules/whatsapp/worker/registry";
-import { activateDeployment, stopActiveSessions } from "../bot-control";
+import {
+  activateDeployment,
+  pauseDeployment,
+  resumeDeployment,
+  stopActiveSessions,
+} from "../bot-control";
 import { BOTS_ON, botWorld, publishedBot, type BotWorld } from "../bot-control/testing";
 import { productionStepDeps } from "../bot-worker/compose";
 import { runSweepLoop, runTriggerLoop } from "../bot-worker/loops";
@@ -828,6 +833,57 @@ describe("closed loop: duplicates, concurrent workers, crashes, in-flight replie
     expect(await counts(x)).toMatchObject({ triggers: 1, sessions: 1, botRequests: 1, calls: 1 });
   });
 
+  it("C2b. forced claim race: worker A's real T0 claim is held UNCOMMITTED on the row while two real workers contend for it; exactly one claim exists, and it is the one that is then processed", async () => {
+    const x = await k.world(enquiryFlow());
+    const { triggerId } = await captured(x);
+    // The contention point is made by the database, not by scheduler luck: A's real claim statement has locked and updated the
+    // trigger row and its transaction stays open until released.
+    const won = deferred<Awaited<ReturnType<typeof claimTriggers>>>();
+    const commit = deferred();
+    releases.push(commit.resolve);
+    const holder = t.db.transaction(async (tx) => {
+      won.resolve(await claimTriggers(tx as unknown as DbExecutor));
+      await commit.promise;
+    });
+    const [winnerClaim] = await won.promise;
+    expect(winnerClaim).toMatchObject({ id: triggerId, attempts: 1 });
+    // proof the contention point is real: the row is locked by another transaction right now
+    await expect(
+      t.pool.query("select 1 from bot_triggers where id = $1 for update nowait", [triggerId]),
+    ).rejects.toMatchObject({ code: "55P03" });
+
+    // B and C run the real worker claim loop at that point. Correct claim safety (FOR UPDATE SKIP LOCKED) skips the locked row
+    // at once; without it they would WAIT on A's row and then claim it again, which the watcher below reports as "blocked".
+    const rivals = Promise.all([k2.triggerPass(), k3.triggerPass()]);
+    let watching = true;
+    const blocked = (async () => {
+      while (watching) {
+        const r = await t.pool.query(
+          "select count(*)::int n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        );
+        if (Number(r.rows[0].n) > 0) return "blocked" as const;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return "finished" as const;
+    })();
+    const verdict = await Promise.race([rivals.then(() => "finished" as const), blocked]);
+    watching = false;
+    commit.resolve(); // always release A, so a failure cannot leave rivals waiting forever
+    await holder;
+    const [b, c] = await rivals;
+    expect(verdict).toBe("finished");
+    expect([b.totals.claimed, c.totals.claimed]).toEqual([0, 0]);
+    expect((await trigger(triggerId)).attempts).toBe(1);
+
+    // the one valid claim is A's: it is still protected by its lease and is processed through the real step transaction
+    expect(await claimTriggers(k.workerDb)).toEqual([]);
+    const summary = await processTrigger(k.workerDb, winnerClaim!, k.production);
+    expect(summary).toMatchObject({ kind: "finished", outcome: "session_started" });
+    await k.settle();
+    expect(await trigger(triggerId)).toMatchObject({ status: "PROCESSED", attempts: 1 });
+    expect(await counts(x)).toMatchObject({ triggers: 1, sessions: 1, botRequests: 1, calls: 1 });
+  });
+
   it("C3. claim-token fence: a stalled worker's old claim, replayed after another worker re-claimed the trigger, is lost_claim and changes nothing", async () => {
     const x = await k.world(enquiryFlow());
     const { triggerId } = await captured(x);
@@ -1058,6 +1114,107 @@ describe("closed loop: duplicates, concurrent workers, crashes, in-flight replie
 
   // ------------------------------------------------------------------------------------------------ H takeover and Stop
 
+  // ---------------------------------------------------------------------------------------- referral_source (08E-8C)
+  // enquiryFlow lists its triggers as keyword, first_message, referral_source and the matcher takes the FIRST that holds, so a
+  // student's first eligible message starts through first_message, never referral_source. The only legitimate way to reach the
+  // third trigger is a message that is NOT the conversation's first eligible one (D.4a: an earlier eligible inbound message
+  // exists) and is not a keyword, but carries a recorded Meta ad referral. Real shape: the student wrote while the deployment
+  // was paused (stored, no trigger), the operator resumed it, and the next message arrives from a click-to-WhatsApp ad.
+  // No bot definition is added and no precedence is changed. The matched kind is not persisted, so it is proved by exclusion
+  // (the flow has no other trigger that can hold) and by the paired negative below, which differs only by the referral.
+  const REFERRAL = {
+    source_url: "https://fb.me/FAKE0000",
+    source_id: "400000000000001",
+    source_type: "ad",
+    body: "Join the A/L ICT class",
+    headline: "Chat with us",
+    media_type: "image",
+    image_url: "https://scontent.xx.fbcdn.net/v/FAKE",
+    ctwa_clid: "FAKE-ctwa-clid-0000000000000000000000000000000000000001",
+  };
+  async function earlierThenSecond(x: LoopWorld, second: Record<string, unknown>) {
+    const { ctx } = x.w.admin;
+    await pauseDeployment(ctx, { deploymentId: x.deployment.id }, { db: t.db });
+    await post(x, k.textMessage("Hello, I saw your page"));
+    expect((await k.webhookPass()).processed).toBe(1);
+    expect(await k.triggersOf(x)).toEqual([]); // no ACTIVE deployment: stored, no trigger, no session
+    await resumeDeployment(ctx, { deploymentId: x.deployment.id }, { db: t.db });
+    const d = await post(x, second);
+    expect((await k.webhookPass()).processed).toBe(1);
+    const [tr] = await k.triggersOf(x);
+    expect(tr).toMatchObject({ status: "PENDING", attempts: 0 });
+    const inbound = await k.inboundOf(x);
+    expect(inbound).toHaveLength(2);
+    return { wamid: d.wamid, triggerId: tr!.id as string, inbound };
+  }
+
+  it("R1. referral_source end to end: a non-first, non-keyword message carrying a recorded ad referral starts the session (signed webhook -> capture -> worker -> dispatcher -> FakeTransport)", async () => {
+    const x = await k.world(enquiryFlow());
+    const { triggerId, inbound } = await earlierThenSecond(x, {
+      ...k.textMessage("Can I get more info about this?"),
+      referral: REFERRAL,
+    });
+    const [m1, m2] = inbound;
+    // the three preconditions, from durable rows: first_message is false (an earlier eligible inbound exists, no session yet),
+    // the body is no keyword, and the exact message has an attribution for this organization and contact
+    expect(m1!.id).not.toBe(m2!.id);
+    expect(await k.sessionsOf(x)).toEqual([]);
+    const contactId = (await k.one("select contact_id from conversations where id = $1", [
+      m2!.conversation_id,
+    ]))!.contact_id;
+    const attributions = await k.rows(
+      "select organization_id, contact_id, message_id, source_type from lead_attributions where message_id = $1",
+      [m2!.id],
+    );
+    expect(attributions).toEqual([
+      {
+        organization_id: x.w.org.id,
+        contact_id: contactId,
+        message_id: m2!.id,
+        source_type: "META_AD",
+      },
+    ]);
+    expect(await k.rows("select 1 from lead_attributions where message_id = $1", [m1!.id])).toEqual(
+      [],
+    );
+
+    await k.settle();
+    expect(await trigger(triggerId)).toMatchObject({
+      status: "PROCESSED",
+      outcome_code: "session_started",
+      attempts: 1,
+    });
+    const [s] = await k.sessionsOf(x);
+    expect(s).toMatchObject({
+      started_by_message_id: m2!.id,
+      state: "WAITING_FOR_INPUT",
+      current_node_id: "language_menu",
+    });
+    const sent = k.sentTo(x);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.request.message).toMatchObject(
+      expectedPrompt("language_menu", tokenOf(sent[0]!)),
+    );
+    expect(await counts(x)).toMatchObject({ triggers: 1, sessions: 1, botRequests: 1, calls: 1 });
+  });
+
+  it("R2. the paired negative: the same non-first, non-keyword message WITHOUT a referral starts nothing (IGNORED no_trigger_match, no request, no call)", async () => {
+    const x = await k.world(enquiryFlow());
+    const { triggerId, inbound } = await earlierThenSecond(
+      x,
+      k.textMessage("Can I get more info about this?"),
+    );
+    expect(
+      await k.rows("select 1 from lead_attributions where message_id = $1", [inbound[1]!.id]),
+    ).toEqual([]);
+    await k.settle();
+    expect(await trigger(triggerId)).toMatchObject({
+      status: "IGNORED",
+      outcome_code: "no_trigger_match",
+    });
+    expect(await counts(x)).toMatchObject({ sessions: 0, botRequests: 0, calls: 0 });
+  });
+
   it("H1. staff assign the conversation during the conversation: the student's next real tap ends the session (no notice), nothing more is sent", async () => {
     const x = await k.world(enquiryFlow());
     await atMainList(x);
@@ -1097,9 +1254,15 @@ describe("closed loop: duplicates, concurrent workers, crashes, in-flight replie
     );
     await k.settle();
     const [r] = await k.requestsOf(x);
-    expect(r).toMatchObject({ origin: "BOT", state: "HELD" });
+    // The dispatcher's bot rule (bot_request_hold_code) names the staff control; the engine then maps a HELD send to the
+    // fixed system hand-over reason send_held (plan F6, J.4 'Failed send'), not to the staff-takeover reasons of a step.
+    expect(r).toMatchObject({ origin: "BOT", state: "HELD", hold_reason: "staff_took_over" });
     expect(await counts(x)).toMatchObject({ sessions: 1, botRequests: 1, calls: 0 });
-    expect((await k.sessionsOf(x))[0]).toMatchObject({ state: "HANDED_OVER" });
+    expect((await k.sessionsOf(x))[0]).toMatchObject({
+      state: "HANDED_OVER",
+      end_reason: "system_handover",
+      handover_reason: "send_held",
+    });
   });
 
   it("H3. operator Stop mid-conversation: the session is handed over (operator_stop); the student's next real tap starts nothing and sends nothing", async () => {
@@ -1325,14 +1488,34 @@ function closedLoopKit(t: TestDb) {
     db: t.db as never,
     transport,
     config: BOTS_ON,
-    now: () => new Date(Date.now() + 1_000),
+    now: () => new Date(),
     random: () => 0.5,
     accountMinIntervalMs: 0,
     conversationMinIntervalMs: 0,
     ...over,
   });
-  const dispatchPass = (over: Partial<DispatchDeps> = {}) =>
-    dispatchBatch(dispatchDeps(over), { batchSize: 20, concurrency: 1 });
+  /**
+   * The dispatcher's candidate rule is `next_attempt_at <= its clock`, and the application clock is truncated to the
+   * millisecond while the database stamps microseconds. The kit used to compensate with a blind +1 s on the dispatcher's
+   * clock (which also hid any host/container clock difference). The invariant is only "every queued request is already due
+   * on the dispatcher's own clock", so it is awaited explicitly (bounded) and the dispatcher runs on the real clock.
+   */
+  async function untilQueuedDue(ms = 5_000) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const late = await one(
+        "select count(*)::int n from outbound_requests where state = 'QUEUED' and next_attempt_at > $1::timestamptz",
+        [new Date().toISOString()],
+      );
+      if (Number(late!.n) === 0) return;
+      if (Date.now() > deadline) throw new Error("dispatch: a queued request never became due");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  const dispatchPass = async (over: Partial<DispatchDeps> = {}) => {
+    await untilQueuedDue();
+    return dispatchBatch(dispatchDeps(over), { batchSize: 20, concurrency: 1 });
+  };
 
   /**
    * Runs webhook worker -> bot worker triggers -> dispatcher -> bot worker sweep until a whole round changes nothing. Fails on
