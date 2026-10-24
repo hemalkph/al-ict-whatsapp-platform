@@ -26,7 +26,8 @@
     "whatsapp:outbound": "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound.ts",
     "whatsapp:outbound-worker": "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
     "leads:reconcile": "tsx --env-file-if-exists=.env.local scripts/leads-reconcile.ts",
-    "bots:admin": "tsx --env-file-if-exists=.env.local scripts/bots-admin.ts"
+    "bots:admin": "tsx --env-file-if-exists=.env.local scripts/bots-admin.ts",
+    "bots:worker": "tsx --env-file-if-exists=.env.local scripts/bots-worker.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",

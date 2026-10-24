@@ -10,7 +10,14 @@ export type BotRuntimeLogEvent =
   | "bots.trigger_capture_failed"
   | "bots.trigger_dead"
   | "bots.trigger_overdue"
-  | "bots.send_state_missing";
+  | "bots.send_state_missing"
+  // the bot worker process (Phase 08E-7)
+  | "bots.worker_started"
+  | "bots.worker_stopping"
+  | "bots.worker_stopped"
+  | "bots.worker_fatal"
+  | "bots.database_unavailable"
+  | "bots.database_recovered";
 
 export type BotRuntimeLog = {
   readonly event: BotRuntimeLogEvent;
@@ -55,7 +62,11 @@ export function botRuntimeLogContext(e: BotRuntimeLog): LogContext {
 
 export function emitBotRuntimeLog(e: BotRuntimeLog): void {
   const context = botRuntimeLogContext(e);
-  if (e.event === "bots.trigger_dead" || e.event === "bots.send_state_missing")
+  if (
+    e.event === "bots.trigger_dead" ||
+    e.event === "bots.send_state_missing" ||
+    e.event === "bots.worker_fatal"
+  )
     logger.error(e.event, context);
   else if (e.outcome === "success") logger.info(e.event, context);
   else logger.warn(e.event, context);

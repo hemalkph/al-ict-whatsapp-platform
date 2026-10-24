@@ -505,8 +505,17 @@ describe("outbound boundaries", () => {
         "src/app/api/conversations/[conversationId]/messages/route.ts",
         "src/app/api/outbound-requests/[requestId]/route.ts",
         "src/modules/bot-runtime/outbound.ts",
+        // Phase 08E-7: the bot worker reads the gates with the dispatcher's own parser (config only; pinned below)
+        "src/modules/bot-worker/compose.ts",
         "src/modules/inbox/detail.ts",
       ]);
+      expect(
+        [
+          ...read(join(repo, "src/modules/bot-worker/compose.ts")).matchAll(
+            /from "(@\/modules\/messaging[^"]*)"/g,
+          ),
+        ].map((m) => m[1]),
+      ).toEqual(["@/modules/messaging/config"]);
       for (const f of importers.filter((x) => x.startsWith("src/app/")))
         expect(read(join(repo, f))).toMatch(/from "@\/modules\/messaging";/);
       expect(code(read(join(root, "index.ts"))).trim()).toBe(

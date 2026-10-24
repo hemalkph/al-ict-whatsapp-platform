@@ -91,6 +91,12 @@ export function createWorkerDatabase(
     maxConnections: number;
     applicationName: string;
     onPoolError: (error: unknown) => void;
+    /**
+     * Server settings for EVERY connection of this pool, sent as startup parameters (`options=-c name=value`), so they hold
+     * from the first statement of every transaction (the bot worker's transaction_timeout, plan J.6). Names and values are
+     * validated: lower-case identifiers and simple values such as 25s only.
+     */
+    sessionSettings?: Readonly<Record<string, string>>;
   },
 ): WorkerDatabase {
   const pool = guardedPool(
@@ -98,10 +104,22 @@ export function createWorkerDatabase(
       connectionString: url,
       max: options.maxConnections,
       application_name: options.applicationName,
+      ...(options.sessionSettings ? { options: startupOptions(options.sessionSettings) } : {}),
     },
     options.onPoolError,
   );
   return { db: drizzle(pool, { schema }), close: () => pool.end() };
+}
+
+/** `-c name=value ...` for libpq-style startup options; refuses anything that is not a plain setting. */
+export function startupOptions(settings: Readonly<Record<string, string>>): string {
+  return Object.entries(settings)
+    .map(([name, value]) => {
+      if (!/^[a-z_]{1,63}$/.test(name) || !/^[0-9a-z]{1,16}$/.test(value))
+        throw new Error("invalid session setting");
+      return `-c ${name}=${value}`;
+    })
+    .join(" ");
 }
 
 export function getDb(): Database {

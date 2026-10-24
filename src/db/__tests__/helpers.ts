@@ -1,5 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
@@ -287,6 +290,29 @@ export async function createTestDatabase(
       return closed;
     },
   };
+}
+
+/**
+ * Migrates a database created with `migrate: false` only through migration `lastTag` (a partial journal in a temporary folder),
+ * for tests that need an older schema. The migration files themselves are only read.
+ */
+export async function migrateThrough(t: TestDb, lastTag: string): Promise<void> {
+  const full = fileURLToPath(new URL("../migrations", import.meta.url));
+  const journal = JSON.parse(readFileSync(join(full, "meta/_journal.json"), "utf8")) as {
+    entries: { tag: string }[];
+  };
+  const last = journal.entries.findIndex((e) => e.tag === lastTag);
+  if (last < 0) throw new Error(`unknown migration ${lastTag}`);
+  const dir = mkdtempSync(join(tmpdir(), "al-ict-migrations-through-"));
+  try {
+    mkdirSync(join(dir, "meta"));
+    const kept = journal.entries.slice(0, last + 1);
+    writeFileSync(join(dir, "meta/_journal.json"), JSON.stringify({ ...journal, entries: kept }));
+    for (const e of kept) copyFileSync(join(full, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
+    await migrate(t.db, { migrationsFolder: dir });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**

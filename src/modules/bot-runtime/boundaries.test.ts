@@ -60,6 +60,27 @@ const importedNames = (text: string) =>
     .map((n) => n.trim())
     .filter(Boolean)
     .sort();
+// 08E-7: the ONLY files outside the module that may import its internals (the bot worker), each with its exact deep imports.
+const WORKER_DEEP_IMPORTS: Record<string, readonly string[]> = {
+  "src/modules/bot-worker/compose.ts": [
+    "@/modules/bot-runtime/flow-cache",
+    "@/modules/bot-runtime/outbound",
+  ],
+  "src/modules/bot-worker/loops.ts": [
+    "@/modules/bot-runtime/context",
+    "@/modules/bot-runtime/reconcile",
+    "@/modules/bot-runtime/trigger-queue",
+  ],
+  "src/modules/bot-worker/run.ts": [
+    "@/modules/bot-runtime/reconcile",
+    "@/modules/bot-runtime/step",
+    "@/modules/bot-runtime/trigger-queue",
+  ],
+};
+const deepImports = (text: string) =>
+  [...text.matchAll(/from\s+"(@\/modules\/bot-runtime\/[^"]+)"/g)].map((m) => m[1]!).sort();
+const isWorkerFile = (p: string) => relative(repo, p) in WORKER_DEEP_IMPORTS;
+
 const sources = readdirSync(root)
   .filter((f) => f.endsWith(".ts") && !/\.(db\.)?test\.ts$/.test(f) && f !== "testing.ts")
   .map((f) => ({ file: f, text: code(read(join(root, f))) }));
@@ -135,7 +156,11 @@ describe("bot runtime core boundaries (08E-1)", () => {
         !p.endsWith("/src/db/ops/bot-session-store.ts") &&
         !/\.test\.ts$/.test(p),
     ))
-      expect(read(f), f).not.toMatch(/bot-runtime\/trigger-queue|bot-trigger-queue/);
+      if (isWorkerFile(f))
+        expect(deepImports(read(f)), f).toEqual(
+          [...WORKER_DEEP_IMPORTS[relative(repo, f)]!].sort(),
+        );
+      else expect(read(f), f).not.toMatch(/bot-runtime\/trigger-queue|bot-trigger-queue/);
   });
 
   it("the 08E-4 step files reach the database only through db/ops primitives: no SQL text, driver, ORM or transaction call", () => {
@@ -155,9 +180,17 @@ describe("bot runtime core boundaries (08E-1)", () => {
     for (const f of [...walk("src"), ...walk("scripts")].filter(
       (p) => !p.includes("/src/modules/bot-runtime/") && !/\.test\.ts$/.test(p),
     ))
-      expect(read(f), f).not.toMatch(
-        /bot-runtime\/(step|apply|start|continue|outbound|flow-cache|context|reconcile)/,
-      );
+      if (isWorkerFile(f))
+        expect(deepImports(read(f)), f).toEqual(
+          [...WORKER_DEEP_IMPORTS[relative(repo, f)]!].sort(),
+        );
+      else
+        expect(read(f), f).not.toMatch(
+          /bot-runtime\/(step|apply|start|continue|outbound|flow-cache|context|reconcile)/,
+        );
+    // apply/start/continue stay private even to the worker: it reaches a step only through step.ts (processTrigger)
+    for (const allowed of Object.values(WORKER_DEEP_IMPORTS))
+      for (const spec of allowed) expect(spec).not.toMatch(/\/(apply|start|continue)$/);
   });
 
   it("the step SQL never reads a transaction-start time, locks an outbound request, or waits for an advisory lock", () => {
@@ -360,38 +393,62 @@ describe("bot runtime core boundaries (08E-1)", () => {
   });
 
   it("has only the approved 08E-2 production callers for gates and capture logging", () => {
+    // 08E-2 capture boundaries, plus (08E-7) the bot worker and its script, each with the exact names it imports
+    const APPROVED: Record<string, readonly string[]> = {
+      "src/modules/whatsapp/inbound/handler.ts": ["emitBotRuntimeLog"],
+      "src/modules/whatsapp/worker/registry.ts": ["emitBotRuntimeLog", "triggerCaptureEnabled"],
+      "scripts/bots-worker.ts": ["emitBotRuntimeLog"],
+      "src/modules/bot-worker/compose.ts": ["RuntimeEnv"],
+      "src/modules/bot-worker/config.ts": ["evaluateBotWorkerStart", "type RuntimeEnv"],
+      "src/modules/bot-worker/loops.ts": ["emitBotRuntimeLog"],
+      "src/modules/bot-worker/policy.ts": ["RUNTIME_POLICY"],
+      "src/modules/bot-worker/run.ts": ["emitBotRuntimeLog"],
+    };
     const importers = [...walk("src"), ...walk("scripts")].filter(
       (f) =>
         !f.includes("/src/modules/bot-runtime/") &&
-        /(from|import)\s*\(?\s*"[^"]*modules\/bot-runtime(\/[^"]*)?"/.test(read(f)),
+        !/\.test\.ts$/.test(f) &&
+        !/(^|\/)testing\.ts$/.test(f) &&
+        /(from|import)\s*\(?\s*"[^"]*modules\/bot-runtime"/.test(read(f)),
     );
-    expect(importers.map((f) => relative(repo, f)).sort()).toEqual([
-      "src/modules/whatsapp/inbound/handler.ts",
-      "src/modules/whatsapp/worker/registry.ts",
-    ]);
+    expect(importers.map((f) => relative(repo, f)).sort()).toEqual(Object.keys(APPROVED).sort());
+    // and no file outside the module imports ANY internal path except the bot worker's listed ones
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) =>
+        !p.includes("/src/modules/bot-runtime/") &&
+        !/\.test\.ts$/.test(p) &&
+        !/(^|\/)testing\.ts$/.test(p),
+    ))
+      expect(deepImports(read(f)), f).toEqual(
+        isWorkerFile(f) ? [...WORKER_DEEP_IMPORTS[relative(repo, f)]!].sort() : [],
+      );
     for (const f of importers) {
       const imports = [
-        ...read(f).matchAll(/import\s*\{([^}]+)\}\s*from\s*"@\/modules\/bot-runtime"/g),
+        ...read(f).matchAll(/import\s*(?:type\s*)?\{([^}]+)\}\s*from\s*"@\/modules\/bot-runtime"/g),
       ];
       expect(imports, f).toHaveLength(1);
       const names = imports[0]![1]!
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean);
-      expect(names, f).toEqual(
-        f.endsWith("handler.ts")
-          ? ["emitBotRuntimeLog"]
-          : ["emitBotRuntimeLog", "triggerCaptureEnabled"],
-      );
+      expect(names, f).toEqual(APPROVED[relative(repo, f)]);
     }
   });
 
-  it("no worker script, package script or environment example for the runtime exists yet (08E-7)", () => {
+  it("08E-7: the bot worker is opt-in: exactly one package script, the script exists, and the environment example keeps the gate off", () => {
     const scripts = (
       JSON.parse(read(join(repo, "package.json"))) as { scripts: Record<string, string> }
     ).scripts;
-    expect(Object.keys(scripts).filter((k) => /^bots:(worker|runtime)/.test(k))).toEqual([]);
-    expect(readdirSync(join(repo, "scripts"))).not.toContain("bots-worker.ts");
+    expect(
+      Object.entries(scripts).filter(
+        ([k, c]) => /^bots:(worker|runtime)/.test(k) || /bots-worker/.test(c),
+      ),
+    ).toEqual([["bots:worker", "tsx --env-file-if-exists=.env.local scripts/bots-worker.ts"]]);
+    expect(readdirSync(join(repo, "scripts"))).toContain("bots-worker.ts");
+    // no lifecycle hook, build, dev or test command runs it
+    for (const [name, command] of Object.entries(scripts))
+      if (name !== "bots:worker")
+        expect(command, name).not.toMatch(/bots-worker|bots:worker|bot-worker/);
   });
 
   it("the dispatcher and database ops do not know the runtime; inbound imports only at its approved capture boundaries", () => {

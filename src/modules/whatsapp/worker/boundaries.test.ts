@@ -181,6 +181,8 @@ describe("worker boundaries", () => {
         "whatsapp:outbound-worker",
         "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
       ],
+      // the Phase 08E-7 BOT worker: a different process with its own gates and boundary test (bot-worker/boundaries.test.ts)
+      ["bots:worker", "tsx --env-file-if-exists=.env.local scripts/bots-worker.ts"],
     ]);
     for (const hook of [
       "preinstall",

@@ -161,6 +161,11 @@ describe("inbound message handler boundaries", () => {
     const pkg = JSON.parse(read(join(repo, "package.json"))) as { scripts: Record<string, string> };
     for (const [name, command] of Object.entries(pkg.scripts)) {
       if (name === "whatsapp:worker" || name === "whatsapp:outbound-worker") continue; // the opt-in worker scripts (their own boundary tests pin them)
+      if (name === "bots:worker") {
+        // the Phase 08E-7 BOT worker: a separate opt-in process (bot-worker/boundaries.test.ts pins it); never this handler
+        expect(command).toBe("tsx --env-file-if-exists=.env.local scripts/bots-worker.ts");
+        continue;
+      }
       expect(name, name).not.toMatch(/worker/i);
       expect(command, name).not.toMatch(/worker|inbound/i);
     }
