@@ -509,6 +509,7 @@ export function runtimeKit(t: TestDb) {
     const pid = await p.reached;
     watch.stopCapturing();
     await watch.terminate(pid);
+    await watch.terminated(); // resume only once the client knows its connection is dead: one order, not a race
     p.release();
     const result = await running;
     await watch.verify();
@@ -596,21 +597,36 @@ type WatchedClient = {
  * from inside its connection-end handler, which then never emits `end`, so the harness pool cannot close. This watch attaches a
  * listener to the clients acquired while it is capturing; it records the ONE expected termination (that backend, that message)
  * and records anything else as unexpected, which `verify()` turns into a test failure. It never swallows other errors silently.
+ *
+ * pg delivers the termination in one of two orders (pg 8 Client._handleErrorMessage): if the server's FATAL 57P01 arrives while
+ * a query is in flight, that query rejects with it and only `end` emits "Connection terminated unexpectedly"; if it arrives while
+ * the client is idle in its transaction, the client ALSO emits the 57P01 itself as an `error` event first. Both are the one
+ * expected termination; under load the second order happens (Phase 08E-8A, E-DRAIN). `terminated()` waits for the client to
+ * have seen the end, so a caller can resume the victim only once its connection is known dead (one deterministic order).
  */
 export function terminationWatch(pool: TestDb["pool"]) {
   const clients: WatchedClient[] = [];
   const expected: Error[] = [];
+  const serverFatal: Error[] = [];
   const unexpected: unknown[] = [];
   let target: number | null = null;
   let capturing = true;
   const listenerFor = (client: WatchedClient) => (error: Error) => {
-    if (
-      target !== null &&
-      client.processID === target &&
-      /Connection terminated/.test(error.message)
+    const victim = target !== null && client.processID === target;
+    if (victim && /Connection terminated/.test(error.message)) expected.push(error);
+    // the server's own termination notice, from that backend only, before its end (at most once)
+    else if (
+      victim &&
+      expected.length === 0 &&
+      serverFatal.length === 0 &&
+      (error as { code?: unknown }).code === "57P01"
     )
-      expected.push(error);
+      serverFatal.push(error);
     else unexpected.push(error);
+  };
+  const settled = async () => {
+    for (let i = 0; i < 500 && expected.length === 0 && unexpected.length === 0; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
   };
   const listeners = new Map<WatchedClient, (error: Error) => void>();
   const onAcquire = (client: WatchedClient) => {
@@ -635,10 +651,18 @@ export function terminationWatch(pool: TestDb["pool"]) {
       const r = await pool.query("select pg_terminate_backend($1) ok", [pid]);
       if (r.rows[0]?.ok !== true) throw new Error("terminationWatch: pg_terminate_backend failed");
     },
+    /** Waits (bounded) until the victim's client has seen its connection end; listeners stay attached. */
+    async terminated() {
+      await settled();
+      if (expected.length === 0)
+        throw new AggregateError(
+          unexpected as Error[],
+          "terminationWatch: the client never saw the termination",
+        );
+    },
     /** Waits for the expected error, asserts there was nothing else, and detaches every listener. */
     async verify() {
-      for (let i = 0; i < 500 && expected.length === 0 && unexpected.length === 0; i++)
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      await settled();
       this.stopCapturing();
       for (const [client, l] of listeners) client.removeListener("error", l);
       listeners.clear();

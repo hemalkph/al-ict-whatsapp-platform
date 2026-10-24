@@ -1,45 +1,38 @@
-import { sql } from "drizzle-orm";
+import { sql, TransactionRollbackError } from "drizzle-orm";
 import type { DbExecutor } from "@/db/ops/executor";
+import { OUTBOUND_REQUEST_STATES } from "@/db/schema/enums";
 
 // The migration 0008 objects the bot worker depends on, verified STRUCTURALLY from the catalog (Phase 08E-7 review): a name
 // alone is not enough (a same-name index with other keys, a constraint on another table, a function without its enabled
-// trigger, an incompatible overload). Partial-index predicates and the CHECK condition are judged by EVALUATING the catalog's own
-// expression over a fixed truth table, not by comparing deparsed text. Reads only; the pure judge below is unit-tested.
+// trigger, an incompatible overload). Partial-index predicates and the CHECK condition are compared as the server's own
+// deparsed text (pg_get_expr, search_path pinned to pg_catalog) against the exact 0008 expressions, and only after the
+// catalog shows they reference nothing but outbound_requests' own columns. Nothing taken from the catalog is ever EXECUTED
+// (Phase 08E-8 F-1): a CHECK may call any function, volatile ones included, and a READ ONLY transaction does not stop every
+// side effect such a function can have (signals, advisory locks, notifications, external calls). The pure judge is unit-tested.
 
-type Case = { readonly id: string; readonly origin: string; readonly state: string };
-const PREDICATE_CASES: readonly Case[] = [
-  { id: "bot_queued", origin: "BOT", state: "QUEUED" },
-  { id: "bot_sending", origin: "BOT", state: "SENDING" },
-  { id: "bot_accepted", origin: "BOT", state: "ACCEPTED" },
-  { id: "bot_held", origin: "BOT", state: "HELD" },
-  { id: "staff_queued", origin: "STAFF", state: "QUEUED" },
-  { id: "staff_sending", origin: "STAFF", state: "SENDING" },
-];
-const IN_FLIGHT = {
-  bot_queued: true,
-  bot_sending: true,
-  bot_accepted: false,
-  bot_held: false,
-  staff_queued: false,
-  staff_sending: false,
-};
-const BOT_ONLY = {
-  bot_queued: true,
-  bot_sending: true,
-  bot_accepted: true,
-  bot_held: true,
-  staff_queued: false,
-  staff_sending: false,
-};
+type RequestState = (typeof OUTBOUND_REQUEST_STATES)[number];
 
-const SESSION = "00000000-0000-4000-8000-000000000001";
-const KEY_CASES = [
-  { id: "bot_derived", origin: "BOT", key: `bot-${SESSION}-3`, session: SESSION, step: 3 },
-  { id: "bot_other", origin: "BOT", key: "staff-chosen-key", session: SESSION, step: 3 },
-  { id: "bot_wrong_step", origin: "BOT", key: `bot-${SESSION}-4`, session: SESSION, step: 3 },
-  { id: "staff_any", origin: "STAFF", key: "staff-chosen-key", session: null, step: null },
-] as const;
-const KEY_TRUTH = { bot_derived: true, bot_other: false, bot_wrong_step: false, staff_any: true };
+/**
+ * EVERY outbound request state, classified (Phase 08E-8 F-2): in flight (holds the session's and the conversation's one BOT
+ * send slot) or not. A Record over the state type: a state added to OUTBOUND_REQUEST_STATES fails to compile until classified.
+ */
+export const IN_FLIGHT_STATES: Readonly<Record<RequestState, boolean>> = Object.freeze({
+  QUEUED: true,
+  SENDING: true,
+  ACCEPTED: false,
+  REJECTED: false,
+  HELD: false,
+  UNKNOWN_OUTCOME: false,
+});
+const inFlight = OUTBOUND_REQUEST_STATES.filter((s) => IN_FLIGHT_STATES[s]);
+
+// PostgreSQL 17's deparse of the 0008 expressions (non-pretty pg_get_expr): every operator parenthesized, constants typed.
+const BOT_ONLY = `(origin = 'BOT'::text)`;
+const IN_FLIGHT = `(${BOT_ONLY} AND (state = ANY (ARRAY[${inFlight.map((s) => `'${s}'::text`).join(", ")}])))`;
+const BOT_KEY = `(((origin <> 'BOT'::text) OR (idempotency_key = ((('bot-'::text || (bot_session_id)::text) || '-'::text) || (bot_step_seq)::text))) IS TRUE)`;
+
+/** Server-side bound of each catalog read; the pool's transaction_timeout bounds the whole read transaction. */
+export const CATALOG_READ_TIMEOUT = "5s";
 
 export const EXPECTED = Object.freeze({
   columns: [
@@ -69,20 +62,20 @@ export const EXPECTED = Object.freeze({
     {
       name: "outbound_requests_bot_step_uidx",
       columns: ["organization_id", "bot_session_id", "bot_step_seq"],
-      truth: BOT_ONLY,
+      predicate: BOT_ONLY,
     },
     {
       name: "outbound_requests_bot_inflight_uidx",
       columns: ["organization_id", "bot_session_id"],
-      truth: IN_FLIGHT,
+      predicate: IN_FLIGHT,
     },
     {
       name: "outbound_requests_bot_conv_inflight_uidx",
       columns: ["organization_id", "conversation_id"],
-      truth: IN_FLIGHT,
+      predicate: IN_FLIGHT,
     },
   ],
-  constraint: { name: "outbound_requests_bot_key_check", truth: KEY_TRUTH },
+  constraint: { name: "outbound_requests_bot_key_check", expression: BOT_KEY },
   functions: [
     {
       name: "bot_request_hold_code",
@@ -113,15 +106,18 @@ export type SchemaFacts = {
     ready: boolean;
     expressions: boolean;
     columns: readonly string[];
-    /** The predicate's value for each case, or null when there is no predicate or it cannot be evaluated over the cases. */
-    truth: Readonly<Record<string, boolean>> | null;
+    /** The catalog references nothing but the indexed table (no function, operator, type or collation of its own). */
+    selfContained: boolean;
+    /** The deparsed predicate (null: none, or not deparsed because the index is not self-contained). */
+    predicate: string | null;
   }[];
   readonly constraints: readonly {
     name: string;
     table: string;
     type: string;
     validated: boolean;
-    truth: Readonly<Record<string, boolean>> | null;
+    selfContained: boolean;
+    expression: string | null;
   }[];
   readonly functions: readonly { name: string; args: string; returns: string }[];
 };
@@ -158,13 +154,20 @@ export function schemaProblems(f: SchemaFacts): string[] {
       !got.ready ||
       got.expressions ||
       !same(got.columns, i.columns) ||
-      !same(got.truth, i.truth)
+      !got.selfContained ||
+      got.predicate !== i.predicate
     )
       problems.push(`index ${i.name}`);
   }
   const k = EXPECTED.constraint;
   const con = f.constraints.find((x) => x.name === k.name && x.table === "outbound_requests");
-  if (!con || con.type !== "c" || !con.validated || !same(con.truth, k.truth))
+  if (
+    !con ||
+    con.type !== "c" ||
+    !con.validated ||
+    !con.selfContained ||
+    con.expression !== k.expression
+  )
     problems.push(`constraint ${k.name}`);
   for (const fn of EXPECTED.functions)
     if (
@@ -174,43 +177,31 @@ export function schemaProblems(f: SchemaFacts): string[] {
   return problems;
 }
 
-const lit = (v: string | number | null) =>
-  v === null ? "NULL" : typeof v === "number" ? String(v) : `'${v.replace(/'/g, "''")}'`;
-
 /**
- * Evaluates a catalog expression (a partial-index predicate or a CHECK condition of outbound_requests) over the fixed cases.
- * The expression text comes from THIS database's catalog (pg_get_expr), which the worker already trusts to run in; PostgreSQL
- * only accepts immutable expressions there. An expression that references anything else fails to evaluate: null (incompatible).
+ * Reads the catalog facts of the 0008 objects in ONE transaction that is READ ONLY, has a short server-side statement bound,
+ * and is always rolled back. Expressions are only deparsed (never evaluated), and only when their dependencies are the table's
+ * own columns: deparsing a constant of a foreign type would run that type's output function. Any read failure propagates
+ * (the preflight never passes on an error).
  */
-async function evaluate(
-  db: DbExecutor,
-  expression: string | null,
-  kind: "predicate" | "key",
-): Promise<Record<string, boolean> | null> {
-  if (expression === null) return null;
-  const rows =
-    kind === "predicate"
-      ? PREDICATE_CASES.map((c) => `(${lit(c.id)}, ${lit(c.origin)}, ${lit(c.state)})`).join(", ")
-      : KEY_CASES.map(
-          (c) =>
-            `(${lit(c.id)}, ${lit(c.origin)}, ${lit(c.key)}, ${lit(c.session)}::uuid, ${lit(c.step)}::integer)`,
-        ).join(", ");
-  const alias =
-    kind === "predicate"
-      ? "outbound_requests(case_id, origin, state)"
-      : "outbound_requests(case_id, origin, idempotency_key, bot_session_id, bot_step_seq)";
+export async function readSchemaFacts(db: DbExecutor): Promise<SchemaFacts> {
+  let facts: SchemaFacts | undefined;
   try {
-    const r = await db.execute<{ case_id: string; hit: boolean | null }>(
-      sql.raw(`SELECT case_id, (${expression}) AS hit FROM (VALUES ${rows}) AS ${alias}`),
+    await db.transaction(
+      async (tx) => {
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${CATALOG_READ_TIMEOUT}'`));
+        await tx.execute(sql`SET LOCAL search_path = pg_catalog`); // deparse qualifies anything outside pg_catalog
+        facts = await readFacts(tx as unknown as DbExecutor);
+        tx.rollback();
+      },
+      { accessMode: "read only" },
     );
-    return Object.fromEntries(r.rows.map((x) => [x.case_id, x.hit === true]));
-  } catch {
-    return null;
+  } catch (error) {
+    if (!(error instanceof TransactionRollbackError) || !facts) throw error;
   }
+  return facts!;
 }
 
-/** Reads the catalog facts of the 0008 objects (plain reads; nothing is changed). */
-export async function readSchemaFacts(db: DbExecutor): Promise<SchemaFacts> {
+async function readFacts(db: DbExecutor): Promise<SchemaFacts> {
   const columns = await db.execute<{
     table_name: string;
     column_name: string;
@@ -237,6 +228,7 @@ export async function readSchemaFacts(db: DbExecutor): Promise<SchemaFacts> {
       JOIN pg_namespace pn ON pn.oid = p.pronamespace
      WHERE NOT t.tgisinternal
        AND t.tgname IN ('outbound_requests_allocate_control_seq_trg', 'conversation_events_allocate_control_seq_trg')`);
+  // pg_depend records every non-pinned (non-built-in) object an expression uses: anything but the table itself is foreign.
   const indexes = await db.execute<{
     name: string;
     table_name: string;
@@ -245,32 +237,44 @@ export async function readSchemaFacts(db: DbExecutor): Promise<SchemaFacts> {
     ready: boolean;
     expressions: boolean;
     columns: string[];
+    self_contained: boolean;
     predicate: string | null;
   }>(sql`
-    SELECT ix.relname AS name, c.relname AS table_name, i.indisunique AS unique, i.indisvalid AS valid, i.indisready AS ready,
-           i.indexprs IS NOT NULL AS expressions,
-           ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
-                   JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum ORDER BY k.ord) AS columns,
-           pg_get_expr(i.indpred, i.indrelid) AS predicate
-      FROM pg_index i
-      JOIN pg_class ix ON ix.oid = i.indexrelid
-      JOIN pg_namespace n ON n.oid = ix.relnamespace AND n.nspname = 'public'
-      JOIN pg_class c ON c.oid = i.indrelid
-     WHERE ix.relname IN ('outbound_requests_bot_step_uidx', 'outbound_requests_bot_inflight_uidx',
-                          'outbound_requests_bot_conv_inflight_uidx')`);
+    SELECT x.name, x.table_name, x.unique, x.valid, x.ready, x.expressions, x.columns, x.self_contained,
+           CASE WHEN x.self_contained THEN pg_get_expr(x.indpred, x.indrelid) END AS predicate
+      FROM (SELECT ix.relname AS name, c.relname AS table_name, i.indisunique AS unique, i.indisvalid AS valid,
+                   i.indisready AS ready, i.indexprs IS NOT NULL AS expressions,
+                   ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum ORDER BY k.ord) AS columns,
+                   NOT EXISTS (SELECT 1 FROM pg_depend d
+                                WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+                                  AND NOT (d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid)) AS self_contained,
+                   i.indpred, i.indrelid
+              FROM pg_index i
+              JOIN pg_class ix ON ix.oid = i.indexrelid
+              JOIN pg_namespace n ON n.oid = ix.relnamespace AND n.nspname = 'public'
+              JOIN pg_class c ON c.oid = i.indrelid
+             WHERE ix.relname IN ('outbound_requests_bot_step_uidx', 'outbound_requests_bot_inflight_uidx',
+                                  'outbound_requests_bot_conv_inflight_uidx')) x`);
   const constraints = await db.execute<{
     name: string;
     table_name: string;
     type: string;
     validated: boolean;
+    self_contained: boolean;
     expression: string | null;
   }>(sql`
-    SELECT con.conname AS name, c.relname AS table_name, con.contype::text AS type, con.convalidated AS validated,
-           pg_get_expr(con.conbin, con.conrelid) AS expression
-      FROM pg_constraint con
-      JOIN pg_class c ON c.oid = con.conrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
-     WHERE con.conname = 'outbound_requests_bot_key_check'`);
+    SELECT x.name, x.table_name, x.type, x.validated, x.self_contained,
+           CASE WHEN x.self_contained THEN pg_get_expr(x.conbin, x.conrelid) END AS expression
+      FROM (SELECT con.conname AS name, c.relname AS table_name, con.contype::text AS type, con.convalidated AS validated,
+                   NOT EXISTS (SELECT 1 FROM pg_depend d
+                                WHERE d.classid = 'pg_constraint'::regclass AND d.objid = con.oid
+                                  AND NOT (d.refclassid = 'pg_class'::regclass AND d.refobjid = con.conrelid)) AS self_contained,
+                   con.conbin, con.conrelid
+              FROM pg_constraint con
+              JOIN pg_class c ON c.oid = con.conrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+             WHERE con.conname = 'outbound_requests_bot_key_check') x`);
   const functions = await db.execute<{ name: string; args: string; returns: string }>(sql`
     SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS args, p.prorettype::regtype::text AS returns
       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'public'
@@ -292,33 +296,25 @@ export async function readSchemaFacts(db: DbExecutor): Promise<SchemaFacts> {
       fn: x.fn,
       fnArgs: x.fn_args,
     })),
-    indexes: await Promise.all(
-      indexes.rows.map(async (x) => ({
-        name: x.name,
-        table: x.table_name,
-        unique: x.unique,
-        valid: x.valid,
-        ready: x.ready,
-        expressions: x.expressions,
-        columns: x.columns,
-        truth:
-          x.table_name === "outbound_requests"
-            ? await evaluate(db, x.predicate, "predicate")
-            : null,
-      })),
-    ),
-    constraints: await Promise.all(
-      constraints.rows.map(async (x) => ({
-        name: x.name,
-        table: x.table_name,
-        type: x.type,
-        validated: x.validated,
-        truth:
-          x.table_name === "outbound_requests" && x.type === "c"
-            ? await evaluate(db, x.expression, "key")
-            : null,
-      })),
-    ),
+    indexes: indexes.rows.map((x) => ({
+      name: x.name,
+      table: x.table_name,
+      unique: x.unique,
+      valid: x.valid,
+      ready: x.ready,
+      expressions: x.expressions,
+      columns: x.columns,
+      selfContained: x.self_contained,
+      predicate: x.predicate,
+    })),
+    constraints: constraints.rows.map((x) => ({
+      name: x.name,
+      table: x.table_name,
+      type: x.type,
+      validated: x.validated,
+      selfContained: x.self_contained,
+      expression: x.expression,
+    })),
     functions: functions.rows,
   };
 }

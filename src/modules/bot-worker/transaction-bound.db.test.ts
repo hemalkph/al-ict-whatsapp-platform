@@ -10,11 +10,14 @@ import { claimTriggers } from "../bot-runtime/trigger-queue";
 import { processTrigger } from "../bot-runtime/step";
 import { SESSION_SETTINGS } from "./policy";
 import { botWorkerDatabase, EXIT_REFUSED, preflight, runBotWorker } from "./run";
-import { readSchemaFacts, schemaProblems } from "./schema";
+import { OUTBOUND_REQUEST_STATES, OUTBOUND_ORIGINS } from "@/db/schema/enums";
+import { EXPECTED, IN_FLIGHT_STATES, readSchemaFacts, schemaProblems } from "./schema";
 
 // E-TO and the migration preflight (Phase 08E-7 review corrections; plan J.6) on disposable PostgreSQL 17:
 //   * preflight refuses a schema migrated only through 0007 (0008 adds no table), and a schema missing one 0008 object, before
-//     any claim or write; an unknown startup setting (transaction_timeout below PostgreSQL 17) is a configuration refusal;
+//     any claim or write; F-1 (08E-8): catalog CHECK / predicate code is never executed (volatile writer, advisory lock, sleep);
+//     F-2: the in-flight predicate is judged over every request state (REJECTED, UNKNOWN_OUTCOME, omitted SENDING, and a
+//     mutation the old six-case truth table accepted); an unknown startup setting (transaction_timeout below PostgreSQL 17) is a configuration refusal;
 //   * a T1 that has WRITTEN (session, request, trigger finish) and then outlives a short transaction_timeout: the server ends the
 //     session, every uncommitted effect is gone, T0's charged attempt stays, the dead connection is not reused, T2 is recorded on
 //     a healthy connection (or, if it is not, the claim waits for its lease), locks are released, a later run creates exactly once;
@@ -130,7 +133,12 @@ describe("E-TO and the migration preflight", () => {
      * A disposable, fully migrated database with ONE structural defect and a real PENDING trigger: preflight is refused, the
      * worker refuses to start (exit 2) before T0, and the trigger is untouched (no claim, no attempt, no write).
      */
-    async function refusedWith(defect: readonly string[], problem: string) {
+    async function refusedWith(
+      defect: readonly string[],
+      problem: string,
+      /** Runs after the worker's own start attempt was refused. */
+      check?: (db2: TestDb) => Promise<void>,
+    ) {
       const db2 = await createTestDatabase();
       try {
         const k2 = runtimeKit(db2);
@@ -159,6 +167,7 @@ describe("E-TO and the migration preflight", () => {
         expect(await triggerRow(db2, tr.id)).toEqual(before); // no T0: not claimed, not charged
         expect(before).toMatchObject({ status: "PENDING", attempts: 0, claim_token: null });
         expect(await k2.botRequests(f)).toHaveLength(0);
+        await check?.(db2);
       } finally {
         await db2.close();
       }
@@ -212,6 +221,183 @@ describe("E-TO and the migration preflight", () => {
           "create function bot_request_hold_code(p_organization_id text, p_request_id text) returns text language sql stable as $$ select null::text $$",
         ],
         "function bot_request_hold_code(p_organization_id uuid, p_request_id uuid)",
+      ));
+
+    // ---------------------------------------------------------------------------------------------- Phase 08E-8 F-2
+    it("F-2 B2: the catalog's own expressions are exactly 0008's, and the expected in-flight predicate is right for EVERY origin x state", async () => {
+      const facts = await readSchemaFacts(t.db as unknown as DbExecutor);
+      expect(facts.indexes.map((i) => [i.name, i.selfContained, i.predicate])).toEqual(
+        expect.arrayContaining(EXPECTED.indexes.map((i) => [i.name, true, i.predicate])),
+      );
+      expect(facts.constraints[0]).toMatchObject({
+        selfContained: true,
+        expression: EXPECTED.constraint.expression,
+      });
+      // the valid states ARE the database's: its state CHECK lists exactly OUTBOUND_REQUEST_STATES, in order
+      const stateCheck = await t.pool.query(
+        "select pg_get_expr(conbin, conrelid) e from pg_constraint where conname = 'outbound_requests_state_check'",
+      );
+      expect(stateCheck.rows[0].e).toBe(
+        `(state = ANY (ARRAY[${OUTBOUND_REQUEST_STATES.map((x) => `'${x}'::text`).join(", ")}]))`,
+      );
+      // the semantics of the EXPECTED text (this file's constant, never catalog text), over the full cross product
+      const cases = OUTBOUND_ORIGINS.flatMap((o) => OUTBOUND_REQUEST_STATES.map((st) => [o, st]));
+      for (const i of EXPECTED.indexes) {
+        const r = await t.pool.query(
+          `select origin, state, coalesce((${i.predicate}), false) hit
+             from unnest($1::text[], $2::text[]) as outbound_requests(origin, state)`,
+          [cases.map((c) => c[0]), cases.map((c) => c[1])],
+        );
+        expect(r.rows).toHaveLength(OUTBOUND_ORIGINS.length * OUTBOUND_REQUEST_STATES.length);
+        for (const row of r.rows)
+          expect([row.origin, row.state, row.hit]).toEqual([
+            row.origin,
+            row.state,
+            row.origin === "BOT" &&
+              (i.name === "outbound_requests_bot_step_uidx" ||
+                IN_FLIGHT_STATES[row.state as keyof typeof IN_FLIGHT_STATES]),
+          ]);
+      }
+    });
+
+    const inflightIndex = (where: string) => [
+      "drop index outbound_requests_bot_inflight_uidx",
+      `create unique index outbound_requests_bot_inflight_uidx on outbound_requests (organization_id, bot_session_id) where ${where}`,
+    ];
+
+    it("F-2 F3: an in-flight index that also includes REJECTED is refused", () =>
+      refusedWith(
+        inflightIndex("origin = 'BOT' and state in ('QUEUED', 'SENDING', 'REJECTED')"),
+        "index outbound_requests_bot_inflight_uidx",
+      ));
+
+    it("F-2 F4: an in-flight index that also includes UNKNOWN_OUTCOME is refused", () =>
+      refusedWith(
+        inflightIndex("origin = 'BOT' and state in ('QUEUED', 'SENDING', 'UNKNOWN_OUTCOME')"),
+        "index outbound_requests_bot_inflight_uidx",
+      ));
+
+    it("F-2 F5: an in-flight index that omits SENDING is refused", () =>
+      refusedWith(
+        inflightIndex("origin = 'BOT' and state = 'QUEUED'"),
+        "index outbound_requests_bot_inflight_uidx",
+      ));
+
+    it("F-2 F6 (mutation): 'state NOT IN (ACCEPTED, HELD)' matches the OLD six-case truth table exactly, yet is refused", () =>
+      refusedWith(
+        inflightIndex("origin = 'BOT' and state not in ('ACCEPTED', 'HELD')"),
+        "index outbound_requests_bot_inflight_uidx",
+        async (db2) => {
+          // the 08E-7 judge's cases and expectations, replayed here over the catalog predicate (test-side, disposable database)
+          const old = [
+            ["bot_queued", "BOT", "QUEUED", true],
+            ["bot_sending", "BOT", "SENDING", true],
+            ["bot_accepted", "BOT", "ACCEPTED", false],
+            ["bot_held", "BOT", "HELD", false],
+            ["staff_queued", "STAFF", "QUEUED", false],
+            ["staff_sending", "STAFF", "SENDING", false],
+          ] as const;
+          const pred = (
+            await db2.pool.query(
+              "select pg_get_expr(indpred, indrelid) p from pg_index where indexrelid = 'outbound_requests_bot_inflight_uidx'::regclass",
+            )
+          ).rows[0].p as string;
+          const run = async (rows: readonly (readonly [string, string])[]) =>
+            (
+              await db2.pool.query(
+                `select (${pred}) is true hit from unnest($1::text[], $2::text[]) with ordinality as outbound_requests(origin, state, n) order by n`,
+                [rows.map((r) => r[0]), rows.map((r) => r[1])],
+              )
+            ).rows.map((r) => r.hit as boolean);
+          expect(await run(old.map((c) => [c[1], c[2]]))).toEqual(old.map((c) => c[3])); // old judge: accepted
+          expect(
+            await run([
+              ["BOT", "REJECTED"],
+              ["BOT", "UNKNOWN_OUTCOME"],
+            ]),
+          ).toEqual([true, true]); // ... while it treats two terminal states as in flight
+        },
+      ));
+
+    // ---------------------------------------------------------------------------------------------- Phase 08E-8 F-1
+    const keyCheckWith = (extra: string) => [
+      "alter table outbound_requests drop constraint outbound_requests_bot_key_check",
+      `alter table outbound_requests add constraint outbound_requests_bot_key_check check (((origin <> 'BOT' or idempotency_key = 'bot-' || bot_session_id::text || '-' || bot_step_seq::text) is true) and ${extra})`,
+    ];
+
+    it("F-1 V1: a CHECK calling a test-only VOLATILE function that INSERTs is refused, and the function never runs", async () => {
+      const setup = [
+        "create table preflight_side_effects (id bigserial primary key, at timestamptz not null default now())",
+        "create function preflight_probe() returns boolean volatile language plpgsql as $$ begin insert into preflight_side_effects default values; return true; end $$",
+      ];
+      await refusedWith(
+        [...setup, ...keyCheckWith("preflight_probe()")],
+        "constraint outbound_requests_bot_key_check",
+        async (db2) => {
+          const n = async () =>
+            (await db2.pool.query("select count(*)::int n from preflight_side_effects")).rows[0]
+              .n as number;
+          // no outbound rows existed, so not even the DDL's validation called it; the refused preflights and start did not either
+          expect(
+            (await db2.pool.query("select count(*)::int n from outbound_requests")).rows[0].n,
+          ).toBe(0);
+          expect(await n()).toBe(0);
+          const facts = await readSchemaFacts(db2.db as unknown as DbExecutor);
+          expect(facts.constraints[0]).toMatchObject({ selfContained: false, expression: null });
+          expect(await n()).toBe(0);
+          // positive control: the probe really writes when executed
+          await db2.pool.query("select preflight_probe()");
+          expect(await n()).toBe(1);
+          await db2.pool.query("delete from preflight_side_effects");
+        },
+      );
+    });
+
+    it("F-1 V2: a CHECK calling a BUILT-IN with a side effect READ ONLY does not stop (session advisory lock) is refused without running it", () =>
+      refusedWith(
+        keyCheckWith("pg_try_advisory_lock(80808080)"),
+        "constraint outbound_requests_bot_key_check",
+        async (db2) => {
+          const w = botWorkerDatabase({ databaseUrl: db2.url, concurrency: 1 });
+          try {
+            // read on the worker's own pool and checked while it is still open (a session lock would outlive the rollback)
+            const facts = await readSchemaFacts(w.db as unknown as DbExecutor);
+            expect(facts.constraints[0]?.selfContained).toBe(true); // built-ins are pinned: no dependency recorded ...
+            expect(facts.constraints[0]?.expression).not.toBe(EXPECTED.constraint.expression); // ... the text refuses it
+            const held = await db2.pool.query(
+              "select count(*)::int n from pg_locks where locktype = 'advisory' and objid = 80808080",
+            );
+            expect(held.rows[0].n).toBe(0);
+          } finally {
+            await w.close();
+          }
+        },
+      ));
+
+    it("F-1 V3: a CHECK that would sleep past every timeout is refused promptly (nothing is evaluated)", async () => {
+      const started = Date.now();
+      await refusedWith(
+        keyCheckWith("pg_sleep(30) is not null"),
+        "constraint outbound_requests_bot_key_check",
+      );
+      expect(Date.now() - started).toBeLessThan(20_000);
+    });
+
+    it("F-1 V4: a predicate on a test-only function is refused: not self-contained, and never deparsed or run", () =>
+      refusedWith(
+        [
+          "create function preflight_true(text) returns boolean immutable language sql as $$ select true $$",
+          ...inflightIndex(
+            "origin = 'BOT' and state in ('QUEUED', 'SENDING') and preflight_true(state)",
+          ),
+        ],
+        "index outbound_requests_bot_inflight_uidx",
+        async (db2) => {
+          const facts = await readSchemaFacts(db2.db as unknown as DbExecutor);
+          expect(
+            facts.indexes.find((i) => i.name === "outbound_requests_bot_inflight_uidx"),
+          ).toMatchObject({ selfContained: false, predicate: null });
+        },
       ));
 
     it("D: a startup setting the server does not accept (as transaction_timeout below 17) is a configuration refusal, not a five-minute outage", async () => {

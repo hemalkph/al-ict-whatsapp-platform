@@ -100,13 +100,18 @@ describe("bot worker boundaries (08E-7)", () => {
     }
   });
 
-  it("schema.ts only READS the catalog: its one raw statement is the SELECT evaluating a catalog expression over fixed cases", () => {
+  it("schema.ts only READS the catalog, in a READ ONLY rolled-back transaction, and never executes catalog-derived text", () => {
     const schema = sources.find((s) => s.file === "schema.ts")!.text;
+    // its one raw statement is its own constant timeout; no catalog text is ever spliced into SQL (F-1)
     expect(schema.match(/sql\.raw\(/g)).toHaveLength(1);
     expect(schema).toMatch(
-      /sql\.raw\(`SELECT case_id, \(\$\{expression\}\) AS hit FROM \(VALUES \$\{rows\}\) AS \$\{alias\}`\)/,
+      /sql\.raw\(`SET LOCAL statement_timeout = '\$\{CATALOG_READ_TIMEOUT\}'`\)/,
     );
-    expect(schema).not.toMatch(/\b(CREATE|ALTER|DROP|INSERT|DELETE|TRUNCATE|GRANT|SET)\s/);
+    expect(schema).toMatch(/\{ accessMode: "read only" \}/);
+    expect(schema).toMatch(/tx\.rollback\(\);/);
+    const sets = schema.match(/\bSET\s+\S+\s+\S+/g) ?? [];
+    expect(sets).toEqual(["SET LOCAL statement_timeout", "SET LOCAL search_path"]);
+    expect(schema).not.toMatch(/\b(CREATE|ALTER|DROP|INSERT|DELETE|TRUNCATE|GRANT)\s/);
   });
 
   it("imports only approved modules: the runtime's public API and its four worker entry points, the messaging gate parser, the database pool", () => {
@@ -119,6 +124,7 @@ describe("bot worker boundaries (08E-7)", () => {
             spec === "drizzle-orm" ||
             spec === "@/db" ||
             spec === "@/db/ops/executor" ||
+            spec === "@/db/schema/enums" ||
             spec === "@/modules/bot-runtime" ||
             ["flow-cache", "outbound", "context", "reconcile", "step", "trigger-queue"].some(
               (x) => spec === `@/modules/bot-runtime/${x}`,

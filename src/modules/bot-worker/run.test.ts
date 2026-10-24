@@ -26,7 +26,8 @@ const goodFacts = (): SchemaFacts => ({
     ready: true,
     expressions: false,
     columns: [...i.columns],
-    truth: { ...i.truth },
+    selfContained: true,
+    predicate: i.predicate,
   })),
   constraints: [
     {
@@ -34,7 +35,8 @@ const goodFacts = (): SchemaFacts => ({
       table: "outbound_requests",
       type: "c",
       validated: true,
-      truth: { ...EXPECTED.constraint.truth },
+      selfContained: true,
+      expression: EXPECTED.constraint.expression,
     },
   ],
   functions: EXPECTED.functions.map((f) => ({ ...f })),
