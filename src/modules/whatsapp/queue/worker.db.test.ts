@@ -23,6 +23,7 @@ import {
   FIXED_NOW,
   FIXTURE_DDL,
   FIXTURE_DEFERRED_DDL,
+  abortWatch,
   deferred,
   expireLeases,
   getEvent,
@@ -799,12 +800,13 @@ describe("webhook worker core", () => {
         {
           MESSAGE: async (tx, event, context) => {
             await note(tx, event.id, "never committed");
-            await new Promise<void>((resolve) =>
-              context.signal.addEventListener("abort", () => {
-                aborted = true;
-                resolve();
-              }),
-            );
+            const watch = abortWatch(context.signal);
+            try {
+              await watch.aborted;
+              aborted = true;
+            } finally {
+              watch.dispose();
+            }
           },
         },
         { handlerTimeoutMs: 100 },
@@ -820,6 +822,47 @@ describe("webhook worker core", () => {
         last_error: "handler_timeout",
         attempts: 1,
       });
+    });
+
+    it("an abort that fires before the handler registers its listener is still observed (no hang), then rolled back", async () => {
+      const w = await world(t.db);
+      const e = await pending(t.db, w);
+      let sawAbortedAtRegistration = false;
+      const done = newGate();
+      const summary = await batch(
+        {
+          MESSAGE: async (tx, event, context) => {
+            await note(tx, event.id, "never committed");
+            await tx.execute(sql`select pg_sleep(0.4)`); // outlives the 100 ms budget: the abort has already fired
+            sawAbortedAtRegistration = context.signal.aborted;
+            const watch = abortWatch(context.signal);
+            try {
+              await watch.aborted;
+            } finally {
+              watch.dispose();
+              done.resolve();
+            }
+          },
+        },
+        { handlerTimeoutMs: 100 },
+      );
+      expect(summary).toMatchObject({ claimed: 1, failed: 1, processed: 0 });
+      await done.promise; // the handler returned (did not hang) after its late registration
+      expect(sawAbortedAtRegistration).toBe(true);
+      await until(
+        async () =>
+          (await notes()).length === 0 && (await getEvent(t.pool, e.id)).status === "FAILED",
+      );
+      expect(await getEvent(t.pool, e.id)).toMatchObject({ last_error: "handler_timeout" });
+      // cleanup: the aborted handler's transaction was rolled back and its connection released
+      await until(
+        async () =>
+          (
+            await t.pool.query(
+              "select 1 from pg_stat_activity where datname = current_database() and state like 'idle in transaction%'",
+            )
+          ).rowCount === 0,
+      );
     });
 
     it("a late handler that ignores the abort still cannot commit or mark PROCESSED", async () => {
