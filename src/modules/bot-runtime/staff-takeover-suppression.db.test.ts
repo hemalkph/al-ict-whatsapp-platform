@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDatabase, type TestDb } from "@/db/__tests__/helpers";
+import { pausingDatabase } from "@/db/__tests__/pausing-database";
 import { claimNext, executeClaim } from "@/modules/messaging/dispatch";
 import { FakeTransport } from "@/modules/messaging/testing";
 import { barrierKit, settledState } from "../bot-control/testing";
@@ -314,6 +316,205 @@ describe("genuine staff takeover versus the dispatcher (R3-S-B)", () => {
       });
     });
   }
+
+  // ======================================================================== B4 for STAFF submission (Phase 08E-9 Batch 3)
+  //
+  // The submission takes the conversation FOR UPDATE, its own idempotency advisory lock and the account FOR SHARE, so no row
+  // barrier can park the claim before its bot-rule read without also blocking the submission (review-conditions.db.test.ts).
+  // The owner-authorized test-only pausing database parks the REAL claim on its own connection immediately before it transmits
+  // `SELECT bot_request_hold_code($1, $2) AS code` (dispatch.ts, the claim-time bot rule; the final authorization's statement
+  // is a different one and cannot match). The claim then holds R FOR UPDATE, the account advisory lock and the account FOR
+  // SHARE; it holds no conversation lock. Nothing in the dispatcher is changed or stubbed.
+
+  describe("B4: real STAFF submission while the claim is parked (pausing database)", () => {
+    const CLAIM_BOT_RULE = /^SELECT bot_request_hold_code\(\$1, \$2\) AS code$/;
+    /** The SENDING transition of the claim (only the claim sets send_started_at). */
+    const CLAIM_SENDING = /^update "outbound_requests" set .*"send_started_at" = /;
+    /** An independent NOWAIT probe in its own autocommit statement: "free" (and released at once) or the SQLSTATE. */
+    const probe = (text: string, id: string) =>
+      t.pool.query(text, [id]).then(
+        () => "free",
+        (e: { code?: string }) => e.code ?? "error",
+      );
+    const backendState = async (pid: number) =>
+      (await k.one("select state from pg_stat_activity where pid = $1", [pid])).state as string;
+    const advisoryLocks = async (pid: number) =>
+      Number(
+        (
+          await k.one(
+            "select count(*)::int n from pg_locks where pid = $1 and locktype = 'advisory' and granted",
+            [pid],
+          )
+        ).n,
+      );
+
+    it("B4: the claim, parked holding R immediately before its bot-rule read, resumes after the submission committed; its READ COMMITTED read sees the staff fence: R HELD staff_took_over, 0 BOT calls; then the runtime hands over", async () => {
+      const x = await world();
+      const p = pausingDatabase(t);
+      let seq = 0;
+      try {
+        const pause = p.arm(CLAIM_BOT_RULE);
+        const transport = new FakeTransport();
+        const claiming = kit.settle(claimNext(k.dispatchDeps(transport, { db: p.db as never })));
+        const at = await p.reachedBefore(pause, claiming);
+        expect(at.text).toMatch(CLAIM_BOT_RULE);
+
+        // the claim is genuinely parked inside its transaction, holding exactly what the analysis says
+        expect(await backendState(at.pid)).toBe("idle in transaction");
+        const r = x.r.id as string;
+        const account = x.f.w.account.id;
+        expect(
+          await probe("select 1 from outbound_requests where id = $1 for update nowait", r),
+        ).toBe("55P03");
+        expect(
+          await probe("select 1 from whatsapp_accounts where id = $1 for update nowait", account),
+        ).toBe("55P03"); // the claim's FOR SHARE conflicts with FOR UPDATE ...
+        expect(
+          await probe("select 1 from whatsapp_accounts where id = $1 for share nowait", account),
+        ).toBe("free"); // ... but not with the submission's FOR SHARE
+        expect(
+          await probe(
+            "select 1 from conversations where id = $1 for update nowait",
+            x.f.w.student.conversation.id,
+          ),
+        ).toBe("free"); // the claim holds no conversation lock
+        expect(await advisoryLocks(at.pid)).toBe(1); // the account's claimer lock
+        expect(await k.request(r)).toMatchObject({ state: "QUEUED", claimed_by: null });
+
+        // the real STAFF submission commits while the claim is parked; the claim waits on nothing
+        const submission = kit.settle(staffAction(x.f, "submit"));
+        expect(await kit.within(submission, 5_000), "the submission was blocked by the claim").toBe(
+          true,
+        );
+        const sub = await submission;
+        expect(sub.ok).toBe(true);
+        seq = sub.ok ? sub.value : 0;
+        expect(seq).toBeGreaterThan(Number(x.s.started_control_seq));
+        expect(await kit.blockersOf(at.pid)).toEqual([]);
+        expect(await backendState(at.pid)).toBe("idle in transaction");
+
+        pause.release();
+        const result = await claiming;
+        expect(settledState(result)).toBeNull();
+        expect(result).toMatchObject({ ok: true, value: { claim: null, held: 1 } });
+        expect(pause.fired).toBe(1);
+        // the bot-rule statement was sent exactly once, by the claim's backend, after the release
+        expect(p.statements.filter((s) => CLAIM_BOT_RULE.test(s.text))).toEqual([
+          { pid: at.pid, text: at.text },
+        ]);
+        expect(await k.request(r)).toMatchObject({
+          state: "HELD",
+          hold_reason: "staff_took_over",
+          send_started_at: null,
+        });
+        expect(transport.calls).toHaveLength(0);
+        expect(await k.inFlight(x.s.id as string)).toBe(0);
+      } finally {
+        await p.close();
+      }
+      await runtimeHandover(x, "submit", seq);
+      // idempotent: a further dispatcher pass sends no BOT message (only the STAFF request may be claimed, and is set aside)
+      const again = new FakeTransport();
+      expect((await claimR(x, again)).claim).toBeNull();
+      expect(again.calls).toHaveLength(0);
+      expect(await k.request(x.r.id as string)).toMatchObject({
+        state: "HELD",
+        hold_reason: "staff_took_over",
+      });
+    });
+
+    it("the pausing database's own guards: a pause that is never reached is a barrier failure; an unreleased pause fails the paused statement, the claim's transaction rolls back and every lock it held is released", async () => {
+      const x = await world();
+      const a = pausingDatabase(t);
+      try {
+        const never = a.arm(/^SELECT this_statement_is_never_sent$/);
+        await expect(a.reachedBefore(never, a.db.execute(sql`select 1`))).rejects.toThrow(
+          /barrier invalid/,
+        );
+        expect(never.fired).toBe(0);
+      } finally {
+        await a.close();
+      }
+      const b = pausingDatabase(t, { pauseLimitMs: 1_000 });
+      try {
+        const pause = b.arm(CLAIM_BOT_RULE);
+        const transport = new FakeTransport();
+        const claiming = kit.settle(claimNext(k.dispatchDeps(transport, { db: b.db as never })));
+        const at = await b.reachedBefore(pause, claiming);
+        // never released: the paused statement fails after the limit; the claim's transaction is rolled back
+        const result = await claiming;
+        expect(result.ok).toBe(false);
+        // Drizzle wraps the driver error ("Failed query: ..."); the helper's own error is in the cause chain
+        const chain: string[] = [];
+        for (
+          let e: unknown = (result as { error: unknown }).error, i = 0;
+          e instanceof Error && i < 5;
+          e = (e as { cause?: unknown }).cause, i++
+        )
+          chain.push(e.message);
+        expect(chain.some((m) => /not released within 1000 ms/.test(m))).toBe(true);
+        expect(b.statements.filter((s) => CLAIM_BOT_RULE.test(s.text))).toHaveLength(1);
+        expect(await backendState(at.pid)).toBe("idle"); // back in the pool, no open transaction
+        expect(
+          await probe(
+            "select 1 from outbound_requests where id = $1 for update nowait",
+            x.r.id as string,
+          ),
+        ).toBe("free");
+        expect(await advisoryLocks(at.pid)).toBe(0);
+        expect(await k.request(x.r.id as string)).toMatchObject({
+          state: "QUEUED",
+          claimed_by: null,
+          attempt_count: 0,
+        });
+        expect(transport.calls).toHaveLength(0);
+      } finally {
+        await b.close();
+      }
+    });
+
+    it("NEGATIVE CONTROL (parked AFTER the bot-rule read, at the SENDING transition): the claim decided before the submission and claims R; the final authorization then refuses it staff_took_over (the B2 boundary); 0 BOT calls", async () => {
+      const x = await world();
+      const p = pausingDatabase(t);
+      let seq = 0;
+      try {
+        const pause = p.arm(CLAIM_SENDING);
+        const transport = new FakeTransport();
+        const claiming = kit.settle(claimNext(k.dispatchDeps(transport, { db: p.db as never })));
+        const at = await p.reachedBefore(pause, claiming);
+        expect(at.text).toMatch(CLAIM_SENDING);
+        // the bot rule was already read (before the submission existed)
+        const ruleRead = p.statements.findIndex((s) => CLAIM_BOT_RULE.test(s.text));
+        expect(ruleRead).toBeGreaterThanOrEqual(0);
+        expect(ruleRead).toBeLessThan(p.statements.findIndex((s) => CLAIM_SENDING.test(s.text)));
+        expect(
+          await probe(
+            "select 1 from outbound_requests where id = $1 for update nowait",
+            x.r.id as string,
+          ),
+        ).toBe("55P03");
+        const submission = kit.settle(staffAction(x.f, "submit"));
+        expect(await kit.within(submission, 5_000)).toBe(true);
+        const sub = await submission;
+        seq = sub.ok ? sub.value : 0;
+        pause.release();
+        const result = await claiming;
+        expect(result).toMatchObject({ ok: true });
+        const claim = result.ok ? result.value.claim : null;
+        expect(claim?.requestId).toBe(x.r.id); // DETECTED: parked after the rule, the staff fence came too late for the claim
+        expect(pause.fired).toBe(1);
+        expect(await executeClaim(k.dispatchDeps(transport), claim!)).toBe("held");
+        expect(await k.request(x.r.id as string)).toMatchObject({
+          state: "HELD",
+          hold_reason: "staff_took_over",
+        });
+        expect(transport.calls).toHaveLength(0);
+      } finally {
+        await p.close();
+      }
+      await runtimeHandover(x, "submit", seq);
+    });
+  });
 
   it("a STAFF status change ends the session staff_status_changed; a resolution ends it COMPLETED conversation_resolved (its own path, not mislabelled)", async () => {
     for (const to of ["PENDING", "RESOLVED"] as const) {
