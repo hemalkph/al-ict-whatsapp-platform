@@ -4,7 +4,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { schema } from "@/db";
 import { createTestDatabase, seedAccount, type TestDb } from "@/db/__tests__/helpers";
 import { faultyDatabase } from "@/db/__tests__/faulty-database";
+import { lostCommitAck } from "@/db/__tests__/lost-commit-ack";
 import { insertBotTriggerIfAdmitted, type BotTriggerInput } from "@/db/ops/bot-trigger";
+import type { DbExecutor } from "@/db/ops/executor";
+import { deferred, terminateThenResume, terminationWatch } from "../../bot-runtime/testing";
 import {
   addStudent,
   barrierKit,
@@ -400,9 +403,28 @@ describe("dormant inbound bot-trigger capture", () => {
   });
 
   it.each(["inside_insert", "after_insert"])(
-    "capture SQL failure %s rolls back only the nested savepoint; message, attribution and PROCESSED survive without repair on redelivery",
+    "capture SQL failure %s rolls back only the nested savepoint; message, attribution, activity, reopen and PROCESSED survive without repair on redelivery",
     async (phase) => {
+      // S1 (08E-8D3): an EXISTING, RESOLVED conversation, so the outer savepoint performs its activity and reopen writes
+      // before capture fails. The prior message uses the frozen pre-capture handler, so it leaves no trigger.
+      const prior = await incoming({ timestamp: new Date(Date.now() - 120_000) });
+      // through the real worker (so this event is not the one claimed below) with the frozen pre-capture handler (no trigger)
+      expect(
+        await processWebhookBatch(t.db, { handlers: { MESSAGE: preCaptureHandler }, batchSize: 1 }),
+      ).toMatchObject({ processed: 1 });
+      const conversationId = (await byEvent(prior)).conversation_id as string;
+      await q(
+        "update conversations set status='RESOLVED', resolved_at=clock_timestamp() - interval '90 seconds' where id=$1",
+        [conversationId],
+      );
+      const before = (
+        await q(
+          "select last_inbound_at, last_message_at, control_seq from conversations where id=$1",
+          [conversationId],
+        )
+      ).rows[0];
       const e = await incoming({
+        timestamp: new Date(Date.now() - 30_000),
         message: {
           type: "text",
           text: { body: "PRIVATE_CAPTURE_TEXT" },
@@ -428,8 +450,29 @@ describe("dormant inbound bot-trigger capture", () => {
       expect(result).toMatchObject({ processed: 1, failed: 0 });
       const m = await byEvent(e);
       expect(m.body).toBe("PRIVATE_CAPTURE_TEXT");
+      expect(m.conversation_id).toBe(conversationId);
       expect(await count("bot_triggers")).toBe(0);
       expect(await count("lead_attributions")).toBe(1);
+      // the outer savepoint's writes survive: activity advanced to this message's effective time (a past provider time is
+      // its own effective time), the RESOLVED conversation reopened, and no control sequence allocated (inbound activity is
+      // not a staff control event; capture only READS control_seq, plan D.1)
+      expect(new Date(m.occurred_at).getTime()).toBeGreaterThan(
+        new Date(before.last_inbound_at).getTime(),
+      );
+      expect(
+        (
+          await q(
+            "select status, resolved_at, last_inbound_at, last_message_at, control_seq from conversations where id=$1",
+            [conversationId],
+          )
+        ).rows[0],
+      ).toEqual({
+        status: "OPEN",
+        resolved_at: null,
+        last_inbound_at: m.occurred_at,
+        last_message_at: m.occurred_at,
+        control_seq: before.control_seq,
+      });
       expect(
         (await q("select status from webhook_events where id=$1", [e.id])).rows[0].status,
       ).toBe("PROCESSED");
@@ -720,4 +763,294 @@ describe("dormant inbound bot-trigger capture", () => {
       }
     },
   );
+
+  // ================================================================== 08E-8D3 C1-C3: real interruption of the capture path
+  // D.1 atomicity (plan l.319), V3.2 H.4 (message and trigger roll back together), K.3 capture idempotency, O.11 (zero
+  // duplicates across crashes). Connection loss is a REAL backend termination (pg_terminate_backend through terminationWatch)
+  // while the server transaction is open, never a client-side rejection on a live connection. A lost acknowledgement is a REAL
+  // COMMIT whose reply is then discarded (lostCommitAck). Durable state is always read on an independent connection.
+  describe("08E-8D3: real connection loss and a lost COMMIT acknowledgement", () => {
+    const one1 = { batchSize: 1, concurrency: 1 } as const;
+    const eventRow = async (e: StoredEvent) =>
+      (
+        await q(
+          "select status, attempts, last_error, locked_at, locked_by from webhook_events where id=$1",
+          [e.id],
+        )
+      ).rows[0];
+    const conversationJson = async (id: string) =>
+      (await q("select to_jsonb(c) j from conversations c where id=$1", [id])).rows[0].j;
+    const totals = async () => ({
+      messages: await count("messages"),
+      triggers: await count("bot_triggers"),
+      attributions: await count("lead_attributions"),
+      contacts: await count("contacts"),
+      conversations: await count("conversations"),
+      sessions: await count("bot_sessions"),
+    });
+    const captureFailures = () =>
+      logs
+        .map((line) => JSON.parse(line))
+        .filter((line) => line.bots_event === "bots.trigger_capture_failed");
+    const backendState = async (pid: number) =>
+      (await q("select state from pg_stat_activity where pid=$1", [pid])).rows[0]?.state;
+
+    /** An existing RESOLVED conversation (its first message captured), and a new delivery with a referral into it. */
+    async function existingConversation() {
+      const prior = await incoming({ timestamp: new Date(Date.now() - 120_000) });
+      // through the real worker, so no earlier PENDING event can be claimed instead of the one under test
+      expect(await processWebhookBatch(t.db, { handlers: enabled(), ...one1 })).toMatchObject({
+        claimed: 1,
+        processed: 1,
+      });
+      const conversationId = (await byEvent(prior)).conversation_id as string;
+      await q(
+        "update conversations set status='RESOLVED', resolved_at=clock_timestamp() - interval '90 seconds' where id=$1",
+        [conversationId],
+      );
+      const e = await incoming({
+        timestamp: new Date(Date.now() - 30_000),
+        message: {
+          type: "text",
+          text: { body: "D3_CAPTURE_TEXT" },
+          referral: { source_type: "ad", source_id: "77", ctwa_clid: "CLID-D3" },
+        },
+      });
+      return {
+        e,
+        conversationId,
+        conversation: await conversationJson(conversationId),
+        totals: await totals(),
+      };
+    }
+
+    /** Runs one real worker pass, terminates the backend once the pause is reached, and returns the pass summary. */
+    async function terminatedPass(
+      handler: WebhookHandler,
+      pause: { reached: Promise<number>; release: () => void },
+      whilePaused: (pid: number) => Promise<void>,
+    ) {
+      const watch = terminationWatch(t.pool);
+      const pass = processWebhookBatch(t.db, { handlers: { MESSAGE: handler }, ...one1 });
+      try {
+        const pid = await Promise.race([
+          pause.reached,
+          pass.then(() => {
+            throw new Error("the pass finished before reaching its pause");
+          }),
+        ]);
+        await whilePaused(pid);
+        await terminateThenResume(watch, pid, pause.release);
+      } finally {
+        pause.release();
+      }
+      const summary = await pass;
+      await watch.verify();
+      return summary;
+    }
+
+    /** Nothing of the interrupted transaction survives; the event is recoverably FAILED with its claim cleared. */
+    async function expectRolledBack(x: Awaited<ReturnType<typeof existingConversation>>) {
+      expect(await byEvent(x.e)).toBeUndefined();
+      expect(await totals()).toEqual(x.totals);
+      expect(await conversationJson(x.conversationId)).toEqual(x.conversation);
+      const row = await eventRow(x.e);
+      expect(row).toMatchObject({
+        status: "FAILED",
+        attempts: 1,
+        locked_at: null,
+        locked_by: null,
+      });
+      return row.last_error as string;
+    }
+
+    /** The legitimate retry stores exactly one message and one trigger; redelivery of the same message changes nothing. */
+    async function expectRecoveredOnce(
+      x: Awaited<ReturnType<typeof existingConversation>>,
+      attempts: number,
+    ) {
+      const m = await byEvent(x.e);
+      expect(m).toBeDefined();
+      const triggers = (await q("select * from bot_triggers where message_id=$1", [m.id])).rows;
+      const conv = (
+        await q("select status, control_seq from conversations where id=$1", [x.conversationId])
+      ).rows[0];
+      expect(triggers).toHaveLength(1);
+      expect(triggers[0]).toMatchObject({
+        status: "PENDING",
+        attempts: 0,
+        conversation_id: x.conversationId,
+        observed_control_seq: conv.control_seq,
+      });
+      expect(conv.status).toBe("OPEN");
+      expect(await eventRow(x.e)).toEqual({
+        status: "PROCESSED",
+        attempts,
+        last_error: null,
+        locked_at: null,
+        locked_by: null,
+      });
+      const expected = {
+        ...x.totals,
+        messages: x.totals.messages + 1,
+        triggers: x.totals.triggers + 1,
+        attributions: x.totals.attributions + 1,
+      };
+      expect(await totals()).toEqual(expected);
+      // Meta redelivers the same message: ingest stores no new event, and handling it again is the duplicate no-op
+      const account = (
+        await q("select phone_number_id,waba_id from whatsapp_accounts where id=$1", [w.account.id])
+      ).rows[0];
+      const { bytes } = deliveryBytes({
+        id: x.e.providerObjectId,
+        pn: account.phone_number_id,
+        waba: account.waba_id,
+      });
+      expect(await ingestBytes(t.db, bytes)).toEqual([]);
+      await run(x.e);
+      expect(await processWebhookBatch(t.db, { handlers: enabled(), ...one1 })).toMatchObject({
+        claimed: 0,
+      });
+      expect(await totals()).toEqual(expected);
+    }
+
+    const makeDue = (e: StoredEvent) =>
+      q(
+        "update webhook_events set next_attempt_at = clock_timestamp() - interval '1 second' where id=$1 and status='FAILED'",
+        [e.id],
+      );
+
+    it("C1: the backend is terminated INSIDE the nested capture savepoint: nothing commits, the event is retried, and the retry stores one message and one trigger", async () => {
+      const x = await existingConversation();
+      const reached = deferred<number>();
+      const go = deferred();
+      const capture = vi.fn(async (sp: Parameters<WebhookHandler>[0], value: BotTriggerInput) => {
+        expect((await insertBotTriggerIfAdmitted(sp, value)).inserted).toBe(true);
+        const r = await sp.execute<{ pid: number }>(sql`select pg_backend_pid() pid`);
+        reached.resolve(r.rows[0]!.pid);
+        await go.promise; // inside savepoint sp2: the trigger row is written, nothing is released or committed
+      });
+      const summary = await terminatedPass(
+        createInboundMessageHandler({ captureBotTrigger: capture }),
+        { reached: reached.promise, release: () => go.resolve() },
+        async (pid) => {
+          // the server transaction is genuinely open (not a client-side fault) and nothing is visible outside it
+          expect(await backendState(pid)).toBe("idle in transaction");
+          expect(await byEvent(x.e)).toBeUndefined();
+          expect(await totals()).toEqual(x.totals);
+        },
+      );
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect(summary).toMatchObject({ claimed: 1, processed: 0, failed: 1 });
+      const lastError = await expectRolledBack(x);
+      expect(lastError).toBe("unexpected_error"); // pinned observation: the dead client's error carries no SQLSTATE
+
+      // 08E-8D3 G (pinned observation): the nested catch DOES log a capture failure, naming a message that never committed
+      const failures = captureFailures();
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        organization_id: w.org.id,
+        conversation_id: x.conversationId,
+        reason: "unexpected_error",
+      });
+      expect(
+        (await q("select count(*)::int n from messages where id=$1", [failures[0].message_id]))
+          .rows[0].n,
+      ).toBe(0);
+
+      await makeDue(x.e);
+      expect(await processWebhookBatch(t.db, { handlers: enabled(), ...one1 })).toMatchObject({
+        claimed: 1,
+        processed: 1,
+      });
+      await expectRecoveredOnce(x, 2);
+      expect(captureFailures()).toHaveLength(1); // the retry logs nothing further
+    });
+
+    it("C2: the backend is terminated after every handler write, before the worker's COMMIT: nothing commits and the retry is exact", async () => {
+      const x = await existingConversation();
+      const reached = deferred<number>();
+      const go = deferred();
+      const real = enabled().MESSAGE!;
+      const afterWrites: WebhookHandler = async (tx, event, context) => {
+        await real(tx, event, context);
+        const inside = await tx.execute<{ messages: number; triggers: number }>(
+          sql`select (select count(*)::int from messages) messages, (select count(*)::int from bot_triggers) triggers`,
+        );
+        // the writes exist inside the transaction (one message and its trigger) before it is killed
+        expect(inside.rows[0]).toEqual({
+          messages: x.totals.messages + 1,
+          triggers: x.totals.triggers + 1,
+        });
+        const r = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() pid`);
+        reached.resolve(r.rows[0]!.pid);
+        await go.promise; // the worker would now run its fenced PROCESSED update and COMMIT
+      };
+      const summary = await terminatedPass(
+        afterWrites,
+        { reached: reached.promise, release: () => go.resolve() },
+        async (pid) => {
+          expect(await backendState(pid)).toBe("idle in transaction");
+          expect(await byEvent(x.e)).toBeUndefined();
+          expect(await totals()).toEqual(x.totals);
+        },
+      );
+      expect(summary).toMatchObject({ claimed: 1, processed: 0, failed: 1 });
+      expect(await expectRolledBack(x)).toBe("unexpected_error");
+      expect(captureFailures()).toHaveLength(0); // capture had succeeded: no capture failure is logged
+      await makeDue(x.e);
+      expect(await processWebhookBatch(t.db, { handlers: enabled(), ...one1 })).toMatchObject({
+        claimed: 1,
+        processed: 1,
+      });
+      await expectRecoveredOnce(x, 2);
+    });
+
+    it("C3: the worker's COMMIT really commits and its acknowledgement is lost: the fenced failure record changes nothing, nothing is retried or duplicated", async () => {
+      const x = await existingConversation();
+      const lost = lostCommitAck(t);
+      let armedAt = -1;
+      let observed: Record<string, unknown> | undefined;
+      const real = enabled().MESSAGE!;
+      const armed: WebhookHandler = async (tx, event, context) => {
+        await real(tx, event, context);
+        armedAt = lost.statements.length;
+        // armed only now, so the faulted COMMIT is this worker transaction's (the claim is an autocommit statement)
+        lost.arm(async () => {
+          const m = await byEvent(x.e);
+          observed = {
+            message: m !== undefined,
+            triggers: m
+              ? (await q("select count(*)::int n from bot_triggers where message_id=$1", [m.id]))
+                  .rows[0].n
+              : 0,
+            event: (await eventRow(x.e)).status,
+          };
+        });
+      };
+      let summary: Awaited<ReturnType<typeof processWebhookBatch>>;
+      try {
+        summary = await processWebhookBatch(lost.db as unknown as DbExecutor, {
+          handlers: { MESSAGE: armed },
+          ...one1,
+        });
+        expect(lost.injected).toBe(1);
+        const after = lost.statements.slice(armedAt);
+        const commits = after.flatMap((s, i) => (/^commit$/i.test(s) ? [i] : []));
+        expect(commits).toHaveLength(1);
+        // exactly the fenced PROCESSED update precedes the faulted COMMIT; no savepoint statement is involved
+        expect(after.slice(0, commits[0])).toHaveLength(1);
+        expect(after[0]).toMatch(/^update "webhook_events" set "status" = \$1/);
+        expect(after.some((s) => /savepoint/i.test(s))).toBe(false);
+      } finally {
+        await lost.close();
+      }
+      // an independent connection saw the commit before the acknowledgement was discarded
+      expect(observed).toEqual({ message: true, triggers: 1, event: "PROCESSED" });
+      // the worker's fenced failure record matched no row (the event is no longer PROCESSING): the lease is "lost"
+      expect(summary).toMatchObject({ claimed: 1, processed: 0, failed: 0, leaseLost: 1 });
+      expect(captureFailures()).toHaveLength(0);
+      await expectRecoveredOnce(x, 1);
+    });
+  });
 });

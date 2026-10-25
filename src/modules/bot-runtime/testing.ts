@@ -182,8 +182,8 @@ export function endFirstFlow(
 }
 
 /** The start node is a HANDOVER with a notice. */
-export function handoverFirstFlow(): Json {
-  return base([{ kind: "keyword", words: ["menu"] }], "staff", {
+export function handoverFirstFlow(trigger: Json = { kind: "keyword", words: ["menu"] }): Json {
+  return base([trigger], "staff", {
     staff: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
   });
 }

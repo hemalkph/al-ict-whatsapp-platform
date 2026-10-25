@@ -509,3 +509,129 @@ describe("default-off is testable and holds", () => {
     expect(example).not.toMatch(/^BOTS_RUNTIME_ENABLED=true/m);
   });
 });
+
+// ------------------------------------------------------------------------------------- 08E-8D3 H5: message header retention
+// Plan F6 (l.1098) and the retention contract (l.1267): first_message firstness reads retained eligible message HEADERS
+// (id, type, direction, created_at, organization and conversation), and no migration was added because those headers are
+// retained. The database does NOT forbid deleting an unreferenced message or rewriting its type (no guard exists on
+// `messages`; all its foreign keys are ON DELETE NO ACTION, so no cascade path removes one). This scan pins the contract at the
+// source level: no production file, script or migration deletes message rows or rewrites a header column.
+//
+// shortcut: a text scan of literal statements. It cannot see SQL built at run time from strings, a renamed import of the
+// `messages` table, an ORM `.set({...})` whose object contains a nested `}` before a header key, or a header change done
+// through a database function. It does not replace schema constraints; a reviewed cleanup that must remove headers needs a
+// durable replacement first (plan l.1098) and would fail here on purpose.
+const HEADER_SQL =
+  /\b(id|organization_id|conversation_id|whatsapp_account_id|direction|type|created_at)"?\s*=/i;
+const HEADER_ORM =
+  /(^|[{,\s])(id|organizationId|conversationId|whatsappAccountId|direction|type|createdAt)\s*[:,}]/;
+const MESSAGES_SQL = String.raw`(?:only\s+)?(?:"?public"?\.)?"?messages"?(?![\w"])`;
+function messageHeaderViolations(text: string): string[] {
+  const found: string[] = [];
+  const each = (re: RegExp, label: string, header?: RegExp) => {
+    for (const m of text.matchAll(re)) if (!header || header.test(m[1] ?? "")) found.push(label);
+  };
+  each(new RegExp(String.raw`\bdelete\s+from\s+${MESSAGES_SQL}`, "gi"), "SQL DELETE FROM messages");
+  each(
+    new RegExp(String.raw`\btruncate\s+(?:table\s+)?[\w".,\t ]*?\bmessages\b(?![\w-])`, "gi"),
+    "SQL TRUNCATE messages",
+  );
+  each(
+    new RegExp(
+      String.raw`\bupdate\s+${MESSAGES_SQL}(?:\s+(?:as\s+)?(?!set\b)\w+)?\s+set\b([\s\S]*?)(?:\bwhere\b|\breturning\b|\bfrom\b|;|\x60|$)`,
+      "gi",
+    ),
+    "SQL UPDATE of a messages header column",
+    HEADER_SQL,
+  );
+  each(
+    new RegExp(
+      String.raw`\binsert\s+into\s+${MESSAGES_SQL}[^;\x60]*?\bdo\s+update\s+set\b([\s\S]*?)(?:\bwhere\b|\breturning\b|;|\x60|$)`,
+      "gi",
+    ),
+    "SQL upsert rewriting a messages header column",
+    HEADER_SQL,
+  );
+  each(/\.delete\(\s*(?:schema\.)?messages\s*\)/g, "ORM delete(messages)");
+  each(
+    /\.update\(\s*(?:schema\.)?messages\s*\)\s*\.set\(\s*\{([^}]*\})/g,
+    "ORM update(messages) of a header column",
+    HEADER_ORM,
+  );
+  each(
+    /\.insert\(\s*(?:schema\.)?messages\s*\)[^;]*?\.onConflictDoUpdate\(\s*\{[^;]*?\bset\s*:\s*\{([^}]*\})/g,
+    "ORM upsert(messages) rewriting a header column",
+    HEADER_ORM,
+  );
+  return found;
+}
+
+describe("08E-8D3 H5: production code never deletes messages or rewrites their headers (F6)", () => {
+  const isProduction = (p: string) =>
+    /\.(ts|tsx)$/.test(p) &&
+    !/\.test\.tsx?$/.test(p) &&
+    !/(^|\/)(__tests__|__fixtures__)\//.test(p) &&
+    !/(^|\/)testing\.ts$/.test(p);
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+      d.isDirectory() ? walk(join(dir, d.name)) : [join(dir, d.name)],
+    );
+  const files = [
+    ...walk(join(repo, "src")).filter((p) => isProduction(relative(repo, p))),
+    ...walk(join(repo, "scripts")).filter((p) => isProduction(relative(repo, p))),
+    ...walk(join(repo, "src/db/migrations")).filter((p) => p.endsWith(".sql")),
+  ];
+  const sqlCode = (t: string) => t.replace(/--.*$/gm, "");
+
+  it("self-test: every violation shape is detected; the repository's legitimate message updates and look-alikes are not", () => {
+    for (const bad of [
+      "await tx.execute(sql`DELETE FROM messages WHERE created_at < now()`)",
+      'DELETE FROM "public"."messages" WHERE id = $1;',
+      "TRUNCATE TABLE messages;",
+      "UPDATE messages SET type = 'IMAGE' WHERE id = $1",
+      'update "messages" m set "direction" = $1 where m.id = $2',
+      "update messages set body = null, created_at = $1 where id = $2",
+      "insert into messages (id, type) values ($1, $2) on conflict (id) do update set type = excluded.type",
+      "await db.delete(schema.messages).where(eq(schema.messages.id, id))",
+      "await tx.delete(messages)",
+      "await tx.update(messages).set({ type: 'IMAGE' }).where(x)",
+      "await tx.update(schema.messages).set({ body: null, createdAt: d })",
+      "await tx.update(messages).set({ direction })",
+      "db.insert(messages).values(v).onConflictDoUpdate({ target: messages.id, set: { type: 'TEXT' } })",
+    ])
+      expect(messageHeaderViolations(bad), bad).not.toEqual([]);
+    for (const ok of [
+      ".update(messages).set({ replyToMessageId: where.messageId }).where(and(eq(messages.id, x)))",
+      ".update(messages).set({ latestStatus: e.status, latestStatusAt: e.occurredAt, updatedAt: new Date() })",
+      ".update(schema.messages).set({ wamid: result.wamid }).where(eq(schema.messages.id, claim.messageId))",
+      ".update(schema.messages).set({ errorCode: result.providerErrorCode ?? result.reason, errorMessage: result.reason })",
+      "update messages set latest_status = $1 where id = $2",
+      "update messages set body = null, content = null where id = $1",
+      'className="truncate text-sm font-medium"',
+      "records.delete(id); messages.push(x)",
+      "delete from message_attachments where id = $1",
+      "insert into messages (id, type) values ($1, $2) on conflict do nothing",
+    ])
+      expect(messageHeaderViolations(ok), ok).toEqual([]);
+  });
+
+  it("scans every production source, script and migration, and none deletes messages or rewrites a header column", () => {
+    const rel = files.map((p) => relative(repo, p));
+    // non-vacuous: the scan reaches the files that DO write messages, every migration, and the scripts
+    for (const known of [
+      "src/db/ops/inbound-message.ts",
+      "src/db/ops/message-status.ts",
+      "src/modules/messaging/dispatch.ts",
+      "src/db/migrations/0000_init_foundation_schema.sql",
+      "src/db/migrations/0008_bot_outbound_dispatch.sql",
+      "scripts/bots-worker.ts",
+    ])
+      expect(rel).toContain(known);
+    expect(rel.some((p) => p.includes("testing.ts") || /\.test\.tsx?$/.test(p))).toBe(false);
+    const violations = files.flatMap((p) => {
+      const text = p.endsWith(".sql") ? sqlCode(read(p)) : code(read(p));
+      return messageHeaderViolations(text).map((v) => `${relative(repo, p)}: ${v}`);
+    });
+    expect(violations).toEqual([]);
+  });
+});
