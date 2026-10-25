@@ -26,16 +26,33 @@ import {
   type Student,
 } from "../bot-control/testing";
 import { claimNext, executeClaim } from "@/modules/messaging/dispatch";
-import { FakeTransport } from "@/modules/messaging/testing";
+import { submitOutboundMessage } from "@/modules/messaging/submit";
+import { FakeTransport, ON, textInput } from "@/modules/messaging/testing";
+import { step, validateFlow } from "@/modules/bots";
+import { assignConversation, changeConversationStatus } from "@/modules/inbox";
+import {
+  deliver,
+  deliveryBytes,
+  handlerContext,
+  ingestBytes,
+  type DeliverOptions,
+  type StoredEvent,
+} from "@/modules/whatsapp/inbound/testing";
+import { buildWebhookWorkerHandlers } from "@/modules/whatsapp/worker/registry";
+import { pauseDeployment } from "../bot-control";
 import { FlowCache } from "./flow-cache";
+import { reconcileSession } from "./reconcile";
 import { processTrigger } from "./step";
 import {
+  deferred,
   endFirstFlow,
   handoverFirstFlow,
   insertTrigger,
   makeDue,
   menuFlow,
   messageFlow,
+  terminateThenResume,
+  terminationWatch,
   triggerRow,
 } from "./testing";
 import { claimTriggers, type ClaimedTrigger } from "./trigger-queue";
@@ -64,6 +81,37 @@ vi.mock("@/db/ops/bot-step", async (importOriginal) => {
         return { ...r, noPreviousSessionStart: true, evidenceDefect: false };
       if (mutate.name === "no_record_order") return { ...r, firstInRecordHistory: true };
       return r;
+    },
+    // 08E-9 R7 MUTATION "v3_rules" (V3.2 O.10 R7, "Failure if V3 restored"): V3 used the SMALLEST resolution after the
+    // handover and did not compare later staff events with t. The real statement runs; its staff facts are then replaced by
+    // V3's: no later-staff supersession (rule 1), no staff engagement mark (only a handover opens ownership), and the earliest
+    // resolution after the latest handover (none at all without a handover). The status check is dropped in the evaluator below.
+    readStartFacts: async (...a: Parameters<typeof orig.readStartFacts>) => {
+      const r = await orig.readStartFacts(...a);
+      if (mutate.name !== "v3_rules") return r;
+      const [tx, p] = a;
+      let latestResolution: typeof r.latestResolution = null;
+      if (r.latestHandoverSeq !== null) {
+        const x = await tx.execute<{ control_seq: string; created_at: string | Date }>(
+          sql`SELECT control_seq, created_at FROM conversation_events
+               WHERE organization_id = ${p.organizationId} AND conversation_id = ${p.conversationId}
+                 AND kind = 'STATUS' AND to_status = 'RESOLVED' AND control_seq > ${r.latestHandoverSeq}
+               ORDER BY control_seq ASC LIMIT 1`,
+        );
+        const row = x.rows[0];
+        if (row)
+          latestResolution = {
+            seq: Number(row.control_seq),
+            createdAt: queue.timestampToDate(row.created_at),
+          };
+      }
+      return {
+        ...r,
+        maxStaffControlSeq: null,
+        latestNonResolutionStaffSeq: null,
+        hasLegacyNonResolutionStaffRow: false,
+        latestResolution,
+      };
     },
     // omits the contact-level serialization only (the conversation try-lock stays)
     tryAdvisoryLock: async (...a: Parameters<typeof orig.tryAdvisoryLock>) =>
@@ -131,10 +179,34 @@ vi.mock("./eligibility", async (importOriginal) => {
   return {
     ...orig,
     // staleness checked only AFTER the in-flight deferral: the deferral wins whenever a BOT request is in flight
-    evaluateStartEligibility: (facts: Parameters<typeof orig.evaluateStartEligibility>[0]) =>
-      mutate.name === "stale_after_defer" && facts.botRequestInFlight && !facts.hasLiveSession
-        ? ({ outcome: "defer", code: "bot_request_in_flight" } as const)
-        : orig.evaluateStartEligibility(facts),
+    evaluateStartEligibility: (facts: Parameters<typeof orig.evaluateStartEligibility>[0]) => {
+      if (mutate.name === "stale_after_defer" && facts.botRequestInFlight && !facts.hasLiveSession)
+        return { outcome: "defer", code: "bot_request_in_flight" } as const;
+      // 08E-9 R4 MUTATION "v2_restart_rule" (V3.2 O.10 R4): V2 rejected any conversation with a resolution after the latest
+      // handover, so the legitimate restart of case C is denied
+      if (
+        mutate.name === "v2_restart_rule" &&
+        facts.latestHandoverSeq !== null &&
+        facts.latestResolution !== null &&
+        facts.latestResolution.seq > facts.latestHandoverSeq
+      )
+        return { outcome: "ignore", code: "handover_unresolved" } as const;
+      // 08E-9 R7 MUTATION "v3_rules" (with the readStartFacts half above): V3 checked only the current assignee, not the status
+      if (mutate.name === "v3_rules")
+        return orig.evaluateStartEligibility({ ...facts, conversationStatus: "OPEN" });
+      return orig.evaluateStartEligibility(facts);
+    },
+  };
+});
+vi.mock("./policy", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("./policy")>();
+  return {
+    ...orig,
+    // 08E-9 R9b MUTATION "continuation_exemption" (plan G.4: Revision 1's withdrawn exemption). The scenarios that set it are
+    // continuations on a WAITING_FOR_INPUT session with no busy try-lock, so the continuation's own check (continue.ts) is the
+    // only staleness evaluation reached: "never stale" there is exactly the exemption being reinstated.
+    isStaleInput: (...a: Parameters<typeof orig.isStaleInput>) =>
+      mutate.name === "continuation_exemption" ? false : orig.isStaleInput(...a),
   };
 });
 
@@ -1711,6 +1783,991 @@ describe("bot step transaction T1 (08E-4)", () => {
       expect(await requests()).toEqual(before);
       expect(await enqueueDirect(h, 31)).toEqual({ ok: false, reason: "bot_hourly_cap" }); // a new 31st request stays refused
       expect(await requests()).toEqual(before);
+    });
+  });
+
+  // ================================================================== Phase 08E-9 Batch 1: runtime acceptance completion
+  //
+  // V3.2 O.10 R4 and R7, plan N.2 R9b, E-HOURLY (AC-5) and ENG. Staff actions are the real Inbox services; inbound messages
+  // that the cases are about (duplicate deliveries, reopening, older provider times) go through the real ingest and the real
+  // webhook-worker handler with trigger capture built from an explicit { BOTS_RUNTIME_ENABLED: "true" } object.
+  //
+  // LOGICAL CLOCK (plan N.2a: a test-only clock that advances logical time, bound consistently to the receipt input and the
+  // runtime's decision-clock seam). The 30-minute cooldown after a session end or resolution cannot be waited out, and ended_at
+  // and resolution times are database-stamped and immutable. Where a case needs the cooldown to have passed, the trigger's input
+  // time and the decision clock advance TOGETHER by SHIFT (advance() + later(SHIFT)); control sequences, record order and every
+  // database-stamped time stay real. Production reads plain clock_timestamp() with no offset.
+
+  describe("Phase 08E-9 Batch 1", () => {
+    const SHIFT = 31 * MIN;
+    const later = (ms: number) => async (tx: DbExecutor) =>
+      new Date((await dbClock(tx)).getTime() + ms);
+    const truncate = () => q("truncate organizations, webhook_requests cascade");
+    const conv = (fx: Fx) => fx.w.student.conversation.id;
+    const conversationStatus = async (fx: Fx) =>
+      (await one("select status from conversations where id = $1", [conv(fx)])).status as string;
+    const lastResolution = async (fx: Fx) => {
+      const r = await one(
+        `select control_seq::int seq, (extract(epoch from created_at) * 1000)::float8 ms from conversation_events
+          where conversation_id = $1 and kind = 'STATUS' and to_status = 'RESOLVED' order by control_seq desc limit 1`,
+        [conv(fx)],
+      );
+      return { seq: Number(r.seq), ms: Number(r.ms) };
+    };
+    const staffStatus = (fx: Fx, to: "OPEN" | "RESOLVED", expected: "OPEN" | "RESOLVED") =>
+      changeConversationStatus(fx.w.staff.ctx, conv(fx), { to, expected }, { db: t.db as never });
+    /** The logical clock (see above): the captured trigger's input advances with the decision clock. */
+    const advance = (triggerId: string, ms: number) =>
+      q(
+        "update bot_triggers set input_occurred_at = input_occurred_at + $2 * interval '1 millisecond' where id = $1 and status = 'PENDING'",
+        [triggerId, ms],
+      );
+
+    // ---------------------------------------------------------------- real inbound (ingest + capture-enabled handler)
+    const FROM = "15550100123";
+    const captureHandlers = buildWebhookWorkerHandlers({ BOTS_RUNTIME_ENABLED: "true" });
+    type Real = {
+      event: StoredEvent;
+      options: DeliverOptions;
+      message: Json & { id: string; conversation_id: string };
+      trigger: (Json & { id: string; observed_control_seq: string }) | null;
+    };
+    const handle = (event: StoredEvent) =>
+      t.db.transaction((tx) =>
+        captureHandlers.MESSAGE!(tx, { ...event, eventType: "MESSAGE" }, handlerContext()),
+      );
+    /**
+     * One student message through the real ingest and the real handler. The provider timestamp defaults to one second after the
+     * DATABASE clock, so a message sent after a staff resolution is newer than resolved_at (the handler reopens the conversation).
+     */
+    async function realInbound(
+      fx: Fx,
+      o: { body?: string; message?: Json; timestamp?: Date } = {},
+    ): Promise<Real> {
+      const account = await one(
+        "select phone_number_id, waba_id from whatsapp_accounts where id = $1",
+        [fx.w.account.id],
+      );
+      const dbMs = ((await one("select clock_timestamp() t")).t as Date).getTime();
+      const options: DeliverOptions = {
+        id: `wamid.TEST08E9.${randomUUID()}`,
+        from: FROM,
+        pn: account.phone_number_id as string,
+        waba: account.waba_id as string,
+        timestamp: o.timestamp ?? new Date(dbMs + 1_000),
+        message: o.message ?? { type: "text", text: { body: o.body ?? "hi" } },
+      };
+      const event = await deliver(t.db, options);
+      await handle(event);
+      const message = (await one("select * from messages where wamid = $1", [
+        event.providerObjectId,
+      ])) as Real["message"];
+      const trigger =
+        ((await one("select * from bot_triggers where message_id = $1", [message.id])) as
+          Real["trigger"] | undefined) ?? null;
+      return { event, options, message, trigger };
+    }
+    /** The world as seen from the conversation the real handler created for FROM. */
+    async function realFx(fx: Fx, r: Real): Promise<Fx> {
+      const c = await one("select id, contact_id from conversations where id = $1", [
+        r.message.conversation_id,
+      ]);
+      return {
+        ...fx,
+        w: {
+          ...fx.w,
+          student: {
+            contact: { id: c.contact_id as string },
+            conversation: { id: c.id as string },
+            message: { id: r.message.id },
+          },
+        },
+      };
+    }
+    const durable = async (fx: Fx) => ({
+      inboundMessages: await count("messages", "conversation_id = $1 and direction = 'INBOUND'", [
+        conv(fx),
+      ]),
+      triggers: await count("bot_triggers", "conversation_id = $1", [conv(fx)]),
+      sessions: (await sessionsOf(fx)).length,
+      botRequests: (await requestsOf(fx)).length,
+    });
+
+    /** A first-node HANDOVER session started by a real "menu", its notice ACCEPTED (nothing in flight), then a real resolution. */
+    async function handedOverThenResolved() {
+      const f0 = await fixture(handoverFirstFlow());
+      const first = await realInbound(f0, { body: "menu" });
+      const f = await realFx(f0, first);
+      ok(await run(first.trigger!.id), "PROCESSED", "session_started");
+      const handed = await liveSession(f);
+      expect(handed).toMatchObject({ state: "HANDED_OVER", handover_reason: "needs_staff" });
+      await dispatchAccepted();
+      await staffStatus(f, "RESOLVED", "OPEN");
+      return { f, first, h: Number(handed.handover_control_seq), r: await lastResolution(f) };
+    }
+
+    // ============================================================================================ R4 (V3.2 O.10 R4)
+
+    describe("R4: restart after handover (cases F, G, restart, V2 mutation)", () => {
+      /** R4-C's world (as the existing R4-C test builds it): handover, a real staff resolution, the conversation open again. */
+      async function resolvedAndReopened() {
+        const f = await fixture(handoverFirstFlow());
+        ok(await run((await trigger(f, { body: "menu" })).id), "PROCESSED", "session_started");
+        await dispatchAccepted();
+        await staffStatus(f, "RESOLVED", "OPEN");
+        const r = await lastResolution(f);
+        // FIXTURE: the conversation is reopened directly, as R4-C does (the real reopen by a newer inbound message is proved
+        // through the handler in R4-G and R7 below); no control sequence is allocated by a reopen either way
+        await q("update conversations set status = 'OPEN' where id = $1", [conv(f)]);
+        return { f, r };
+      }
+
+      it("F: after the handover and resolution a DIFFERENT deployment, activated later, decides: input enqueued before its activation is before_activation; input enqueued after starts on it", async () => {
+        const { f, r } = await resolvedAndReopened();
+        // captured while the first deployment was still ACTIVE (the only way capture admits a start trigger)
+        const early = await trigger(f, { body: "join", observed: r.seq, inputAt: freshAt(SHIFT) });
+        await pauseDeployment(f.w.admin.ctx, { deploymentId: f.deployment.id }, { db: t.db });
+        const other = await publishedBot(
+          t.db,
+          f.w,
+          messageFlow({ kind: "keyword", words: ["join"] }),
+          "other_bot",
+        );
+        const d2 = (
+          await activateDeployment(
+            f.w.admin.ctx,
+            {
+              botId: other.bot.id,
+              versionId: other.version.id,
+              whatsappAccountId: f.w.account.id,
+              priority: 2,
+            },
+            { db: t.db },
+          )
+        ).value;
+        expect(
+          (
+            await one(
+              "select t.enqueued_at < d.start_eligible_from before from bot_triggers t, bot_deployments d where t.id = $1 and d.id = $2",
+              [early.id, d2.id],
+            )
+          ).before,
+        ).toBe(true);
+        ok(await run(early.id, { readClock: later(SHIFT) }), "IGNORED", "before_activation");
+        expect(await sessionsOf(f)).toHaveLength(1);
+
+        const after = await trigger(f, { body: "join", observed: r.seq, inputAt: freshAt(SHIFT) });
+        ok(await run(after.id, { readClock: later(SHIFT) }), "PROCESSED", "session_started");
+        const sessions = await sessionsOf(f);
+        expect(sessions).toHaveLength(2);
+        expect(sessions[1]).toMatchObject({
+          deployment_id: d2.id,
+          bot_id: other.bot.id,
+          bot_version_id: other.version.id,
+          started_by_message_id: after.messageId,
+        });
+        expect(Number(sessions[1]!.started_control_seq)).toBe(r.seq + 1);
+        // both requests are step 1 of their own session, so requestsOf's bot_step_seq order ties: identify each by its session
+        const requests = await requestsOf(f);
+        expect(requests).toHaveLength(2);
+        const ofSession = (id: unknown) => requests.filter((x) => x.bot_session_id === id);
+        // the first session's HANDOVER notice, sent by dispatchAccepted: ACCEPTED, authorized as its terminal notice
+        expect(ofSession(sessions[0]!.id)).toEqual([
+          expect.objectContaining({
+            bot_step_seq: Number(sessions[0]!.terminal_notice_step_seq),
+            state: "ACCEPTED",
+          }),
+        ]);
+        // the new session's first message on the new deployment: exactly one, QUEUED, for its current step
+        expect(ofSession(sessions[1]!.id)).toEqual([
+          expect.objectContaining({
+            bot_step_seq: Number(sessions[1]!.step_seq),
+            state: "QUEUED",
+            hold_reason: null,
+          }),
+        ]);
+      });
+
+      it("G: after the handover and resolution, a duplicate webhook of the earlier message creates nothing, and a message older than maxInputAge ends stale_trigger; no new session", async () => {
+        const { f, first } = await handedOverThenResolved();
+        const before = await durable(f);
+        expect(before).toEqual({ inboundMessages: 1, triggers: 1, sessions: 1, botRequests: 1 });
+        // the same webhook delivered again: ingest stores no new event, and the stored event handled again (a worker retry)
+        // exits at the existing wamid: no message, no trigger, no reopen
+        expect(await ingestBytes(t.db, deliveryBytes(first.options).bytes)).toEqual([]);
+        await handle(first.event);
+        expect(await durable(f)).toEqual(before);
+        expect(await conversationStatus(f)).toBe("RESOLVED");
+
+        // a fresh message reopens the conversation and is captured after the resolution; the worker reaches it only when it
+        // is more than maxInputAge old (an outage): staleness decides before rule 5 and before the cooldown (rule 6)
+        const late = await realInbound(f, { body: "menu" });
+        expect(await conversationStatus(f)).toBe("OPEN");
+        const input = (await triggerRow(t, late.trigger!.id)).input_occurred_at as Date;
+        ok(
+          await run(late.trigger!.id, {
+            readClock: async () => new Date(input.getTime() + 10 * MIN + 1),
+          }),
+          "IGNORED",
+          "stale_trigger",
+        );
+        expect(await triggerRow(t, late.trigger!.id)).toMatchObject({
+          attempts: 1,
+          deferrals: 0,
+          last_error_code: null,
+        });
+        expect(await durable(f)).toEqual({
+          inboundMessages: 2,
+          triggers: 2,
+          sessions: 1,
+          botRequests: 1,
+        });
+      });
+
+      it("restart: the worker's T1 for C's input is killed after its decision clock; nothing survives; the restarted worker decides the same from the database", async () => {
+        const { f, r } = await resolvedAndReopened();
+        const c = await trigger(f, { body: "menu", observed: r.seq, inputAt: freshAt(SHIFT) });
+        const claim = await claimOf(c.id);
+        const watch = terminationWatch(t.pool);
+        const reached = deferred<number>();
+        const go = deferred();
+        const running = processTrigger(
+          t.db as never,
+          claim,
+          deps({
+            readClock: later(SHIFT),
+            hooks: {
+              afterDecisionClock: async (tx) => {
+                reached.resolve(
+                  (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() pid`)).rows[0]!
+                    .pid,
+                );
+                await go.promise;
+              },
+            },
+          }),
+        );
+        const pid = await Promise.race([
+          reached.promise,
+          running.then(() => {
+            throw new Error("T1 finished before reaching its decision clock");
+          }),
+        ]);
+        await terminateThenResume(watch, pid, () => go.resolve());
+        const summary = await running;
+        await watch.verify();
+        expect(summary).toMatchObject({ kind: "failed", recorded: true });
+        expect(await sessionsOf(f)).toHaveLength(1);
+        expect(await requestsOf(f)).toHaveLength(1);
+        expect(await triggerRow(t, c.id)).toMatchObject({
+          status: "PENDING",
+          attempts: 1,
+          claim_token: null,
+          session_id: null,
+        });
+
+        await makeDue(t, c.id);
+        ok(await run(c.id, { readClock: later(SHIFT) }), "PROCESSED", "session_started");
+        const sessions = await sessionsOf(f);
+        expect(sessions).toHaveLength(2);
+        expect(Number(sessions[1]!.started_control_seq)).toBe(r.seq + 1);
+        expect(await triggerRow(t, c.id)).toMatchObject({
+          attempts: 2,
+          session_id: sessions[1]!.id,
+        });
+        // the dead worker's claim can change nothing afterwards
+        expect(await processTrigger(t.db as never, claim, deps())).toEqual({ kind: "lost_claim" });
+        expect(await sessionsOf(f)).toHaveLength(2);
+      });
+
+      it("MUTATION (V2 restart rule restored): case C is denied (no new session); the real rules start it", async () => {
+        async function caseC(mutation: string | null) {
+          await truncate();
+          const { f, r } = await resolvedAndReopened();
+          const tr = await trigger(f, { body: "menu", observed: r.seq, inputAt: freshAt(SHIFT) });
+          mutate.name = mutation;
+          const summary = await run(tr.id, { readClock: later(SHIFT) });
+          mutate.name = null;
+          return { summary, sessions: (await sessionsOf(f)).length };
+        }
+        const control = await caseC(null);
+        ok(control.summary, "PROCESSED", "session_started");
+        expect(control.sessions).toBe(2);
+        const mutant = await caseC("v2_restart_rule");
+        ok(mutant.summary, "IGNORED", "handover_unresolved"); // DETECTED: the legitimate restart is refused
+        expect(mutant.sessions).toBe(1);
+      });
+    });
+
+    // ============================================================================================ R7 (V3.2 O.10 R7)
+
+    describe("R7: staff intervention before the start (C in full, G, V3 mutation)", () => {
+      /**
+       * R7-C: handover h; staff resolution (11); a real inbound reopens the conversation and is captured with t = 11; optionally a
+       * second staff resolution (12); then the claimed trigger runs ("T1 released"). Sequences are relative to h (V3.2 R7: shown
+       * relative to the conversation's control_seq), so 10/11/12 are h / h+1 / h+2.
+       */
+      async function caseC(o: { secondResolution: boolean; mutation?: string }) {
+        const { f, h, r: r11 } = await handedOverThenResolved();
+        const reopen = await realInbound(f, { body: "menu" });
+        expect(await conversationStatus(f)).toBe("OPEN"); // the real handler reopened it (newer than resolved_at)
+        expect(Number(reopen.trigger!.observed_control_seq)).toBe(r11.seq);
+        let r12: { seq: number; ms: number } | null = null;
+        if (o.secondResolution) {
+          await staffStatus(f, "RESOLVED", "OPEN");
+          r12 = await lastResolution(f);
+        }
+        // only the control-sequence rules may decide this trigger: the logical clock clears the cooldown and staleness
+        await advance(reopen.trigger!.id, SHIFT);
+        mutate.name = o.mutation ?? null;
+        const summary = await run(reopen.trigger!.id, { readClock: later(SHIFT) });
+        mutate.name = null;
+        return { f, h, r11, r12, reopen, summary };
+      }
+
+      it("C: resolutions 11 and 12 around a reopening input (t = 11): superseded; an older-provider-time message after 12 is input_before_resolution without reopening; the fresh input after the cooldown (t' = 12) starts the session with started_control_seq 13", async () => {
+        const x = await caseC({ secondResolution: true });
+        expect(x.r11.seq).toBe(x.h + 1);
+        expect(x.r12!.seq).toBe(x.h + 2);
+        ok(x.summary, "IGNORED", "superseded_by_staff");
+        expect(await sessionsOf(x.f)).toHaveLength(1);
+        expect(await triggerRow(t, x.reopen.trigger!.id)).toMatchObject({ session_id: null });
+
+        // variant: a message whose provider time precedes resolution 12, delivered after it
+        const old = await realInbound(x.f, {
+          body: "menu",
+          timestamp: new Date(x.r12!.ms - 1_500),
+        });
+        expect(await conversationStatus(x.f)).toBe("RESOLVED"); // older than resolved_at: not reopened
+        expect(Number(old.trigger!.observed_control_seq)).toBe(x.r12!.seq);
+        // V3.2 allows "input_before_resolution (or conversation_resolved, since it did not reopen)"; the evaluator's order puts
+        // rule 3 (freshness against the latest resolution) before rule 4 (status), so the code is input_before_resolution
+        ok(await run(old.trigger!.id), "IGNORED", "input_before_resolution");
+        expect(await sessionsOf(x.f)).toHaveLength(1);
+
+        // the fresh enquiry after the cooldown, t' = 12: L = 12 > O = 10, t' >= 12, effective time after resolution 12
+        const fresh = await realInbound(x.f, { body: "menu" });
+        expect(await conversationStatus(x.f)).toBe("OPEN");
+        expect(Number(fresh.trigger!.observed_control_seq)).toBe(x.r12!.seq);
+        await advance(fresh.trigger!.id, SHIFT);
+        ok(
+          await run(fresh.trigger!.id, { readClock: later(SHIFT) }),
+          "PROCESSED",
+          "session_started",
+        );
+        const sessions = await sessionsOf(x.f);
+        expect(sessions).toHaveLength(2);
+        expect(sessions[1]).toMatchObject({ started_by_message_id: fresh.message.id });
+        expect(Number(sessions[1]!.started_control_seq)).toBe(x.h + 3);
+        // the first session's notice and the new (first-node HANDOVER) session's notice; nothing else
+        expect((await requestsOf(x.f)).map((r) => r.bot_session_id).sort()).toEqual(
+          sessions.map((s) => s.id).sort(),
+        );
+      });
+
+      it("C variant: with only resolution 11, the reopening input (t = 11) starts a session after the cooldown, sequenced after 11", async () => {
+        const x = await caseC({ secondResolution: false });
+        ok(x.summary, "PROCESSED", "session_started");
+        const sessions = await sessionsOf(x.f);
+        expect(sessions).toHaveLength(2);
+        expect(sessions[1]).toMatchObject({ started_by_message_id: x.reopen.message.id });
+        expect(Number(sessions[1]!.started_control_seq)).toBe(x.r11.seq + 1);
+      });
+
+      it("G: after a resolution, a duplicate webhook creates no trigger, a message with an older provider time does not reopen and is input_before_resolution, and a message older than maxInputAge is stale_trigger; never a session", async () => {
+        const f0 = await fixture(messageFlow()); // keyword "menu"
+        const hello = await realInbound(f0, { body: "hello" });
+        const f = await realFx(f0, hello);
+        ok(await run(hello.trigger!.id), "IGNORED", "no_trigger_match");
+        await staffStatus(f, "RESOLVED", "OPEN");
+        const r = await lastResolution(f);
+        const before = await durable(f);
+
+        // (i) the same webhook delivered twice after the resolution
+        expect(await ingestBytes(t.db, deliveryBytes(hello.options).bytes)).toEqual([]);
+        await handle(hello.event);
+        expect(await durable(f)).toEqual(before);
+        expect(await conversationStatus(f)).toBe("RESOLVED");
+
+        // (ii) a provider time before the latest resolution, arriving after it
+        const old = await realInbound(f, { body: "menu", timestamp: new Date(r.ms - 1_500) });
+        expect(await conversationStatus(f)).toBe("RESOLVED");
+        expect(Number(old.trigger!.observed_control_seq)).toBe(r.seq);
+        ok(await run(old.trigger!.id), "IGNORED", "input_before_resolution");
+
+        // (iii) a fresh message after the resolution (it reopens) that the worker reaches only after maxInputAge
+        const late = await realInbound(f, { body: "menu" });
+        expect(await conversationStatus(f)).toBe("OPEN");
+        const input = (await triggerRow(t, late.trigger!.id)).input_occurred_at as Date;
+        ok(
+          await run(late.trigger!.id, {
+            readClock: async () => new Date(input.getTime() + 10 * MIN + 1),
+          }),
+          "IGNORED",
+          "stale_trigger",
+        );
+        expect(await durable(f)).toEqual({
+          inboundMessages: before.inboundMessages + 2,
+          triggers: before.triggers + 2,
+          sessions: 0,
+          botRequests: 0,
+        });
+      });
+
+      it("MUTATION (V3 restored): A (staff reply), B (resolution), E (assign then unassign) and C's first trigger each start a session; the real rules supersede all four", async () => {
+        const staff: Record<string, (fx: Fx) => Promise<unknown>> = {
+          A: (fx) =>
+            submitOutboundMessage(fx.w.staff.ctx, textInput(conv(fx), "staff reply"), {
+              db: t.db as never,
+              config: ON,
+              now: () => new Date(),
+            }),
+          B: (fx) => staffStatus(fx, "RESOLVED", "OPEN"),
+          E: async (fx) => {
+            const assign = (to: string | null, expected: string | null) =>
+              assignConversation(
+                fx.w.staff.ctx,
+                conv(fx),
+                { assigneeMembershipId: to, expectedAssigneeMembershipId: expected },
+                { db: t.db as never },
+              );
+            await assign(fx.w.staff.membershipId, null);
+            await assign(null, fx.w.staff.membershipId);
+          },
+        };
+        for (const [name, act] of Object.entries(staff))
+          for (const mutation of [null, "v3_rules"]) {
+            await truncate();
+            const f = await fixture(messageFlow());
+            const tr = await trigger(f, { body: "menu" }); // observed t = 0: captured before the staff action
+            await act(f);
+            mutate.name = mutation;
+            const summary = await run(tr.id);
+            mutate.name = null;
+            if (mutation === null) ok(summary, "IGNORED", "superseded_by_staff");
+            else
+              expect(summary, `${name} is not detected by the V3 mutation`).toMatchObject({
+                kind: "finished",
+                status: "PROCESSED",
+                outcome: "session_started",
+              });
+          }
+
+        await truncate();
+        const control = await caseC({ secondResolution: true });
+        ok(control.summary, "IGNORED", "superseded_by_staff");
+        await truncate();
+        const mutant = await caseC({ secondResolution: true, mutation: "v3_rules" });
+        ok(mutant.summary, "PROCESSED", "session_started"); // DETECTED: V3 matched resolution 11
+        expect(await sessionsOf(mutant.f)).toHaveLength(2);
+      });
+    });
+
+    // ================================================================================ R9b: a stale repeat of a consumed tap
+
+    describe("R9b: a stale repeat of an already-consumed tap", () => {
+      /** menuFlow: the first tap (token K1) consumed, the second prompt (K2) ACCEPTED and reconciled: WAITING_FOR_INPUT on K2. */
+      async function consumedTapWorld() {
+        const f = await fixture();
+        const { session } = await startMenu(f);
+        const k1 = session.awaiting_token as string;
+        await dispatchAccepted();
+        const tap = await trigger(f, {
+          type: "INTERACTIVE",
+          body: "a",
+          content: replyContent(k1, "a"),
+        });
+        ok(await run(tap.id), "PROCESSED", "input_accepted");
+        await dispatchAccepted();
+        const live = await liveSession(f);
+        expect(
+          await reconcileSession(
+            t.db as never,
+            {
+              organizationId: f.w.org.id,
+              sessionId: live.id as string,
+              conversationId: conv(f),
+              deploymentId: f.deployment.id,
+            },
+            deps(),
+          ),
+        ).toMatchObject({ kind: "applied", finalState: "WAITING_FOR_INPUT" });
+        const s = await liveSession(f);
+        expect(s).toMatchObject({ state: "WAITING_FOR_INPUT", last_consumed_token: k1 });
+        return { f, session: s, k1, k2: s.awaiting_token as string };
+      }
+      const at = (ms: number) => async () => new Date(ms);
+      /** A tap carrying `token` whose input is a second old now, run at `input + ageMs`. */
+      async function tapAt(fx: Fx, token: string, key: string, ageMs: number, mutation?: string) {
+        const input = new Date(Date.now() - 1_000);
+        const tr = await trigger(fx, {
+          type: "INTERACTIVE",
+          body: key,
+          content: replyContent(token, key),
+          inputAt: input,
+        });
+        mutate.name = mutation ?? null;
+        const summary = await run(tr.id, { readClock: at(input.getTime() + ageMs) });
+        mutate.name = null;
+        return { tr, summary };
+      }
+      const LIMIT = 10 * MIN;
+
+      it("ends stale_trigger (not duplicate_reply) and writes nothing; at exactly maxInputAge the same repeat is an ordinary duplicate; the valid tap still works", async () => {
+        const { f, session, k1, k2 } = await consumedTapWorld();
+        const s0 = await rowJson("bot_sessions", session.id as string);
+        const events0 = await eventsOf(session.id as string);
+
+        const stale = await tapAt(f, k1, "a", LIMIT + 1);
+        ok(stale.summary, "IGNORED", "stale_trigger");
+        expect(await rowJson("bot_sessions", session.id as string)).toEqual(s0);
+        expect(await eventsOf(session.id as string)).toEqual(events0);
+        expect(await requestsOf(f)).toHaveLength(2);
+        expect(await triggerRow(t, stale.tr.id)).toMatchObject({
+          status: "IGNORED",
+          attempts: 1,
+          deferrals: 0,
+          claim_token: null,
+          last_error_code: null,
+        });
+
+        const boundary = await tapAt(f, k1, "a", LIMIT);
+        ok(boundary.summary, "IGNORED", "duplicate_reply"); // exactly 10:00 is processed: an ordinary duplicate, uncounted
+        expect(await rowJson("bot_sessions", session.id as string)).toEqual(s0);
+        expect(await eventsOf(session.id as string)).toEqual(events0);
+
+        const valid = await tapAt(f, k2, "ok", 1_000);
+        ok(valid.summary, "PROCESSED", "input_accepted");
+        expect(await liveSession(f)).toMatchObject({
+          state: "COMPLETED",
+          end_reason: "flow_end",
+          last_consumed_token: k2,
+        });
+      });
+
+      it("MUTATION (the WAITING_FOR_INPUT exemption reinstated): the stale repeat becomes duplicate_reply, and a stale valid tap is consumed; the real check ends both stale_trigger", async () => {
+        async function scenario(mutation?: string) {
+          await truncate();
+          const w = await consumedTapWorld();
+          const repeat = await tapAt(w.f, w.k1, "a", LIMIT + 1, mutation);
+          const s1 = await rowJson("bot_sessions", w.session.id as string);
+          const validTap = await tapAt(w.f, w.k2, "ok", LIMIT + 1, mutation);
+          return { repeat: repeat.summary, validTap: validTap.summary, w, s1 };
+        }
+        const control = await scenario();
+        ok(control.repeat, "IGNORED", "stale_trigger");
+        ok(control.validTap, "IGNORED", "stale_trigger");
+        expect(await rowJson("bot_sessions", control.w.session.id as string)).toEqual(control.s1);
+
+        const mutant = await scenario("continuation_exemption");
+        ok(mutant.repeat, "IGNORED", "duplicate_reply"); // DETECTED
+        ok(mutant.validTap, "PROCESSED", "input_accepted"); // DETECTED: a stale tap consumed the token
+        expect(await liveSession(mutant.w.f)).toMatchObject({ last_consumed_token: mutant.w.k2 });
+      });
+    });
+
+    // ===================================================================== E-HOURLY: created_at is the transaction start
+
+    describe("E-HOURLY: created_at is the creating transaction's start (AC-5)", () => {
+      const DEFAULT_SQL =
+        "select pg_get_expr(d.adbin, d.adrelid) e from pg_attrdef d join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum where d.adrelid = 'outbound_requests'::regclass and a.attname = 'created_at'";
+
+      /**
+       * A real T1 start whose request insert is held back by a real PostgreSQL lock: another transaction holds the account row
+       * FOR UPDATE, so T1 (which takes it FOR SHARE at K.1 step 7, before its decision clock and before the insert) waits. The
+       * marker is the database clock read while T1 is provably blocked.
+       */
+      async function delayedStart() {
+        const f = await fixture();
+        const tr = await trigger(f);
+        const account = await barriers.hold(
+          "select id from whatsapp_accounts where id = $1 for update",
+          [f.w.account.id],
+        );
+        let txStart = "";
+        let decision: Date | null = null;
+        const running = barriers.settle(
+          run(tr.id, {
+            hooks: {
+              afterTriggerLock: async (tx) => {
+                txStart = (
+                  await tx.execute<{ t: string }>(sql`select transaction_timestamp()::text t`)
+                ).rows[0]!.t;
+              },
+              afterDecisionClock: async (_tx, clock) => {
+                decision = clock;
+              },
+            },
+          }),
+        );
+        const blocked = await barriers.waitUntilBlocked(account.pid);
+        expect(await barriers.blockersOf(blocked)).toEqual([account.pid]);
+        const marker = (await one("select clock_timestamp()::text t")).t as string;
+        await account.release();
+        const result = await running;
+        expect(result.ok && result.value).toMatchObject({
+          kind: "finished",
+          outcome: "session_started",
+        });
+        const session = await liveSession(f);
+        const [request] = await requestsOf(f);
+        const facts = await one(
+          `select r.created_at = $2::timestamptz created_is_tx_start,
+                  r.created_at < $3::timestamptz created_before_marker,
+                  extract(epoch from ($3::timestamptz - r.created_at)) * 1000 gap_ms,
+                  floor(extract(epoch from r.created_at) * 1000)::float8 created_ms,
+                  floor(extract(epoch from $3::timestamptz) * 1000)::float8 marker_ms,
+                  r.dispatch_deadline - interval '120 seconds' >= date_trunc('milliseconds', $3::timestamptz) deadline_after_marker,
+                  r.next_attempt_at >= date_trunc('milliseconds', $3::timestamptz) next_attempt_after_marker,
+                  s.send_wait_expires_at - interval '330 seconds' >= date_trunc('milliseconds', $3::timestamptz) send_wait_after_marker
+             from outbound_requests r, bot_sessions s where r.id = $1 and s.id = $4`,
+          [request.id, txStart, marker, session.id],
+        );
+        return { f, request, decision: decision as Date | null, facts };
+      }
+      const countAt = (f: Fx, clockMs: number) =>
+        t.db.transaction((tx) =>
+          countRecentBotRequests(tx as never, f.w.org.id, conv(f), new Date(clockMs), 60 * MIN),
+        );
+
+      it("a request whose insert waited behind a lock carries its transaction's START time, before the decision clock; the rolling hour ages it out by that persisted time", async () => {
+        const x = await delayedStart();
+        expect(x.facts.created_is_tx_start).toBe(true);
+        expect(x.facts.created_before_marker).toBe(true);
+        expect(
+          Number(x.facts.gap_ms),
+          "barrier invalid: no measurable wait",
+        ).toBeGreaterThanOrEqual(2);
+        // the decision clock and every value derived from it come AFTER the wait
+        expect(x.decision!.getTime()).toBeGreaterThanOrEqual(Number(x.facts.marker_ms));
+        expect(x.facts).toMatchObject({
+          deadline_after_marker: true,
+          next_attempt_after_marker: true,
+          send_wait_after_marker: true,
+        });
+        // counted by created_at: included until created_at + 60 min (exclusive lower bound), excluded at marker + 60 min even
+        // though the row was physically inserted after the marker
+        expect(await countAt(x.f, Number(x.facts.created_ms) + 60 * MIN - 1)).toBe(1);
+        expect(await countAt(x.f, Number(x.facts.marker_ms) + 60 * MIN)).toBe(0);
+      });
+
+      it("MUTATION (created_at defaulted to the insert time, in the disposable database only): the same delayed insert is stamped after the wait and counted in the later window", async () => {
+        const original = (await one(DEFAULT_SQL)).e as string;
+        expect(original).toBe("now()");
+        await q(
+          "alter table outbound_requests alter column created_at set default clock_timestamp()",
+        );
+        try {
+          const x = await delayedStart();
+          expect(x.facts.created_is_tx_start).toBe(false); // DETECTED
+          expect(x.facts.created_before_marker).toBe(false);
+          expect(await countAt(x.f, Number(x.facts.marker_ms) + 60 * MIN)).toBe(1); // DETECTED
+        } finally {
+          await q(`alter table outbound_requests alter column created_at set default ${original}`);
+        }
+        expect((await one(DEFAULT_SQL)).e).toBe("now()");
+      });
+    });
+
+    // ====================================================================================== ENG: engine result shapes
+
+    describe("ENG: engine result shapes map to rows the database guards accept", () => {
+      const flow = (start: string, nodes: Json, variables?: Json): Json => ({
+        schemaVersion: 1,
+        name: "Test flow",
+        startNodeId: start,
+        errorNodeId: "fallback",
+        triggers: [{ kind: "keyword", words: ["menu"] }],
+        ...(variables ? { variables } : {}),
+        nodes: {
+          fallback: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
+          ...nodes,
+        },
+      });
+      /** A MESSAGE, then a QUESTION, then an END whose notice interpolates the answer. */
+      const askNameFlow = () =>
+        flow(
+          "welcome",
+          {
+            welcome: { type: "MESSAGE", text: "Hello", next: "ask_name" },
+            ask_name: {
+              type: "QUESTION",
+              text: "Your name?",
+              variable: "name",
+              answer: { kind: "text", min: 1, max: 50 },
+              next: "done",
+              onInvalid: "fallback",
+            },
+            done: { type: "END", message: "Thanks {{name}}" },
+          },
+          { name: { type: "string", maxLength: 50 } },
+        );
+      /** `n` SET_VARIABLE nodes in a row, then an END with a notice: n + 1 nodes entered in the start step. */
+      const chainFlow = (n: number) => {
+        const nodes: Json = { done: { type: "END", message: "Done" } };
+        for (let i = 1; i <= n; i++)
+          nodes[`s${i}`] = {
+            type: "SET_VARIABLE",
+            variable: "v",
+            value: i,
+            next: i === n ? "done" : `s${i + 1}`,
+          };
+        return flow("s1", nodes, { v: { type: "integer" } });
+      };
+      /** The start MESSAGE interpolates a declared variable that no node assigns (a validator warning, publishable). */
+      const missingVariableFlow = () =>
+        flow(
+          "welcome",
+          {
+            welcome: { type: "MESSAGE", text: "Hi {{nick}}", next: "done" },
+            done: { type: "END" },
+          },
+          { nick: { type: "string", maxLength: 20 } },
+        );
+      /** Events of one transaction share created_at (their ids are random), so they are compared as a sorted set. */
+      const eventSet = async (sessionId: string) =>
+        (await eventsOf(sessionId)).map((e) => `${e.kind}:${e.code ?? ""}`).sort();
+      /** The engine's own result for a start of `json` (the shape the runtime receives). */
+      const engineStart = (json: Json) => {
+        const v = validateFlow(json);
+        if (!v.ok || v.config === null) throw new Error("fixture flow invalid");
+        return step(
+          v.config,
+          null,
+          { type: "start" },
+          { nowMs: Date.now(), promptToken: "A".repeat(22) },
+        );
+      };
+
+      it("deferred + changed (F.4): an input arriving while an accepted MESSAGE leads to the next send commits the step and the new request, defers the input, and applies it once after that request is accepted", async () => {
+        const f = await fixture(askNameFlow());
+        const start = await trigger(f, { body: "menu" });
+        ok(await run(start.id), "PROCESSED", "session_started");
+        await dispatchAccepted(); // R1 (the MESSAGE) ACCEPTED, not yet reconciled: S still WAITING_FOR_SEND at step 1
+        const s0 = await liveSession(f);
+        expect(s0).toMatchObject({ state: "WAITING_FOR_SEND", step_seq: 1 });
+
+        const answer = await trigger(f, { body: "Ada" });
+        expect(await run(answer.id)).toMatchObject({ kind: "deferred" });
+        const s1 = await liveSession(f);
+        expect(s1).toMatchObject({
+          state: "WAITING_FOR_SEND",
+          step_seq: 2,
+          revision: Number(s0.revision) + 1,
+          current_node_id: "ask_name",
+          last_input_message_id: start.messageId, // the deferred input is not consumed
+          awaiting: { nodeId: "ask_name", kind: "QUESTION", phase: "QUEUED", optionKeys: [] },
+        });
+        expect((await requestsOf(f)).map((r) => [r.bot_step_seq, r.state])).toEqual([
+          [1, "ACCEPTED"],
+          [2, "QUEUED"],
+        ]);
+        expect(await eventsOf(s1.id as string)).toEqual([]); // a text answer carries no prompt token: no PROMPT_INTERACTION
+        expect(await triggerRow(t, answer.id)).toMatchObject({
+          status: "PENDING",
+          attempts: 0,
+          deferrals: 1,
+          claim_token: null,
+        });
+
+        await dispatchAccepted(); // R2 (the QUESTION) ACCEPTED
+        await makeDue(t, answer.id);
+        ok(await run(answer.id), "PROCESSED", "input_accepted");
+        const end = await liveSession(f);
+        expect(end).toMatchObject({
+          state: "COMPLETED",
+          end_reason: "flow_end",
+          step_seq: 3,
+          terminal_notice_step_seq: 3,
+          last_input_message_id: answer.messageId,
+          variables: { name: "Ada" },
+        });
+        const requests = await requestsOf(f);
+        expect(requests.map((r) => [r.bot_step_seq, r.state])).toEqual([
+          [1, "ACCEPTED"],
+          [2, "ACCEPTED"],
+          [3, "QUEUED"],
+        ]);
+        expect(
+          (await one("select body from messages where id = $1", [requests[2]!.message_id])).body,
+        ).toBe("Thanks Ada");
+        expect((await eventsOf(end.id as string)).map((e) => [e.kind, e.message_id])).toEqual([
+          ["INPUT_ACCEPTED", answer.messageId],
+        ]);
+      });
+
+      it("budget exhausted: 20 automatic nodes plus the END exceed the per-step transition budget; the session ends at the error node with no request and no notice (noticeSkipped ENGINE_ERROR); 19 plus the END complete normally", async () => {
+        const over = engineStart(chainFlow(20));
+        expect(over).toMatchObject({
+          changed: true,
+          outcome: "HANDED_OVER",
+          error: "STEP_TRANSITION_BUDGET",
+          noticeSkipped: "ENGINE_ERROR",
+          effects: [],
+          renderFailures: [],
+        });
+        const f = await fixture(chainFlow(20));
+        ok(await run((await trigger(f, { body: "menu" })).id), "PROCESSED", "session_started");
+        const s = await liveSession(f);
+        expect(s).toMatchObject({
+          state: "HANDED_OVER",
+          end_reason: "error",
+          handover_reason: "engine_error",
+          current_node_id: "fallback",
+          terminal_notice_step_seq: null,
+          awaiting: null,
+          awaiting_token: null,
+        });
+        expect(s.ended_at).toBeTruthy();
+        expect(await requestsOf(f)).toHaveLength(0);
+        expect(await eventSet(s.id as string)).toEqual([
+          "ERROR:step_transition_budget",
+          "HANDED_OVER:engine_error",
+        ]);
+
+        await truncate();
+        expect(engineStart(chainFlow(19))).toMatchObject({ outcome: "COMPLETED" });
+        const g = await fixture(chainFlow(19));
+        ok(await run((await trigger(g, { body: "menu" })).id), "PROCESSED", "session_started");
+        expect(await liveSession(g)).toMatchObject({
+          state: "COMPLETED",
+          end_reason: "flow_end",
+          terminal_notice_step_seq: 1,
+        });
+        expect(await requestsOf(g)).toHaveLength(1);
+      });
+
+      it("renderFailures: a start MESSAGE whose placeholder has no value is rejected at render; the session ends at the error node, nothing is queued and no text is stored", async () => {
+        expect(engineStart(missingVariableFlow())).toMatchObject({
+          outcome: "HANDED_OVER",
+          error: "RENDER_REJECTED",
+          noticeSkipped: "ENGINE_ERROR",
+          effects: [],
+          renderFailures: [{ nodeId: "welcome", field: "text", reason: "VARIABLE_MISSING" }],
+        });
+        const f = await fixture(missingVariableFlow());
+        ok(await run((await trigger(f, { body: "menu" })).id), "PROCESSED", "session_started");
+        const s = await liveSession(f);
+        expect(s).toMatchObject({
+          state: "HANDED_OVER",
+          end_reason: "error",
+          handover_reason: "engine_error",
+          terminal_notice_step_seq: null,
+          variables: {},
+        });
+        expect(await requestsOf(f)).toHaveLength(0);
+        expect(
+          await count("messages", "conversation_id = $1 and direction = 'OUTBOUND'", [conv(f)]),
+        ).toBe(0);
+        // renderFailures have no column: the durable record is the ERROR code, never the template or a value
+        expect(await eventSet(s.id as string)).toEqual([
+          "ERROR:render_rejected",
+          "HANDED_OVER:engine_error",
+        ]);
+      });
+
+      /**
+       * menuFlow at prompt `node` WAITING_FOR_INPUT with the session's send budget used up. FIXTURE: send_count is set to the
+       * engine's 60-send limit directly (sending 60 real messages would also hit the 30-per-hour cap); every other column is the
+       * real session's, reconciled to WAITING_FOR_INPUT by the real reconciler.
+       */
+      async function exhaustedAt(node: "ask" | "ask2") {
+        const f = await fixture();
+        const { session } = await startMenu(f);
+        let token = session.awaiting_token as string;
+        await dispatchAccepted();
+        if (node === "ask2") {
+          const tap = await trigger(f, {
+            type: "INTERACTIVE",
+            body: "a",
+            content: replyContent(token, "a"),
+          });
+          ok(await run(tap.id), "PROCESSED", "input_accepted");
+          await dispatchAccepted();
+        }
+        const live = await liveSession(f);
+        await reconcileSession(
+          t.db as never,
+          {
+            organizationId: f.w.org.id,
+            sessionId: live.id as string,
+            conversationId: conv(f),
+            deploymentId: f.deployment.id,
+          },
+          deps(),
+        );
+        const s = await updateSession(t.pool, live.id as string, "send_count = 60");
+        expect(s).toMatchObject({
+          state: "WAITING_FOR_INPUT",
+          current_node_id: node,
+          send_count: 60,
+        });
+        token = s.awaiting_token as string;
+        return { f, s, token, requests: (await requestsOf(f)).length };
+      }
+
+      it("budget exhausted by sends: the next prompt is refused by SEND_BUDGET; the input is consumed and the session ends at the error node with no request (noticeSkipped ENGINE_ERROR)", async () => {
+        const x = await exhaustedAt("ask");
+        const tap = await trigger(x.f, {
+          type: "INTERACTIVE",
+          body: "a",
+          content: replyContent(x.token, "a"),
+        });
+        ok(await run(tap.id), "PROCESSED", "input_accepted");
+        const s = await liveSession(x.f);
+        expect(s).toMatchObject({
+          state: "HANDED_OVER",
+          end_reason: "error",
+          handover_reason: "engine_error",
+          terminal_notice_step_seq: null,
+          send_count: 60,
+          last_consumed_token: x.token,
+        });
+        expect(await requestsOf(x.f)).toHaveLength(x.requests);
+        // the earlier tap of exhaustedAt is not this session's concern here: only this step's events are new
+        expect((await eventSet(s.id as string)).filter((e) => e !== "INPUT_ACCEPTED:")).toEqual([
+          "ERROR:send_budget",
+          "HANDED_OVER:engine_error",
+        ]);
+        expect(
+          await count(
+            "bot_session_events",
+            "session_id = $1 and message_id = $2 and kind = 'INPUT_ACCEPTED'",
+            [s.id, tap.messageId],
+          ),
+        ).toBe(1);
+      });
+
+      it("noticeSkipped SEND_BUDGET: a valid input reaching an END with a message but no send left completes normally with no notice and no request (not an assessment refusal: no TERMINAL_NOTICE_NOT_QUEUED, no ERROR)", async () => {
+        const x = await exhaustedAt("ask2");
+        const tap = await trigger(x.f, {
+          type: "INTERACTIVE",
+          body: "ok",
+          content: replyContent(x.token, "ok"),
+        });
+        ok(await run(tap.id), "PROCESSED", "input_accepted");
+        const s = await liveSession(x.f);
+        expect(s).toMatchObject({
+          state: "COMPLETED",
+          end_reason: "flow_end",
+          handover_reason: null,
+          current_node_id: "done",
+          terminal_notice_step_seq: null,
+          send_count: 60,
+        });
+        expect(await requestsOf(x.f)).toHaveLength(x.requests);
+        // this step wrote exactly its INPUT_ACCEPTED: no TERMINAL_NOTICE_NOT_QUEUED, no ERROR, no HANDED_OVER
+        expect(
+          (await eventsOf(s.id as string))
+            .filter((e) => e.message_id !== tap.messageId)
+            .every((e) => e.kind === "INPUT_ACCEPTED"),
+        ).toBe(true);
+        expect(
+          (await eventsOf(s.id as string)).filter((e) => e.message_id === tap.messageId),
+        ).toEqual([
+          { kind: "INPUT_ACCEPTED", code: null, message_id: tap.messageId, step_seq: s.step_seq },
+        ]);
+      });
     });
   });
 });
