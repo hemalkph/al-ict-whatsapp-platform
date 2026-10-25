@@ -17,6 +17,8 @@ const root = new URL(".", import.meta.url).pathname;
 const repo = join(root, "../../..");
 const read = (p: string) => readFileSync(p, "utf8");
 const code = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+// A transaction-start clock in SQL (NB-E): now(), current_timestamp, transaction_timestamp(). clock_timestamp() is the clock.
+const TX_START_CLOCK = /\bnow\s*\(\s*\)|current_timestamp|transaction_timestamp/i;
 // 08E-4: the files that reach the database, each ONLY through the SQL primitives of db/ops (no SQL text, driver or ORM here).
 const OPS_IMPORTS: Record<string, readonly string[]> = {
   "trigger-queue.ts": ["@/db/ops/bot-trigger-queue", "@/db/ops/executor"],
@@ -194,9 +196,13 @@ describe("bot runtime core boundaries (08E-1)", () => {
   });
 
   it("the step SQL never reads a transaction-start time, locks an outbound request, or waits for an advisory lock", () => {
+    // E-CLK (08E-8D2): the trigger-queue SQL (claim, finish, deferral, T2, wake/end, terminalization) is runtime SQL too; the
+    // capture primitive (bot-trigger.ts) is the plan's one named exception and stays out of this scan
+    for (const f of ["src/db/ops/bot-trigger-queue.ts"])
+      expect(code(read(join(repo, f))), f).not.toMatch(TX_START_CLOCK);
     for (const f of ["src/db/ops/bot-step.ts", "src/db/ops/bot-session-store.ts"]) {
       const text = code(read(join(repo, f)));
-      expect(text, f).not.toMatch(/\bnow\s*\(\s*\)|current_timestamp|transaction_timestamp/i);
+      expect(text, f).not.toMatch(TX_START_CLOCK);
       expect(text, f).not.toMatch(/pg_advisory_xact_lock\s*\(|pg_advisory_lock\s*\(/);
       expect(text, f).not.toMatch(/FROM outbound_requests[^;`]*FOR (UPDATE|SHARE)/i);
       expect(text, f).not.toMatch(/UPDATE outbound_requests|INSERT INTO outbound_requests/i);
@@ -218,6 +224,22 @@ describe("bot runtime core boundaries (08E-1)", () => {
     ].map((n) => step.indexOf(n));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it("E-CLK: the transaction-start clock pattern matches every forbidden spelling and nothing else; comments are not code", () => {
+    for (const s of [
+      "now()",
+      "NOW ( )",
+      "x = now()",
+      "current_timestamp",
+      "CURRENT_TIMESTAMP",
+      "transaction_timestamp()",
+    ])
+      expect(s).toMatch(TX_START_CLOCK);
+    for (const s of ["clock_timestamp()", "next_attempt_at", "due now", "known()"])
+      expect(s).not.toMatch(TX_START_CLOCK);
+    expect(code("a // now()\nb /* current_timestamp */ c")).not.toMatch(TX_START_CLOCK);
+    expect(code("sql`SELECT now()` // ok")).toMatch(TX_START_CLOCK);
   });
 
   it("enqueueAutomatedMessage has exactly one production importer in the runtime: outbound.ts, and it writes no request state", () => {
