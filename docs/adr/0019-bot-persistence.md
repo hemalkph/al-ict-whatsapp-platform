@@ -79,6 +79,7 @@ Stop Active Sessions (per deployment): `PAUSED`, epoch + 1, every live session `
 3. Session sensitive fields are redacted 30 days after `ended_at`: a development policy, not a legal conclusion; changing it is a reviewed migration replacing `bot_session_redaction_after()`.
 4. Administration is command-line only in 08C, acting as a real, re-validated member, every change audited.
 5. The database stamps `started_at` and `ended_at` (and deployment and version times).
+6. **Owner decision D-1 (2026-10-26, Phase 08F-1):** terminal `bot_triggers` rows (`PROCESSED`, `IGNORED`, `DEAD`) are deleted 14 days after `processed_at` (at or before the cutoff), only by the bounded `bots:retention` job; `PENDING`, claimed, too-recent and locked rows never. The period is `TRIGGER_RETENTION_DAYS` in `src/db/ops/bot-trigger-retention.ts` and a floor inside the delete statement; changing it is a reviewed code change. The 30-day session redaction (item 3) is unchanged. This decision authorizes no production run or schedule.
 
 ## Historical concurrency finding: Phase 08D Stop/acceptance P2 CLOSED
 

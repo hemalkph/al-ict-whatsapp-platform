@@ -11,6 +11,7 @@ import {
 } from "@/db/__tests__/helpers";
 import { readFirstEligibleRows } from "@/db/ops/bot-step";
 import type { DbExecutor } from "@/db/ops/executor";
+import { runRetention } from "../bot-control/retention";
 import { shortenRetention } from "../bot-control/testing";
 import type { StepSummary } from "./context";
 import { sweepOnce } from "./reconcile";
@@ -540,6 +541,43 @@ describe("E-FIRST: interrupted first-message processing (F8) and historical rete
       );
       expect((await k.q("delete from webhook_events where id = $1", [ev.id])).rowCount).toBe(1);
 
+      expect(await firstFacts(f, b.messageId)).toEqual(factsBefore);
+      finished(await k.run(b.id, { readClock: later(31 * MIN) }), "IGNORED", "no_trigger_match");
+      expect((await sessionsOf(f)).map((s) => s.started_by_message_id)).toEqual([a.messageId]);
+    });
+
+    it("H3-job (08F-1): the bots:retention job deleting A's aged terminal trigger leaves the first-message facts, the history and B's outcome unchanged", async () => {
+      const f = await k.fixture(endFirstFlow(undefined, FIRST));
+      const a = await k.trigger(f, { first: true });
+      finished(await k.run(a.id), "PROCESSED", "session_started");
+      const b = await laterTrigger(f, 31 * MIN);
+      const factsBefore = await firstFacts(f, b.messageId);
+      expect(factsBefore).toEqual({
+        firstInRecordHistory: false,
+        noPreviousSessionStart: false,
+        evidenceDefect: false,
+      });
+      const history = async () =>
+        k.one(
+          `select (select jsonb_agg(to_jsonb(m) order by m.id) from messages m where m.conversation_id = $1) messages,
+                  (select jsonb_agg(to_jsonb(s) order by s.id) from bot_sessions s where s.conversation_id = $1) sessions`,
+          [conv(f)],
+        );
+      const historyBefore = await history();
+      // A's trigger is terminal; age it past the approved 14 days (the table has no guard; only the job's statement deletes)
+      await k.q(
+        "update bot_triggers set processed_at = clock_timestamp() - interval '15 days' where id = $1 and status <> 'PENDING'",
+        [a.id],
+      );
+      const report = await runRetention(t.db, { apply: true });
+      expect(report.organizations.find((o) => o.organizationId === f.w.org.id)).toMatchObject({
+        triggers: 1,
+        sessions: 0, // the 30-day session period has not passed
+      });
+      expect(await k.q("select 1 from bot_triggers where id = $1", [a.id])).toMatchObject({
+        rowCount: 0,
+      });
+      expect(await history()).toEqual(historyBefore);
       expect(await firstFacts(f, b.messageId)).toEqual(factsBefore);
       finished(await k.run(b.id, { readClock: later(31 * MIN) }), "IGNORED", "no_trigger_match");
       expect((await sessionsOf(f)).map((s) => s.started_by_message_id)).toEqual([a.messageId]);

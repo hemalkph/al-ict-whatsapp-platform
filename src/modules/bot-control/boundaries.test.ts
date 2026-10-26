@@ -120,6 +120,7 @@ describe("bot-control boundaries", () => {
     );
     expect(users.map((f) => f.slice(repo.length)).sort()).toEqual([
       "/scripts/bots-admin.ts",
+      "/scripts/bots-retention.ts",
       "/src/modules/bot-runtime/continue.ts",
       "/src/modules/bot-runtime/reconcile.ts",
       "/src/modules/bot-runtime/trigger-queue.ts",
@@ -150,11 +151,39 @@ describe("bot-control boundaries", () => {
     }
   });
 
-  it("nothing calls the redaction function yet (the 08F retention job will be its only caller)", () => {
+  it("the bots:retention job is the only production caller of the redaction function (08F-1, V3.2 K.11)", () => {
     const callers = [...walk("src"), ...walk("scripts")].filter(
-      (f) => !/\.(db\.)?test\.ts$/.test(f) && /redact_expired_bot_sessions/.test(read(f)),
+      (f) => !/\.(db\.)?test\.ts$/.test(f) && /redact_expired_bot_sessions/.test(code(read(f))),
     );
-    expect(callers).toEqual([]);
+    expect(callers.map((f) => f.slice(repo.length))).toEqual([
+      "/src/modules/bot-control/retention.ts",
+    ]);
+    const job = sources.find((s) => s.file === "retention.ts")!.text;
+    expect(job.match(/redact_expired_bot_sessions\(/g)).toHaveLength(1);
+    // the job's entry point is the operator script only: no HTTP route, page or worker imports it
+    const importers = [...walk("src"), ...walk("scripts")].filter(
+      (f) => !/\.(db\.)?test\.ts$/.test(f) && /@\/modules\/bot-control\/retention"/.test(read(f)),
+    );
+    expect(importers.map((f) => f.slice(repo.length))).toEqual(["/scripts/bots-retention.ts"]);
+    // and the trigger-deletion helper is used only by the job
+    const deleters = [...walk("src"), ...walk("scripts")].filter(
+      (f) =>
+        !/\.(db\.)?test\.ts$/.test(f) &&
+        !f.endsWith("/src/db/ops/bot-trigger-retention.ts") &&
+        /bot-trigger-retention"/.test(read(f)),
+    );
+    expect(deleters.map((f) => f.slice(repo.length))).toEqual([
+      "/src/modules/bot-control/retention.ts",
+    ]);
+    const anyDelete = [...walk("src"), ...walk("scripts")].filter(
+      (f) =>
+        !/\.(db\.)?test\.ts$/.test(f) &&
+        !/testing\.ts$/.test(f) &&
+        /DELETE\s+FROM\s+bot_triggers/i.test(code(read(f))),
+    );
+    expect(anyDelete.map((f) => f.slice(repo.length))).toEqual([
+      "/src/db/ops/bot-trigger-retention.ts",
+    ]);
   });
 
   it("every write goes through the approved authorization sequence", () => {

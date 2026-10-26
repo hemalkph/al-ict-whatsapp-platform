@@ -28,7 +28,10 @@ describe("test database harness lifecycle", () => {
       await t.close();
       expect(await databaseExists(t.name)).toBe(false);
     }
-  });
+    // 25 sequential CREATE DATABASE + full migrations + DROP cycles: ~5.5 s alone, ~11 s beside eight busy files, and over the
+    // global 30 s when the whole suite shares the server (Phase 08F-1 investigation). A real hang still fails here or in the
+    // harness's own 10 s close/session waits.
+  }, 120_000);
 
   it("close() is idempotent", async () => {
     const t = await createTestDatabase();

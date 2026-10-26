@@ -172,6 +172,15 @@ describe("bot worker boundaries (08E-7)", () => {
         !f.endsWith("/src/db/client.ts") &&
         /sessionSettings/.test(read(f)),
     );
-    expect(users.map((f) => relative(repo, f))).toEqual(["src/modules/bot-worker/run.ts"]);
+    // 08F-1: the retention script bounds its own one-connection pool (lock and statement timeouts), never the worker's settings
+    expect(users.map((f) => relative(repo, f)).sort()).toEqual([
+      "scripts/bots-retention.ts",
+      "src/modules/bot-worker/run.ts",
+    ]);
+    const retention = read(join(repo, "scripts/bots-retention.ts"));
+    expect(retention).not.toMatch(/SESSION_SETTINGS|bot-worker|transaction_timeout/);
+    expect(retention).toMatch(
+      /sessionSettings: \{ lock_timeout: "5s", statement_timeout: "60s" \}/,
+    );
   });
 });
