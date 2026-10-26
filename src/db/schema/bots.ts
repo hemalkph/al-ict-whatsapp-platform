@@ -349,6 +349,10 @@ export const botSessions = pgTable(
     index("bot_sessions_redaction_idx")
       .on(t.organizationId, t.endedAt, t.id)
       .where(sql`${t.redactedAt} IS NULL AND ${t.state} IN (${TERMINAL})`),
+    // Migration 0009 (O-4, Batch 5 EXPLAIN evidence): the runtime's all-state conversation history reads (cooldown, latest
+    // handover, last input, first_message fence) and the per-contact session cap. Sessions are never deleted.
+    index("bot_sessions_conversation_idx").on(t.organizationId, t.conversationId),
+    index("bot_sessions_contact_started_idx").on(t.organizationId, t.contactId, t.startedAt),
     foreignKey({
       name: "bot_sessions_conversation_account_fk",
       columns: [t.organizationId, t.conversationId, t.whatsappAccountId],

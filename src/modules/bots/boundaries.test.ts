@@ -189,7 +189,7 @@ describe("bots module boundaries (08A, 08B)", () => {
     }
   });
 
-  it("leaves migrations 0000-0008 byte-for-byte unchanged; 0008 (bot outbound dispatch) is the latest", () => {
+  it("leaves migrations 0000-0009 byte-for-byte unchanged; 0009 (bot runtime indexes) is the latest", () => {
     const repo = join(root, "../../..");
     const dir = join(repo, "src/db/migrations");
     const migrations = readdirSync(dir)
@@ -217,9 +217,11 @@ describe("bots module boundaries (08A, 08B)", () => {
       "0007_bot_foundation.sql": "98232660a569710ca1dcfe89ce4c59d6d112a9cdf5cb0da25d365e2376dcf6b2",
       "0008_bot_outbound_dispatch.sql":
         "db4b6428481c5b5e4445832534e2a845f769595f82b332dbb1a2171977fac465",
+      "0009_bot_runtime_indexes.sql":
+        "9af653b6c8fbace713faa2252e625997e8b157f70ef3606b82dc3f2b9c6df456",
     });
-    expect(migrations.at(-1)).toBe("0008_bot_outbound_dispatch.sql");
-    expect(migrations).toHaveLength(9);
+    expect(migrations.at(-1)).toBe("0009_bot_runtime_indexes.sql");
+    expect(migrations).toHaveLength(10);
   });
 });
 

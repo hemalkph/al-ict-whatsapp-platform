@@ -64,6 +64,13 @@
       "when": 1792413044845,
       "tag": "0008_bot_outbound_dispatch",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792978546178,
+      "tag": "0009_bot_runtime_indexes",
+      "breakpoints": true
     }
   ]
 }
