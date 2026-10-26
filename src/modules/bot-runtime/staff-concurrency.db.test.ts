@@ -12,8 +12,8 @@ import { deferred, messageFlow, runtimeKit, terminationWatch, type RuntimeFx } f
 //     staff event after the session started decides the session's fate first (J.2 rules 4-6: HANDED_OVER staff_* or COMPLETED
 //     conversation_resolved), whether the flow would send next, end with a notice or end silently, so no BOT request is
 //     created and no later handover barrier is invented. The actual contracts are pinned here (see the per-case comments).
-// The deterministic B4 for submission (claim parked between its bot-rule read and the staff commit) needs a dispatcher test hook
-// and stays unproven here: docs/TESTING_STRATEGY.md and review-conditions.db.test.ts.
+// The deterministic B4 for submission (claim parked between its bot-rule read and the staff commit) is not proved here: it is in
+// staff-takeover-suppression.db.test.ts (08E-9 Batch 3), through the test-only pausing database, with no dispatcher hook.
 
 const DEADLOCK = "40P01";
 type Action = "assign" | "submit" | "resolve";

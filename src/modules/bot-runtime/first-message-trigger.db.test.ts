@@ -10,8 +10,10 @@ import {
   type TestDb,
 } from "@/db/__tests__/helpers";
 import { readFirstEligibleRows } from "@/db/ops/bot-step";
+import type { DbExecutor } from "@/db/ops/executor";
 import { shortenRetention } from "../bot-control/testing";
 import type { StepSummary } from "./context";
+import { sweepOnce } from "./reconcile";
 import {
   endFirstFlow,
   handoverFirstFlow,
@@ -299,6 +301,12 @@ describe("E-FIRST: interrupted first-message processing (F8) and historical rete
       { name: "END without a notice", flow: () => endFirstFlow(undefined, FIRST), notice: false },
       { name: "END with a notice", flow: () => endFirstFlow("Bye", FIRST), notice: true },
       { name: "HANDOVER with a notice", flow: () => handoverFirstFlow(FIRST), notice: true },
+      // 08E-9 Batch 6 (plan F8 l.1100 "END/HANDOVER (including no notice)"): the silent first-node HANDOVER
+      {
+        name: "HANDOVER without a notice",
+        flow: () => handoverFirstFlow(FIRST, null),
+        notice: false,
+      },
     ] as const;
 
     it.each(terminalFirstNodes)(
@@ -337,6 +345,15 @@ describe("E-FIRST: interrupted first-message processing (F8) and historical rete
         expect((await k.events(s!.id as string)).map((e) => e.kind)).toEqual(
           handover ? ["HANDED_OVER"] : [],
         );
+        if (handover)
+          expect(await k.events(s!.id as string)).toMatchObject([
+            { kind: "HANDED_OVER", code: "needs_staff", step_seq: 1, message_id: null },
+          ]);
+        // a real reconciliation sweep afterwards creates, recreates or changes nothing: no notice appears later
+        const settled = await k.sessionJson(s!.id as string);
+        await sweepOnce(t.db as unknown as DbExecutor, k.deps());
+        expect(await k.botRequests(f)).toHaveLength(notice ? 1 : 0);
+        expect(await k.sessionJson(s!.id as string)).toEqual(settled);
         // the notice is delivered, so no BOT output is in flight (H.2 rule 5)
         if (notice)
           await k.dispatchWith(

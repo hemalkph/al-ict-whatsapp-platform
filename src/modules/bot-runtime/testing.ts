@@ -181,10 +181,16 @@ export function endFirstFlow(
   });
 }
 
-/** The start node is a HANDOVER with a notice. */
-export function handoverFirstFlow(trigger: Json = { kind: "keyword", words: ["menu"] }): Json {
+/** The start node is a HANDOVER with a notice, or without one when `message` is null. */
+export function handoverFirstFlow(
+  trigger: Json = { kind: "keyword", words: ["menu"] },
+  message: string | null = "A person will reply.",
+): Json {
   return base([trigger], "staff", {
-    staff: { type: "HANDOVER", reason: "needs_staff", message: "A person will reply." },
+    staff:
+      message === null
+        ? { type: "HANDOVER", reason: "needs_staff" }
+        : { type: "HANDOVER", reason: "needs_staff", message },
   });
 }
 
