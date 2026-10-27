@@ -66,6 +66,26 @@ const control = createHttpServer((req, res) => {
   if (req.method === "GET" && req.url === "/in-flight") {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ inFlight: tracker.inFlight() }));
+  } else if (req.method === "GET" && req.url === "/gates") {
+    // The automation gates as THIS process (and so the application) sees them, after Next has loaded any .env file: the value of every
+    // *_ENABLED flag of the bot and WhatsApp families, and only the NAMES of non-empty credentials, never their values.
+    const named = (prefix) =>
+      Object.keys(process.env)
+        .filter((name) => name.startsWith(prefix) && process.env[name])
+        .sort();
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        enabledFlags: Object.fromEntries(
+          Object.entries(process.env)
+            .filter(([name]) => /^(BOTS|WHATSAPP)_[A-Z_]*_ENABLED$/.test(name))
+            .sort(([x], [y]) => x.localeCompare(y)),
+        ),
+        graphApiVersionSet: Boolean(process.env.WHATSAPP_GRAPH_API_VERSION),
+        nonEmptyBotsNames: named("BOTS_"),
+        nonEmptyTokenNames: [...named("WA_"), ...named("META_ACCESS")],
+      }),
+    );
   } else if (req.method === "GET" && req.url?.startsWith("/attempts/")) {
     const outcome = attempts.get(req.url.slice("/attempts/".length)); // ids are [A-Za-z0-9-]: nothing to decode
     res.statusCode = outcome ? 200 : 404;

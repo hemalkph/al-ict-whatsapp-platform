@@ -19,7 +19,7 @@ export type ServerEnvOptions = {
 
 /** Families of names that could change what the server may do or reach; blanked unless set explicitly below. */
 const SCRUBBED_FAMILIES =
-  /^(WHATSAPP_|META_|WA_|GRAPH_|DATABASE_|TEST_DATABASE_|BOOTSTRAP_|BETTER_AUTH_)/;
+  /^(WHATSAPP_|META_|WA_|GRAPH_|DATABASE_|TEST_DATABASE_|BOOTSTRAP_|BETTER_AUTH_|BOTS_)/;
 
 type Source = Record<string, string | undefined>;
 
@@ -43,7 +43,10 @@ export function serverEnv(source: Source, options: ServerEnvOptions): Record<str
     // the gates: each one explicit, none inherited
     WHATSAPP_OUTBOUND_ENABLED: options.outboundEnabled ? "true" : "false",
     WHATSAPP_LIVE_SEND_ENABLED: "false",
+    // no E2E server runs the bot runtime, whatever the shell or a `.env.local` says (the bot browser specs need it off)
+    BOTS_RUNTIME_ENABLED: "false",
     WHATSAPP_BSUID_RECIPIENT_ENABLED: "false",
+    WHATSAPP_WORKER_ENABLED: "false", // no worker runs here either; a `.env.local` value must not reach the app
     WHATSAPP_ALLOW_PII_REVEAL: "false",
     // no Graph version and no token for the one credential reference the seed uses (a live send could not even be configured)
     WHATSAPP_GRAPH_API_VERSION: "",
@@ -60,4 +63,31 @@ export function serverEnv(source: Source, options: ServerEnvOptions): Record<str
   for (const name of Object.keys(source))
     if (SCRUBBED_FAMILIES.test(name) && !(name in explicit)) blanked[name] = "";
   return { ...blanked, ...explicit };
+}
+
+/** PostgreSQL client overrides (PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGSERVICE, PGOPTIONS ...): they could redirect any pg client. */
+const PG_OVERRIDES = /^PG[A-Z]+$/;
+
+/**
+ * The environment of the harness's own child processes (the production build and the Playwright run, which spawns the test
+ * workers), built ONLY after the disposable database exists: `source` must already carry the run's E2E_* values, and the function
+ * throws (so nothing is launched) when one is missing. It never falls back to an inherited value.
+ *  - the application database is the generated one (DATABASE_URL = E2E_DATABASE_URL); the administrative TEST_DATABASE_ADMIN_URL,
+ *    every other DATABASE_* name, every PG* override, Graph settings, Meta/WhatsApp credentials and BOTS_* names are blanked;
+ *  - the three gates are explicitly "false" (the outbound-queueing composer server gets its own value from serverEnv, which
+ *    Playwright merges over this);
+ *  - blank and explicit values are defined, so a `.env.local` cannot fill any of them in.
+ * Everything else (PATH, HOME, ...) is inherited unchanged.
+ */
+export function childEnv(source: Source): Record<string, string | undefined> {
+  const explicit = serverEnv(source, {
+    outboundEnabled: false,
+    baseURL: required(source, "E2E_BASE_URL"),
+    port: required(source, "E2E_PORT"),
+    controlPort: required(source, "E2E_CONTROL_PORT"),
+  });
+  const blanked: Record<string, string> = {};
+  for (const name of Object.keys(source))
+    if (PG_OVERRIDES.test(name) && !(name in explicit)) blanked[name] = "";
+  return { ...source, ...blanked, ...explicit };
 }

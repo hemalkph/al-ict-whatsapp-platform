@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "tsx scripts/e2e.ts",
+    "test:e2e:bots": "E2E_MODE=bots tsx scripts/e2e.ts --project=chromium-bots",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "db:generate": "drizzle-kit generate",
