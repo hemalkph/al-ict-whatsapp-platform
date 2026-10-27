@@ -312,3 +312,29 @@ describe("operator CLI (no database needed for usage errors)", () => {
     expect((await run(["list", "--bogus"])).code).toBe(2);
   });
 });
+
+describe("operator listings are read-only and bounded (08F-2)", () => {
+  const listings = sources.find((s) => s.file === "listings.ts")!.text;
+  it("only SELECT: no write, lock, retry, redeploy or trigger-resurrection statement", () => {
+    expect(listings).not.toMatch(
+      /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b|FOR (UPDATE|SHARE)|\.insert\(|\.update\(|\.delete\(/,
+    );
+    expect(listings).not.toMatch(/transaction\(|write\(|PENDING/);
+  });
+  it("names no sensitive column: variables, awaiting, tokens, input or message text, payloads, credentials", () => {
+    expect(listings).not.toMatch(
+      /variables|awaiting|token|last_input|started_by_message|\bbody\b|content|payload|credential|secret|draft_config|config\b/i,
+    );
+  });
+  it("every listing authorizes through the bot.read reader first, scopes by the context's organization, and is limit-bounded", () => {
+    const fns = listings.split(/\nexport async function /).slice(1);
+    expect(fns).toHaveLength(3);
+    for (const fn of fns) {
+      expect(fn.indexOf("reader(ctx, deps)")).toBeGreaterThan(-1);
+      expect(fn.indexOf("reader(ctx, deps)")).toBeLessThan(fn.indexOf("parse("));
+      expect(fn).toMatch(/organization_id = \$\{ctx\.organizationId\}::uuid/);
+      expect(fn).toMatch(/LIMIT \$\{q\.limit \+ 1\}/);
+    }
+    expect(listings).toMatch(/LISTING_LIMIT_MAX = 100/);
+  });
+});

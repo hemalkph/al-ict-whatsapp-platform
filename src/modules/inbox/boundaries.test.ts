@@ -35,6 +35,7 @@ const exported = (text: string) =>
 describe("inbox module boundaries", () => {
   it("has exactly the expected production files", () => {
     expect(sources.map((s) => s.file).sort()).toEqual([
+      "bot-indicator.ts",
       "config.ts",
       "cursor.ts",
       "detail.ts",

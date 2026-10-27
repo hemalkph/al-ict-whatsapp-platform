@@ -132,7 +132,22 @@ describe("bots module boundaries (08A, 08B)", () => {
     );
     const production = importers.filter((f) => !/\.(db\.)?test\.ts$|\/testing\.ts$/.test(f));
     expect(production.length).toBeGreaterThan(0); // the scan really finds the bot-control importers
-    for (const f of production) expect(f, f).toMatch(/\/src\/modules\/(bot-control|bot-runtime)\//);
+    // Phase 08F-2: the read-only Inbox bot indicator (ONE file) imports the published handover reason lists, nothing else.
+    const inboxFile = "/src/modules/inbox/bot-indicator.ts";
+    for (const f of production)
+      expect(f, f).toMatch(
+        /\/src\/modules\/(bot-control|bot-runtime)\/|\/src\/modules\/inbox\/bot-indicator\.ts$/,
+      );
+    expect(
+      production
+        .filter((f) => f.includes("/src/modules/inbox/"))
+        .map((f) => f.slice(f.indexOf("/src/"))),
+    ).toEqual([inboxFile]);
+    const inboxAllowed = new Set([
+      "HANDOVER_REASON_CODES",
+      "SYSTEM_HANDOVER_REASONS",
+      "type HandoverReasonCode",
+    ]);
     // bot-runtime's approved surface: the pure trigger matcher and the engine's data types (08E-1), and from 08E-4 the engine
     // itself (`step`), the validator (to load a pinned version) and the engine's result types, as a visible change to this test.
     // The simulator and every other export stay unavailable to the runtime.
@@ -181,7 +196,12 @@ describe("bots module boundaries (08A, 08B)", () => {
           .map((n) => n.trim())
           .filter(Boolean))
           expect(
-            (f.includes("/src/modules/bot-runtime/") ? runtimeAllowed : controlAllowed).has(name),
+            (f.includes("/src/modules/bot-runtime/")
+              ? runtimeAllowed
+              : f.includes("/src/modules/inbox/")
+                ? inboxAllowed
+                : controlAllowed
+            ).has(name),
             `${f}: ${name}`,
           ).toBe(true);
       }

@@ -3,12 +3,13 @@ import { getDb } from "@/db";
 import { assertCan, type AccessContext } from "@/modules/access";
 import { getReplyReadiness } from "@/modules/messaging";
 import { NotFoundError } from "@/shared/errors/http-errors";
+import { BOT_COLUMNS_SQL, botField, botJoinSql, type BotRow } from "./bot-indicator";
 import { contactLabel, safeLine } from "./display";
 import type { InboxDeps } from "./list";
 import { uuid } from "./text";
 import type { ConversationDetail, ConversationStatus, HistoryEntry, TagView } from "./types";
 
-type Row = {
+type Row = BotRow & {
   id: string;
   status: ConversationStatus;
   created_at: Date;
@@ -66,6 +67,7 @@ export async function getConversationDetail(
 ): Promise<ConversationDetail> {
   assertCan(ctx, "conversation.read");
   if (!uuid.safeParse(conversationId).success) throw new NotFoundError();
+  const withBot = ctx.can("bot.read");
   const db = deps.db ?? getDb();
 
   const found = await db.execute<Row>(sql`
@@ -79,12 +81,13 @@ export async function getConversationDetail(
            EXISTS (SELECT 1 FROM contact_bsuids b WHERE b.organization_id = c.organization_id AND b.contact_id = ct.id
                      AND b.retired_at IS NULL) AS has_current_bsuid,
            EXISTS (SELECT 1 FROM contact_bsuids b WHERE b.organization_id = c.organization_id AND b.contact_id = ct.id)
-             AS has_any_bsuid
+             AS has_any_bsuid${withBot ? sql`, ${BOT_COLUMNS_SQL}` : sql``}
     FROM conversations c
     JOIN contacts ct ON ct.organization_id = c.organization_id AND ct.id = c.contact_id
     JOIN whatsapp_accounts a ON a.organization_id = c.organization_id AND a.id = c.whatsapp_account_id
     LEFT JOIN organization_memberships am ON am.organization_id = c.organization_id AND am.id = c.assigned_membership_id
     LEFT JOIN users au ON au.id = am.user_id
+    ${withBot ? botJoinSql(ctx.organizationId) : sql``}
     WHERE c.organization_id = ${ctx.organizationId}::uuid AND c.id = ${conversationId}::uuid`);
   const r = found.rows[0];
   // Another organization's conversation is indistinguishable from a missing one.
@@ -173,5 +176,6 @@ export async function getConversationDetail(
       editContact: ctx.can("contact.edit"),
       manageTags: ctx.can("tag.manage"),
     },
+    ...botField(r, withBot),
   };
 }

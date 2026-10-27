@@ -3,6 +3,13 @@ import { getDb, type Database } from "@/db";
 import { assertCan, type AccessContext } from "@/modules/access";
 import { ValidationError } from "@/shared/errors/http-errors";
 import { decodeCursor, encodeCursor } from "./cursor";
+import {
+  BOT_ATTENTION_SQL,
+  BOT_COLUMNS_SQL,
+  botField,
+  botJoinSql,
+  type BotRow,
+} from "./bot-indicator";
 import { contactLabel, safeLine } from "./display";
 import { listQuerySchema } from "./schemas";
 import type { ConversationListItem, ConversationPage, ConversationStatus } from "./types";
@@ -43,7 +50,7 @@ export function likePattern(term: string, mode: "contains" | "prefix"): string {
   return mode === "contains" ? `%${escaped}%` : `${escaped}%`;
 }
 
-type Row = {
+type Row = BotRow & {
   id: string;
   status: ConversationStatus;
   account_id: string;
@@ -97,9 +104,14 @@ export async function listConversations(
   const q = parsed.data;
   const cursor = q.cursor === undefined ? null : decodeCursor(q.cursor);
   if (q.cursor !== undefined && cursor === null) throw new ValidationError(["cursor"]);
+  // Bot data and the Bot Attention filter need bot.read as well (owner decision D-3): without it the request is refused and no
+  // response field carries bot data.
+  if (q.view === "botAttention") assertCan(ctx, "bot.read");
+  const withBot = ctx.can("bot.read");
   const db = deps.db ?? getDb();
 
   const where: SQL[] = [sql`c.organization_id = ${ctx.organizationId}::uuid`];
+  if (q.view === "botAttention") where.push(BOT_ATTENTION_SQL);
   if (q.accountId) where.push(sql`c.whatsapp_account_id = ${q.accountId}::uuid`);
   if (q.view === "OPEN" || q.view === "PENDING" || q.view === "RESOLVED")
     where.push(sql`c.status = ${q.view}`);
@@ -128,7 +140,7 @@ export async function listConversations(
              ORDER BY (b.retired_at IS NULL) DESC, b.last_seen_at DESC LIMIT 1) AS bsuid,
            c.assigned_membership_id AS assignee_membership_id, au.name AS assignee_name, am.status AS assignee_status,
            lm.direction AS preview_direction, lm.type AS preview_type, lm.body AS preview_body,
-           unread.n AS unread
+           unread.n AS unread${withBot ? sql`, ${BOT_COLUMNS_SQL}` : sql``}
     FROM conversations c
     JOIN contacts ct ON ct.organization_id = c.organization_id AND ct.id = c.contact_id
     JOIN whatsapp_accounts a ON a.organization_id = c.organization_id AND a.id = c.whatsapp_account_id
@@ -140,6 +152,7 @@ export async function listConversations(
       WHERE m.organization_id = c.organization_id AND m.conversation_id = c.id
       ORDER BY m.occurred_at DESC, m.id DESC LIMIT 1) lm ON true
     CROSS JOIN LATERAL (SELECT ${unreadCountSql(ctx.membershipId, ctx.organizationId)} AS n) unread
+    ${withBot ? botJoinSql(ctx.organizationId) : sql``}
     WHERE ${sql.join(where, sql` AND `)}
     ORDER BY c.last_message_at DESC, c.id DESC
     LIMIT ${q.limit + 1}`);
@@ -147,6 +160,7 @@ export async function listConversations(
   const rows = result.rows;
   const page = rows.slice(0, q.limit);
   const items: ConversationListItem[] = page.map((r) => ({
+    ...botField(r, withBot),
     id: r.id,
     status: r.status,
     account: { id: r.account_id, label: safeLine(r.account_label, 40) },

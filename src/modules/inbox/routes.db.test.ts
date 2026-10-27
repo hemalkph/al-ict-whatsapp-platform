@@ -244,6 +244,25 @@ describe("inbox HTTP API", () => {
     ).toBe(400);
   });
 
+  it("the Bot Attention view needs bot.read: VIEWER gets 403 and no bot data, STAFF gets 200 (08F-2, D-3)", async () => {
+    const x = await w();
+    const viewer = await staff(x.org.id, "VIEWER");
+    const member = await staff(x.org.id, "STAFF");
+    const forbidden = await call("list", "GET", "/api/inbox/conversations?view=botAttention", {
+      cookie: viewer.cookie,
+    });
+    expect(forbidden.status).toBe(403);
+    expect(await code(forbidden)).toBe("FORBIDDEN");
+    const plain = await call("list", "GET", "/api/inbox/conversations", { cookie: viewer.cookie });
+    expect(plain.status).toBe(200);
+    expect(JSON.stringify(await plain.json())).not.toMatch(/"bot"/);
+    const ok = await call("list", "GET", "/api/inbox/conversations?view=botAttention", {
+      cookie: member.cookie,
+    });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { items: unknown[] }).items).toEqual([]);
+  });
+
   it("a STAFF member works a conversation end to end through the API: list, open, mark seen, status, assign, note, tag, quick reply", async () => {
     const x = await w();
     const s = await staff(x.org.id);

@@ -47,7 +47,14 @@ export type Initial = {
 };
 type Props = {
   initial: Initial;
-  me: { userId: string; organizationId: string; membershipId: string; name: string; role: string };
+  me: {
+    userId: string;
+    organizationId: string;
+    membershipId: string;
+    name: string;
+    role: string;
+    botRead: boolean;
+  };
   polling: { listMs: number; chatMs: number };
 };
 
@@ -503,6 +510,7 @@ export function InboxApp({ initial, me, polling }: Props) {
           items={items}
           selectedId={selectedId}
           view={query.view}
+          botFilter={me.botRead}
           accountId={query.accountId}
           accounts={initial.accounts}
           searchText={searchText}

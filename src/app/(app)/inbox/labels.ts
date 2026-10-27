@@ -11,6 +11,7 @@ export const VIEW_LABEL = {
   mine: "Assigned to me",
   unassigned: "Unassigned",
   unread: "Unread",
+  botAttention: "Bot attention",
 } as const;
 
 /** Why a free-form reply cannot be queued right now (the Phase 05 policy decides; this only explains it). */

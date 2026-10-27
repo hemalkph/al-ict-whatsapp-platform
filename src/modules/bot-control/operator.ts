@@ -19,6 +19,7 @@ import {
   retireDeployment,
   stopActiveSessions,
 } from "./deployments";
+import { listBotSessions, listDeadTriggers, listDeploymentsPage } from "./listings";
 import { EMERGENCY_STOP_PHRASE } from "./schemas";
 
 // OPERATOR-ONLY command line for bot management (Phase 08C, ADR 0019; owner default: CLI-only administration in 08C). Every
@@ -36,7 +37,9 @@ const COMMANDS = [
   "show <bot-id>",
   "versions <bot-id>",
   "version <version-id>",
-  "deployments",
+  "deployments [--status <status>] [--limit <1-100>] [--cursor <cursor>]",
+  "sessions [--state <state>] [--deployment <deployment-id>] [--limit <1-100>] [--cursor <cursor>]",
+  "dead-triggers [--limit <1-100>] [--cursor <cursor>]",
   "create --key <key> --name <text> [--description <text>] [--apply]",
   "draft <bot-id> --file <config.json> --expected-revision <n> [--apply]",
   "validate <bot-id>",
@@ -147,6 +150,11 @@ export async function runBotsCli(argv: string[], db: Database, out: Out): Promis
         "confirm-key": { type: "string" },
         confirm: { type: "string" },
         apply: { type: "boolean" },
+        limit: { type: "string" },
+        cursor: { type: "string" },
+        state: { type: "string" },
+        status: { type: "string" },
+        deployment: { type: "string" },
       },
     }));
   } catch {
@@ -186,8 +194,45 @@ export async function runBotsCli(argv: string[], db: Database, out: Out): Promis
         out({ ok: true, version: await getVersion(ctx, id, deps) });
         return 0;
       case "deployments":
-        out({ ok: true, deployments: await listDeployments(ctx, deps) });
+      case "sessions":
+      case "dead-triggers": {
+        // Read-only, bounded, bot.read only (08F-2). An unparseable --limit is passed on as NaN and refused by validation.
+        const paging = {
+          ...(str("limit") === undefined ? {} : { limit: int(str("limit")) ?? Number.NaN }),
+          ...(str("cursor") === undefined ? {} : { cursor: str("cursor") }),
+        };
+        if (command === "deployments")
+          out({
+            ok: true,
+            ...(await listDeploymentsPage(
+              ctx,
+              { ...paging, ...(str("status") ? { status: str("status") } : {}) },
+              deps,
+            ).then((p) => ({ deployments: p.items, nextCursor: p.nextCursor }))),
+          });
+        else if (command === "sessions")
+          out({
+            ok: true,
+            ...(await listBotSessions(
+              ctx,
+              {
+                ...paging,
+                ...(str("state") ? { state: str("state") } : {}),
+                ...(str("deployment") ? { deploymentId: str("deployment") } : {}),
+              },
+              deps,
+            ).then((p) => ({ sessions: p.items, nextCursor: p.nextCursor }))),
+          });
+        else
+          out({
+            ok: true,
+            ...(await listDeadTriggers(ctx, paging, deps).then((p) => ({
+              triggers: p.items,
+              nextCursor: p.nextCursor,
+            }))),
+          });
         return 0;
+      }
       case "validate":
         if (!id) return usage("a bot id is required");
         out({ ok: true, validation: await validateDraft(ctx, id, deps) });

@@ -31,9 +31,12 @@ export default async function InboxPage({ searchParams }: PageProps<"/inbox">) {
   const params = await searchParams;
 
   const rawView = one(params.view);
-  const view: InboxView = (INBOX_VIEWS as readonly string[]).includes(rawView ?? "")
-    ? (rawView as InboxView)
-    : "all";
+  // The Bot attention view needs bot.read: for anyone else it is not a view at all.
+  const view: InboxView =
+    (INBOX_VIEWS as readonly string[]).includes(rawView ?? "") &&
+    (rawView !== "botAttention" || ctx.can("bot.read"))
+      ? (rawView as InboxView)
+      : "all";
   const rawQ = (one(params.q) ?? "").trim().slice(0, 64);
   const q = rawQ.length >= 2 ? rawQ : "";
   const rawAccount = one(params.account);
@@ -89,6 +92,7 @@ export default async function InboxPage({ searchParams }: PageProps<"/inbox">) {
           membershipId: ctx.membershipId,
           name: summary.userName,
           role: ctx.role,
+          botRead: ctx.can("bot.read"),
         }}
         polling={{ listMs: config.listPollMs, chatMs: config.chatPollMs }}
       />
