@@ -88,7 +88,7 @@ const isSystemReason = (code: string) =>
 
 const NOTICE_LABEL: Record<BotNoticeOutcome, string> = {
   NONE: "No final message was sent",
-  PENDING: "The final message is still waiting to be sent",
+  PENDING: "The final message has not been confirmed yet",
   ACCEPTED: "The final message was accepted by WhatsApp",
   HELD: "The final message was held and not sent",
   REJECTED: "WhatsApp rejected the final message",

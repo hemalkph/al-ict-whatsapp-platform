@@ -44,6 +44,14 @@ const FALLBACK_PREVIEWS: Record<string, string> = {
   UNKNOWN: "Unsupported message",
 };
 
+/** The body-less preview label, from stored direction: the organization sends INTERACTIVE messages but never BUTTON replies. */
+const fallbackPreview = (direction: "INBOUND" | "OUTBOUND", type: string | null) =>
+  direction === "OUTBOUND" && type === "INTERACTIVE"
+    ? "Interactive message"
+    : direction === "OUTBOUND" && type === "BUTTON"
+      ? "Unsupported message"
+      : (FALLBACK_PREVIEWS[type ?? ""] ?? "Message");
+
 /** LIKE/ILIKE wildcards in staff-typed search text are literal characters, not patterns. */
 export function likePattern(term: string, mode: "contains" | "prefix"): string {
   const escaped = term.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -179,7 +187,7 @@ export async function listConversations(
         : {
             direction: r.preview_direction,
             text:
-              safeLine(r.preview_body, 120) || FALLBACK_PREVIEWS[r.preview_type ?? ""] || "Message",
+              safeLine(r.preview_body, 120) || fallbackPreview(r.preview_direction, r.preview_type),
           },
     assignee: r.assignee_membership_id
       ? {

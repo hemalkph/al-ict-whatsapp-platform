@@ -31,7 +31,15 @@ const deploymentsInput = z.strictObject({
   status: z.enum(BOT_DEPLOYMENT_STATUSES).optional(),
 });
 
-const timeKey = z.tuple([z.string().regex(TS), uuid]);
+// The regex fixes the format; the round trip through Date rejects impossible calendar values (month 13, Feb 30, Feb 29 in a
+// common year, hour 24), which Date rolls over instead. Date holds milliseconds, so the check uses the first 23 characters and
+// the microseconds stay in the original string.
+const calendarValid = (s: string) => {
+  const ms = `${s.slice(0, 23)}Z`;
+  const d = new Date(ms);
+  return !Number.isNaN(d.getTime()) && d.toISOString() === ms;
+};
+const timeKey = z.tuple([z.string().regex(TS).refine(calendarValid), uuid]);
 const deploymentKey = z.tuple([uuid, z.number().int().min(1).max(1000), uuid]);
 
 const encode = (key: readonly unknown[]) => Buffer.from(JSON.stringify(key)).toString("base64url");

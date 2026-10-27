@@ -151,8 +151,7 @@ Final Phase 08E-0 acceptance reconciliation supersedes the earlier 08E-0.1 OPEN 
 **Remaining nonblocking findings and requirements (not closed by acceptance):**
 
 - **CONFIRMED, nonblocking:** RT7e can log outbound.unknown_outcome/accepted_but_not_recorded even when COMMIT succeeded, the request remains ACCEPTED with its wamid, and the zero-row fallback returns fence_lost. Track a later narrowly scoped dispatcher logging fix; separate owner authorization and independent review are required before changing production behavior.
-- BOT hold-reason wording improvements remain deferred to **Phase 08F**.
-- Malformed outbound interactive-message labeling remains deferred to **Phase 08F**.
+- BOT hold-reason wording and malformed outbound interactive-message labeling: implemented in Phase 08F-3 (uncommitted, awaiting independent review); see [PHASE_08F_ACCEPTANCE.md](PHASE_08F_ACCEPTANCE.md). Browser-level confirmation is still pending.
 - Phase 08E runtime concurrency and recovery regressions, including timeout/pool recovery proof obligations, remain required; accepting 08E-0 does not implement or verify the runtime.
 - The accepted post-final-authorization transport window (blocker 42) remains a limitation; a previously authorized attempt cannot be recalled. Acceptance-record latency, single-role/application boundaries and application-clock limits in ADR 0020 also remain.
 - Future retention must preserve first-message historical evidence: eligible message identity/direction/type/created_at headers, including messages that never started a session, plus immutable session start evidence. Deleting/reclassifying it requires a reviewed durable replacement first.

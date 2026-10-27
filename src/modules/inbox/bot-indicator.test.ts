@@ -105,6 +105,15 @@ describe("bot indicator mapping", () => {
     expect(toBotIndicator(row({ bs_has_notice: false }))!.notice).toBeNull();
   });
 
+  it("QUEUED and SENDING share a notice label that claims neither sent nor unsent", () => {
+    for (const state of ["QUEUED", "SENDING"]) {
+      const label = toBotIndicator(row({ bs_has_notice: true, bs_notice_state: state }))!.notice!
+        .label;
+      expect(label).toBe("The final message has not been confirmed yet");
+      expect(label).not.toMatch(/waiting to be sent/i);
+    }
+  });
+
   it("a COMPLETED session can still warn about its notice; redaction only sets a flag", () => {
     const i = toBotIndicator(
       row({

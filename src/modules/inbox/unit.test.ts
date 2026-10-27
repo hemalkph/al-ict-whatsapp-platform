@@ -88,15 +88,19 @@ describe("contact labels", () => {
 
 describe("message descriptions", () => {
   it("text is text; media and unknown types get safe placeholders; nothing exposes raw JSON or URLs", () => {
-    expect(describeMessage({ type: "TEXT", body: "hi", content: null })).toEqual({
+    expect(
+      describeMessage({ direction: "INBOUND", type: "TEXT", body: "hi", content: null }),
+    ).toEqual({
       text: "hi",
       placeholder: null,
     });
-    expect(describeMessage({ type: "TEXT", body: null, content: null }).placeholder).toBe(
-      "Empty message",
-    );
+    expect(
+      describeMessage({ direction: "INBOUND", type: "TEXT", body: null, content: null })
+        .placeholder,
+    ).toBe("Empty message");
     expect(
       describeMessage({
+        direction: "INBOUND",
         type: "IMAGE",
         body: "caption",
         content: { media: { id: "secret-media" } },
@@ -104,6 +108,7 @@ describe("message descriptions", () => {
     ).toEqual({ text: "caption", placeholder: "Photo" });
     expect(
       describeMessage({
+        direction: "INBOUND",
         type: "CONTACT",
         body: null,
         content: { contacts: [{ phones: ["0771111111"] }] },
@@ -111,6 +116,7 @@ describe("message descriptions", () => {
     ).toEqual({ text: null, placeholder: "Shared contact card" });
     expect(
       describeMessage({
+        direction: "INBOUND",
         type: "WHATEVER_NEW",
         body: null,
         content: { url: "https://x.example/private" },
@@ -118,6 +124,7 @@ describe("message descriptions", () => {
     ).toEqual({ text: null, placeholder: "Unsupported message" });
     expect(
       describeMessage({
+        direction: "INBOUND",
         type: "TEMPLATE",
         body: null,
         content: { template: { name: "fees_reminder" }, parameters: ["secret"] },
@@ -125,14 +132,20 @@ describe("message descriptions", () => {
     ).toEqual({ text: null, placeholder: "Template: fees_reminder" });
     expect(
       describeMessage({
+        direction: "INBOUND",
         type: "LOCATION",
         body: "Library",
         content: { address: "Main St", latitude: 6.9, longitude: 79.8 },
       }).text,
     ).toBe("Library · Main St");
-    expect(describeMessage({ type: "REACTION", body: null, content: { emoji: "👍" } }).text).toBe(
-      "👍",
-    );
+    expect(
+      describeMessage({
+        direction: "INBOUND",
+        type: "REACTION",
+        body: null,
+        content: { emoji: "👍" },
+      }).text,
+    ).toBe("👍");
   });
 
   it("attachments expose metadata only, with a default state for anything unexpected", () => {
@@ -356,7 +369,7 @@ describe("interactive messages in the Inbox: what staff see", () => {
     ],
   };
   const sent = (body: string | null, interactive: unknown) =>
-    describeMessage({ type: "INTERACTIVE", body, content: { interactive } });
+    describeMessage({ direction: "OUTBOUND", type: "INTERACTIVE", body, content: { interactive } });
 
   describe("a bot's outbound buttons and list", () => {
     it("buttons: the body, then the option titles; footer and ids are never shown", () => {
@@ -409,6 +422,7 @@ describe("interactive messages in the Inbox: what staff see", () => {
     it("a button reply and a list reply show the title the customer tapped, never the id or the description", () => {
       expect(
         describeMessage({
+          direction: "INBOUND",
           type: "INTERACTIVE",
           body: "Fees",
           content: { subtype: "button_reply", id: rid("fees"), title: "Fees" },
@@ -416,6 +430,7 @@ describe("interactive messages in the Inbox: what staff see", () => {
       ).toEqual({ text: "Fees", placeholder: "Interactive reply" });
       expect(
         describeMessage({
+          direction: "INBOUND",
           type: "INTERACTIVE",
           body: "ICT Theory",
           content: {
@@ -431,6 +446,7 @@ describe("interactive messages in the Inbox: what staff see", () => {
     it("a reply stored without a body falls back to the stored title", () => {
       expect(
         describeMessage({
+          direction: "INBOUND",
           type: "INTERACTIVE",
           body: null,
           content: { subtype: "button_reply", id: rid("fees"), title: "Fees" },
@@ -441,6 +457,7 @@ describe("interactive messages in the Inbox: what staff see", () => {
     it("a template quick-reply BUTTON shows its text; its payload (an internal campaign key) is never shown", () => {
       expect(
         describeMessage({
+          direction: "INBOUND",
           type: "BUTTON",
           body: "Yes, I am interested",
           content: { payload: "CAMPAIGN_4471_YES", text: "Yes, I am interested" },
@@ -448,40 +465,46 @@ describe("interactive messages in the Inbox: what staff see", () => {
       ).toEqual({ text: "Yes, I am interested", placeholder: "Button reply" });
       expect(
         describeMessage({
+          direction: "INBOUND",
           type: "BUTTON",
           body: null,
           content: { payload: "CAMPAIGN_4471_YES", text: "Yes" },
         }),
       ).toEqual({ text: "Yes", placeholder: "Button reply" });
       expect(
-        describeMessage({ type: "BUTTON", body: null, content: { payload: "CAMPAIGN_4471_YES" } }),
+        describeMessage({
+          direction: "INBOUND",
+          type: "BUTTON",
+          body: null,
+          content: { payload: "CAMPAIGN_4471_YES" },
+        }),
       ).toEqual({ text: null, placeholder: "Button reply" });
     });
   });
 
   describe("malformed and incomplete stored content never throws and never shows raw JSON", () => {
     it.each([
-      ["no content", null, { text: "Hi", placeholder: "Interactive reply" }],
-      ["a non-object content", "oops", { text: "Hi", placeholder: "Interactive reply" }],
+      ["no content", null, { text: "Hi", placeholder: "Interactive message" }],
+      ["a non-object content", "oops", { text: "Hi", placeholder: "Interactive message" }],
       [
         "interactive: a string",
         { interactive: "oops" },
-        { text: "Hi", placeholder: "Interactive reply" },
+        { text: "Hi", placeholder: "Interactive message" },
       ],
       [
         "interactive: null",
         { interactive: null },
-        { text: "Hi", placeholder: "Interactive reply" },
+        { text: "Hi", placeholder: "Interactive message" },
       ],
       [
         "interactive: an array",
         { interactive: ["a"] },
-        { text: "Hi", placeholder: "Interactive reply" },
+        { text: "Hi", placeholder: "Interactive message" },
       ],
       [
         "interactive: a number",
         { interactive: 42 },
-        { text: "Hi", placeholder: "Interactive reply" },
+        { text: "Hi", placeholder: "Interactive message" },
       ],
       ["interactive: {}", { interactive: {} }, { text: "Hi", placeholder: "Interactive message" }],
       [
@@ -505,16 +528,36 @@ describe("interactive messages in the Inbox: what staff see", () => {
         { text: "Hi · A", placeholder: "Interactive message" },
       ],
     ])("%s", (_name, content, expected) => {
-      const r = describeMessage({ type: "INTERACTIVE", body: "Hi", content });
+      const r = describeMessage({
+        direction: "OUTBOUND",
+        type: "INTERACTIVE",
+        body: "Hi",
+        content,
+      });
       expect(r).toEqual(expected);
       expect(`${r.text} ${r.placeholder}`).not.toMatch(/[{}[\]]|"|buttons|sections/);
     });
 
-    // PINNED CURRENT BEHAVIOUR (reported, not changed): a BOT message whose stored `content.interactive` is unusable is
-    // labelled "Interactive reply", the label meant for a CUSTOMER's reply. Unreachable through the approved queue function
-    // (it always stores a valid payload) but reachable for a damaged row.
-    it("pins: an outbound bot message with unusable content is labelled with the customer-reply placeholder", () => {
-      expect(sent("Hi", "oops").placeholder).toBe("Interactive reply");
+    // Phase 08F-3: the label follows the stored direction. A damaged outbound payload is still the organization's message;
+    // an inbound row is a customer's reply even when its content happens to carry an `interactive` key.
+    it("an outbound bot message with unusable content is labelled as a sent message, never as a customer reply", () => {
+      expect(sent("Hi", "oops").placeholder).toBe("Interactive message");
+    });
+
+    it("an inbound interactive message is always a customer reply, whatever its content holds", () => {
+      const r = describeMessage({
+        direction: "INBOUND",
+        type: "INTERACTIVE",
+        body: "Fees",
+        content: { interactive: buttons, subtype: "button_reply", title: "Fees" },
+      });
+      expect(r).toEqual({ text: "Fees", placeholder: "Interactive reply" });
+    });
+
+    it("an outbound BUTTON row is not presented as a customer's button reply", () => {
+      expect(
+        describeMessage({ direction: "OUTBOUND", type: "BUTTON", body: "Yes", content: null }),
+      ).toEqual({ text: null, placeholder: "Unsupported message" });
     });
   });
 
@@ -553,11 +596,13 @@ describe("interactive messages in the Inbox: what staff see", () => {
         sent("Choose a topic", buttons),
         sent("Pick a class", list),
         describeMessage({
+          direction: "INBOUND",
           type: "INTERACTIVE",
           body: "Fees",
           content: { subtype: "button_reply", id: rid("fees"), title: "Fees" },
         }),
         describeMessage({
+          direction: "INBOUND",
           type: "INTERACTIVE",
           body: "ICT Theory",
           content: {
@@ -568,6 +613,7 @@ describe("interactive messages in the Inbox: what staff see", () => {
           },
         }),
         describeMessage({
+          direction: "INBOUND",
           type: "BUTTON",
           body: "Yes",
           content: { payload: "CAMPAIGN_4471_YES", text: "Yes" },
@@ -689,16 +735,49 @@ describe("delivery of a bot's interactive message: every request state and provi
       });
     });
 
-    // PINNED CURRENT BEHAVIOUR (reported, not changed): the bot-only codes have NO curated wording, so staff see the code with
-    // its underscores replaced by spaces ("Not sent: bot epoch superseded."). Readable, never raw JSON or an id, but jargon.
-    it.each(BOT_ONLY)("%s falls back to the code's words", (code) => {
-      expect(HOLD_REASONS[code]).toBeUndefined();
+    // Phase 08F-3: every bot-only code has curated wording; none falls back to the code's underscored words.
+    it.each([
+      ...BOT_ONLY,
+      "account_inactive_before_dispatch",
+      "claim_expired_before_dispatch",
+      "deadline_passed_before_dispatch",
+      "rate_limited",
+    ])("%s has curated wording, not the code's words", (code) => {
+      const reason = HOLD_REASONS[code];
+      expect(reason, code).toBeDefined();
+      expect(reason).not.toContain(code.replace(/_/g, " "));
       expect(view({ requestState: "HELD", holdReason: code })).toEqual({
         phase: "HELD",
         label: "Not sent",
         severity: "warning",
-        detail: `Not sent: ${code.replace(/_/g, " ")}.`,
+        detail: `Not sent: ${reason}.`,
       });
+    });
+
+    it("staff-visible handover states name the person or operator; internal processing never claims a staff action", () => {
+      expect(HOLD_REASONS.staff_took_over).toMatch(/staff member/);
+      expect(HOLD_REASONS.conversation_resolved).toMatch(/resolved/);
+      expect(HOLD_REASONS.bot_stopped).toMatch(/operator/);
+      for (const code of [
+        "bot_epoch_superseded",
+        "bot_step_superseded",
+        "bot_session_ended",
+        "bot_output_suppressed",
+        "bot_send_deadline",
+        "bot_state_unreadable",
+      ])
+        expect(HOLD_REASONS[code], code).not.toMatch(/staff|operator|resolved/);
+    });
+
+    it("bot_epoch_superseded does not claim a restart: it also follows Stop Active Sessions", () => {
+      expect(HOLD_REASONS.bot_epoch_superseded).toBe("this message belongs to an earlier bot run");
+      expect(HOLD_REASONS.bot_epoch_superseded).not.toMatch(/restart/i);
+    });
+
+    it("an unknown code still falls back to its words", () => {
+      expect(view({ requestState: "HELD", holdReason: "brand_new_code" }).detail).toBe(
+        "Not sent: brand new code.",
+      );
     });
 
     it("whatever the code, the held display is a warning that says nothing was sent and exposes no identifier", () => {

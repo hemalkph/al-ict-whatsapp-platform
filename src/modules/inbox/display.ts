@@ -63,7 +63,12 @@ const record = (v: unknown): Record<string, unknown> | null =>
   typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 
 /** What to show for a message: its text, or a safe placeholder naming the type. Never raw JSON, never a URL. */
-export function describeMessage(input: { type: string; body: string | null; content: unknown }): {
+export function describeMessage(input: {
+  direction: "INBOUND" | "OUTBOUND";
+  type: string;
+  body: string | null;
+  content: unknown;
+}): {
   text: string | null;
   placeholder: string | null;
 } {
@@ -86,13 +91,16 @@ export function describeMessage(input: { type: string; body: string | null; cont
     }
     case "INTERACTIVE":
     case "BUTTON": {
-      // An interactive message SENT by a bot (Phase 08D) stores its payload under content.interactive: show its body and the
-      // option titles it offered, never ids. An inbound interactive reply keeps the reply rendering below.
-      const sent = input.type === "INTERACTIVE" ? record(content?.interactive) : null;
-      if (sent) {
-        const rows = Array.isArray(sent.buttons)
+      // The label comes from the stored direction (Phase 08F-3), never from the shape of `content`. The organization can only
+      // send INTERACTIVE messages; a BUTTON message is always a customer's template quick-reply.
+      if (input.direction === "OUTBOUND") {
+        if (input.type === "BUTTON") return { text: null, placeholder: "Unsupported message" };
+        // A message SENT by a bot (Phase 08D) stores its payload under content.interactive: show its body and the option
+        // titles it offered, never ids. A damaged payload still reads as a sent message, with whatever body survives.
+        const sent = record(content?.interactive);
+        const rows = Array.isArray(sent?.buttons)
           ? sent.buttons
-          : Array.isArray(sent.sections)
+          : Array.isArray(sent?.sections)
             ? sent.sections.flatMap((s) => {
                 const rows = record(s)?.rows;
                 return Array.isArray(rows) ? rows : [];
@@ -161,6 +169,25 @@ export const HOLD_REASONS: Record<string, string> = {
   outbound_disabled: "sending is switched off",
   rate_limited_exhausted: "WhatsApp kept asking to slow down",
   send_failed_before_dispatch: "it could not be started",
+  // BOT requests (Phase 08F-3). Staff-visible states first: a person or an operator ended the bot's turn.
+  staff_took_over: "a staff member took over this conversation",
+  conversation_resolved: "the conversation was resolved",
+  bot_stopped: "an operator stopped the bot",
+  // Internal bot processing: the bot moved on, stopped or could not read its own state before this message went out.
+  bot_deployment_inactive: "the bot is no longer running",
+  bot_archived: "the bot is no longer running",
+  bot_epoch_superseded: "this message belongs to an earlier bot run",
+  bot_step_superseded: "the bot had already moved on",
+  bot_session_ended: "the bot conversation had already ended",
+  bot_output_suppressed: "the bot's messages were switched off for this chat",
+  bot_send_deadline: "the bot did not send it in time",
+  bot_state_unreadable: "the bot's records could not be read",
+  bots_runtime_disabled: "the bot is switched off",
+  account_inactive_before_dispatch: "the WhatsApp number is not active",
+  claim_expired_before_dispatch: "it was not sent in time",
+  deadline_passed_before_dispatch: "it was not sent in time",
+  payload_invalid: "the message content could not be used",
+  rate_limited: "WhatsApp asked to slow down",
 };
 
 const reason = (code: string | null) =>

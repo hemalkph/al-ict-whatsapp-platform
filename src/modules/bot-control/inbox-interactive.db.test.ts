@@ -193,6 +193,7 @@ describe("inbox display of bot interactive messages", () => {
       expect(d).toMatchObject({ phase: "HELD", label: "Not sent", severity: "warning" });
       expect(d.detail).toMatch(/^Not sent: /);
       expect(d.detail).not.toMatch(/_/); // never the raw code
+      expect(d.detail).not.toContain(code.replace(/_/g, " ")); // nor its underscores-to-spaces fallback (08F-3)
     });
   });
 
@@ -489,18 +490,41 @@ describe("inbox display of bot interactive messages", () => {
       expect(row.text).toBe(`Menu · AB / ${"T".repeat(24)}`);
     });
 
-    // PINNED CURRENT BEHAVIOUR (reported, not changed): a stored outbound bot message with no body and unusable content is
-    // labelled "Interactive reply", the wording for a CUSTOMER's reply, in the timeline placeholder and the list preview.
-    // Unreachable through the approved queue function (a valid payload always has a non-empty body); reachable for a damaged row.
-    it("pins: a body-less outbound bot message with unusable content carries the customer-reply label", async () => {
+    // Phase 08F-3: the label follows the stored direction, in the timeline placeholder and the list preview.
+    it("a body-less outbound bot message with unusable content is labelled as a sent message", async () => {
       const { row, preview } = await stored("INTERACTIVE", null, null);
       expect(row).toMatchObject({
         direction: "OUTBOUND",
         text: null,
-        placeholder: "Interactive reply",
+        placeholder: "Interactive message",
       });
       expect(row.delivery?.phase).toBe("NONE"); // no request row, so no delivery indicator is invented
-      expect(preview).toEqual({ direction: "OUTBOUND", text: "Interactive reply" });
+      expect(preview).toEqual({ direction: "OUTBOUND", text: "Interactive message" });
+    });
+
+    it("a body-less INBOUND interactive row is a customer reply, even if its content carries an interactive payload", async () => {
+      const { row, preview } = await stored(
+        "INTERACTIVE",
+        null,
+        { interactive: { buttons: [{ title: "X" }] } },
+        "INBOUND",
+      );
+      expect(row).toMatchObject({
+        direction: "INBOUND",
+        text: null,
+        placeholder: "Interactive reply",
+      });
+      expect(preview).toEqual({ direction: "INBOUND", text: "Interactive reply" });
+    });
+
+    it("a stored OUTBOUND BUTTON row is not shown as a customer's button reply", async () => {
+      const { row, preview } = await stored("BUTTON", null, { payload: "CAMPAIGN_4471_YES" });
+      expect(row).toMatchObject({
+        direction: "OUTBOUND",
+        text: null,
+        placeholder: "Unsupported message",
+      });
+      expect(preview).toEqual({ direction: "OUTBOUND", text: "Unsupported message" });
     });
 
     it("a stored button reply with only a payload shows no text and never the payload", async () => {

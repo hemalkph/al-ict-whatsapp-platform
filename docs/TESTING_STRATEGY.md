@@ -213,7 +213,7 @@ The coverage requirements below are retained from the gap analysis, with accepte
 **Preserved nonblocking findings and future proof obligations:**
 
 - **CONFIRMED, nonblocking:** RT7e preserves ACCEPTED/wamid after a successful COMMIT with lost acknowledgement, but the zero-row fallback can log outbound.unknown_outcome/accepted_but_not_recorded before returning fence_lost. Retain this characterization and track a later narrowly scoped logging fix; production changes require separate owner authorization and independent review.
-- BOT hold-reason wording improvements and malformed outbound interactive-message labeling remain deferred to **Phase 08F**. No production dispatcher or Inbox display behavior changes in this documentation task.
+- BOT hold-reason wording and malformed outbound interactive-message labeling: implemented in Phase 08F-3 (uncommitted, awaiting independent review); see [PHASE_08F_ACCEPTANCE.md](PHASE_08F_ACCEPTANCE.md).
 - PostgreSQL 17 verification is implemented in the isolated harness before CREATE DATABASE, with unit checks for accepted/refused versions and pool cleanup. Explicit TEST_DATABASE_ADMIN_URL, local host/user/maintenance-database checks and disposable-only creation/deletion remain required; no DATABASE_URL fallback.
 - Phase 08E runtime concurrency and recovery regressions are still required, including timeout/pool forwarding and termination recovery. Preserve deterministic barriers, real transaction boundaries, FakeTransport-only dispatch and the approved READ COMMITTED SKIP LOCKED protocol; the reviewed Phase 08D P2 stays CLOSED.
 - The accepted post-final-authorization transport window remains an explicit limitation (blocker 42). No exactly-once or recall guarantee is introduced.

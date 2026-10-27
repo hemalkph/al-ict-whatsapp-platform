@@ -96,10 +96,21 @@ export async function listMessages(
 
   const page = result.rows.slice(0, q.limit);
   const messages = page.map((r): TimelineMessage => {
-    const shown = describeMessage({ type: r.type, body: r.body, content: r.content });
-    const parentShown = r.parent_type
-      ? describeMessage({ type: r.parent_type, body: r.parent_body, content: null })
-      : null;
+    const shown = describeMessage({
+      direction: r.direction,
+      type: r.type,
+      body: r.body,
+      content: r.content,
+    });
+    const parentShown =
+      r.parent_type && r.parent_direction
+        ? describeMessage({
+            direction: r.parent_direction,
+            type: r.parent_type,
+            body: r.parent_body,
+            content: null,
+          })
+        : null;
     return {
       id: r.id,
       direction: r.direction,
