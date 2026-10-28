@@ -5,16 +5,30 @@ import type { DbExecutor } from "@/db/ops/executor";
 import { assignConversation } from "@/modules/inbox";
 import type { ReconcileCandidate } from "@/db/ops/bot-session-store";
 import { dbClock } from "@/db/ops/bot-step";
-import { claimNext, executeClaim, type DispatchDeps } from "@/modules/messaging/dispatch";
+import {
+  claimNext,
+  dispatchBatch,
+  executeClaim,
+  type DispatchDeps,
+} from "@/modules/messaging/dispatch";
 import { submitOutboundMessage } from "@/modules/messaging/submit";
 import { FakeTransport, ON, textInput } from "@/modules/messaging/testing";
-import type { SendResult } from "@/modules/messaging/transport";
+import type { SendRequest, SendResult } from "@/modules/messaging/transport";
+import { handleWebhookPost } from "@/modules/whatsapp/handler";
+import { deliveryBytes } from "@/modules/whatsapp/inbound/testing";
+import { processWebhookBatch } from "@/modules/whatsapp/queue/process";
+import { webhookPost } from "@/modules/whatsapp/testing";
+import { buildWebhookWorkerHandlers } from "@/modules/whatsapp/worker/registry";
 import { activateDeployment } from "../bot-control";
 import { BOTS_ON, botWorld, publishedBot, type BotWorld } from "../bot-control/testing";
+import { productionStepDeps } from "../bot-worker/compose";
+import { runSweepLoop, runTriggerLoop } from "../bot-worker/loops";
+import { botWorkerDatabase, preflight } from "../bot-worker/run";
+import { WORKER_ON } from "../bot-worker/testing";
 import type { StepSummary } from "./context";
 import { FlowCache } from "./flow-cache";
 import type { StepDeps } from "./outbound";
-import { reconcileSession, type ReconcileOutcome } from "./reconcile";
+import { reconcileSession, sweepOnce, type ReconcileOutcome } from "./reconcile";
 import { processTrigger } from "./step";
 import { claimTriggers, type ClaimedTrigger } from "./trigger-queue";
 
@@ -693,5 +707,306 @@ export function terminationWatch(pool: TestDb["pool"]) {
       if (expected.length !== 1)
         throw new Error(`expected exactly one termination error, saw ${expected.length}`);
     },
+  };
+}
+
+// ------------------------------------------------------------------------------------------------ Phase 08E-8B closed loop
+// The CLOSED-LOOP kit (plan N.2 E2E), shared by the Student enquiry and General Information closed-loop suites (moved here unchanged from closed-loop.db.test.ts, Phase 08G-1). Every hop is the real application path, configured by EXPLICIT environment objects (never
+// process.env), on the disposable database only:
+//   signed webhook bytes -> handleWebhookPost (real HMAC verification + ingest) -> processWebhookBatch with the registry built
+//   for BOTS_RUNTIME_ENABLED=true (real inbound handler + real trigger capture) -> the bot worker's OWN pool (its J.6 session
+//   settings), its preflight, its production step composition and its real trigger and sweep loops -> dispatchBatch (the real
+//   dispatcher: recovery, claim, final authorization, fenced record) with a FakeTransport that records every payload.
+// The only controlled parts are WHEN each process runs (one pass at a time) and the fake transport's answers. Nothing here can
+// reach Meta: there is no transport but the fake, and the live-send gate is only ever set inside this in-memory config.
+
+const CAPTURE_ON = Object.freeze({ BOTS_RUNTIME_ENABLED: "true" });
+
+export type SentMessage = { readonly request: SendRequest; readonly wamid: string };
+
+export type LoopWorld = {
+  readonly w: BotWorld;
+  readonly bot: { id: string };
+  readonly version: { id: string };
+  readonly deployment: { id: string };
+  /** The account's trusted routing identifiers (as Meta would address the webhook). */
+  readonly pn: string;
+  readonly waba: string;
+  /** The student's WhatsApp number (a fresh contact: the conversation is created by the first webhook). */
+  readonly phone: string;
+};
+
+let loopSeq = 0;
+
+export function closedLoopKit(t: TestDb) {
+  const q = (text: string, params: unknown[] = []) => t.pool.query(text, params);
+  const rows = async (text: string, params: unknown[] = []) =>
+    (await q(text, params)).rows as Record<string, unknown>[];
+  const one = async (text: string, params: unknown[] = []) => (await rows(text, params))[0];
+
+  const handlers = buildWebhookWorkerHandlers(CAPTURE_ON);
+  const worker = botWorkerDatabase({ databaseUrl: t.url, concurrency: 2 });
+  const workerDb = worker.db as unknown as DbExecutor;
+  const production = productionStepDeps(WORKER_ON);
+  let preflighted: Promise<void> | null = null;
+
+  // The fake provider: every call is recorded and accepted with a fresh wamid unless a test scripts another answer.
+  const transport = new FakeTransport();
+  const sent: SentMessage[] = [];
+  transport.fallback = (request) => {
+    const wamid = `wamid.TEST08E8B.${++loopSeq}.${randomUUID().slice(0, 8)}`;
+    sent.push({ request, wamid });
+    return { kind: "accepted", wamid, providerStatus: "accepted", httpStatus: 200 };
+  };
+
+  /** A send-eligible account with `flow` published and deployed; the student is NOT pre-created. */
+  async function world(flow: Record<string, unknown>): Promise<LoopWorld> {
+    const w = await botWorld(t.db);
+    const account = await one(
+      "update whatsapp_accounts set status = 'ACTIVE', credential_ref = 'WA_TOKEN_TEST', archived_at = NULL where id = $1 returning phone_number_id, waba_id",
+      [w.account.id],
+    );
+    const { bot, version } = await publishedBot(t.db, w, flow);
+    const deployment = (
+      await activateDeployment(
+        w.admin.ctx,
+        { botId: bot.id, versionId: version.id, whatsappAccountId: w.account.id, priority: 1 },
+        { db: t.db },
+      )
+    ).value;
+    const phone = `9477${String(Date.now() % 1e7).padStart(7, "0")}${++loopSeq % 10}`;
+    return {
+      w,
+      bot,
+      version,
+      deployment,
+      pn: account!.phone_number_id as string,
+      waba: account!.waba_id as string,
+      phone,
+    };
+  }
+
+  // ---------------------------------------------------------------------------------------- the student's side (webhooks)
+
+  /** Webhook bytes for one student message, exactly as Meta would sign and deliver them. */
+  function studentBytes(x: LoopWorld, message: Record<string, unknown>, id?: string) {
+    return deliveryBytes({
+      pn: x.pn,
+      waba: x.waba,
+      from: x.phone,
+      name: "Student",
+      ...(id === undefined ? {} : { id }),
+      timestamp: new Date(),
+      message,
+    });
+  }
+  const textMessage = (body: string) => ({ type: "text", text: { body } });
+  /** A tap on a captured option: the reply id and title are copied from the payload the fake provider received. */
+  const tapMessage = (
+    option: { id: string; title: string; description?: string },
+    subtype: "button_reply" | "list_reply",
+    promptWamid: string,
+  ) => ({
+    type: "interactive",
+    interactive: { type: subtype, [subtype]: option },
+    context: { from: "15550100001", id: promptWamid },
+  });
+
+  /** POSTs the exact bytes through the real signed webhook route handler (requires META_APP_SECRET stubbed). */
+  async function post(bytes: Uint8Array): Promise<number> {
+    return (await handleWebhookPost(webhookPost(bytes), { db: t.db as never })).status;
+  }
+
+  // ---------------------------------------------------------------------------------------- the three processes, one pass each
+
+  const webhookPass = () => processWebhookBatch(t.db, { handlers });
+
+  /**
+   * The bot worker's real trigger loop until it finds nothing to claim (its idle sleep ends the pass). `over` replaces parts of
+   * the PRODUCTION step composition (test seams for barrier tests only; default: none).
+   */
+  async function triggerPass(
+    over: Partial<StepDeps> = {},
+    concurrency = 2,
+    processDb: DbExecutor = workerDb,
+  ) {
+    const stop = new AbortController();
+    const deps = { ...production, ...over };
+    return runTriggerLoop(
+      {
+        sleep: async () => stop.abort(),
+        now: () => Date.now(),
+        random: () => 0.5,
+        preflight: () => (preflighted ??= preflight(workerDb)),
+        claim: (limit) => claimTriggers(workerDb, limit),
+        process: (claim) => processTrigger(processDb, claim, deps),
+        concurrency,
+      },
+      stop.signal,
+    );
+  }
+
+  /** One sweep of the bot worker's real sweep loop (terminalization, reconciliation, audit). */
+  async function sweepPass(over: Partial<StepDeps> = {}) {
+    const stop = new AbortController();
+    const deps = { ...production, ...over };
+    return runSweepLoop(
+      {
+        sleep: async () => stop.abort(),
+        now: () => Date.now(),
+        random: () => 0.5,
+        preflight: () => (preflighted ??= preflight(workerDb)),
+        sweep: () => sweepOnce(workerDb, deps),
+      },
+      stop.signal,
+    );
+  }
+
+  /** The real dispatcher (dispatchBatch: recoverStuck, claim, final authorization, fenced record) with the fake transport. */
+  const dispatchDeps = (over: Partial<DispatchDeps> = {}): DispatchDeps => ({
+    db: t.db as never,
+    transport,
+    config: BOTS_ON,
+    now: () => new Date(),
+    random: () => 0.5,
+    accountMinIntervalMs: 0,
+    conversationMinIntervalMs: 0,
+    ...over,
+  });
+  /**
+   * The dispatcher's candidate rule is `next_attempt_at <= its clock`, and the application clock is truncated to the
+   * millisecond while the database stamps microseconds. The kit used to compensate with a blind +1 s on the dispatcher's
+   * clock (which also hid any host/container clock difference). The invariant is only "every queued request is already due
+   * on the dispatcher's own clock", so it is awaited explicitly (bounded) and the dispatcher runs on the real clock.
+   */
+  async function untilQueuedDue(ms = 5_000) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const late = await one(
+        "select count(*)::int n from outbound_requests where state = 'QUEUED' and next_attempt_at > $1::timestamptz",
+        [new Date().toISOString()],
+      );
+      if (Number(late!.n) === 0) return;
+      if (Date.now() > deadline) throw new Error("dispatch: a queued request never became due");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  const dispatchPass = async (over: Partial<DispatchDeps> = {}) => {
+    await untilQueuedDue();
+    return dispatchBatch(dispatchDeps(over), { batchSize: 20, concurrency: 1 });
+  };
+
+  /**
+   * Runs webhook worker -> bot worker triggers -> dispatcher -> bot worker sweep until a whole round changes nothing. Fails on
+   * any unrecorded or lost work, so a passing settle means every pass ended cleanly.
+   */
+  async function settle(maxRounds = 30) {
+    for (let round = 0; round < maxRounds; round++) {
+      const w = await webhookPass();
+      const tr = await triggerPass();
+      const d = await dispatchPass();
+      const s = await sweepPass();
+      if (w.failed + w.dead + w.unrecorded + w.leaseLost > 0)
+        throw new Error(`settle: webhook pass failed ${JSON.stringify(w)}`);
+      if (tr.exit !== "stopped" || tr.totals.failed + tr.totals.lostClaims > 0)
+        throw new Error(`settle: trigger pass failed ${JSON.stringify(tr)}`);
+      if (s.exit !== "stopped" || s.totals.failed > 0)
+        throw new Error(`settle: sweep failed ${JSON.stringify(s)}`);
+      if (d.unknown + d.fenceLost + d.recoveredUnknown > 0)
+        throw new Error(`settle: dispatch pass failed ${JSON.stringify(d)}`);
+      if (
+        w.claimed + tr.totals.claimed + d.claimed + s.totals.reconciled + s.totals.terminalized ===
+        0
+      )
+        return round;
+    }
+    throw new Error("settle: the loop did not quiesce");
+  }
+
+  // ---------------------------------------------------------------------------------------- observation
+
+  const conversationOf = async (x: LoopWorld) =>
+    (
+      await one(
+        `select c.id from conversations c join contacts k on k.id = c.contact_id and k.organization_id = c.organization_id
+        where c.organization_id = $1 and k.wa_id = $2`,
+        [x.w.org.id, x.phone],
+      )
+    )?.id as string | undefined;
+  const sessionsOf = (x: LoopWorld) =>
+    rows(
+      `select s.* from bot_sessions s join contacts k on k.id = s.contact_id
+        where s.organization_id = $1 and k.wa_id = $2 order by s.started_at, s.id`,
+      [x.w.org.id, x.phone],
+    );
+  const requestsOf = (x: LoopWorld) =>
+    rows(
+      `select r.* from outbound_requests r join conversations c on c.id = r.conversation_id
+         join contacts k on k.id = c.contact_id
+        where r.organization_id = $1 and k.wa_id = $2 order by r.created_at, r.id`,
+      [x.w.org.id, x.phone],
+    );
+  const triggersOf = (x: LoopWorld) =>
+    rows(
+      `select b.* from bot_triggers b join conversations c on c.id = b.conversation_id join contacts k on k.id = c.contact_id
+        where b.organization_id = $1 and k.wa_id = $2 order by b.created_at, b.id`,
+      [x.w.org.id, x.phone],
+    );
+  const eventsOf = (sessionId: string) =>
+    rows(
+      "select kind, code, message_id, step_seq from bot_session_events where session_id = $1 order by created_at, id",
+      [sessionId],
+    );
+  const inboundOf = (x: LoopWorld) =>
+    rows(
+      `select m.* from messages m join conversations c on c.id = m.conversation_id join contacts k on k.id = c.contact_id
+        where m.organization_id = $1 and k.wa_id = $2 and m.direction = 'INBOUND' order by m.created_at, m.id`,
+      [x.w.org.id, x.phone],
+    );
+  /** The messages the fake provider received for this student, in order. */
+  const sentTo = (x: LoopWorld) => sent.filter((m) => m.request.recipient.id === x.phone);
+
+  /** The options of a captured interactive payload, by title (the real ids the student's app would send back). */
+  function optionsOf(m: SentMessage) {
+    if (m.request.message.type !== "interactive")
+      throw new Error("optionsOf: not an interactive message");
+    const p = m.request.message.payload;
+    const list =
+      p.kind === "buttons"
+        ? p.buttons
+        : p.sections.flatMap((s) => s.rows as { id: string; title: string }[]);
+    return new Map(list.map((o) => [o.title, o]));
+  }
+
+  return {
+    q,
+    rows,
+    one,
+    world,
+    studentBytes,
+    textMessage,
+    tapMessage,
+    post,
+    webhookPass,
+    triggerPass,
+    sweepPass,
+    dispatchDeps,
+    dispatchPass,
+    settle,
+    transport,
+    sent,
+    sentTo,
+    optionsOf,
+    conversationOf,
+    sessionsOf,
+    requestsOf,
+    triggersOf,
+    eventsOf,
+    inboundOf,
+    workerDb,
+    /** The worker pool's own pg Pool (for terminating one of its backends). */
+    workerPool: (worker.db as unknown as { $client: TestDb["pool"] }).$client,
+    production,
+    close: () => worker.close(),
   };
 }

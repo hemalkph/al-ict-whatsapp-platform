@@ -170,6 +170,99 @@ export function enquiryFlow(): Json {
   };
 }
 
+/**
+ * Phase 08G-1 golden flow: the General Information bot's SHAPE with SYNTHETIC content. Every topic title and answer is test
+ * data (marked "[TEST]" / "[SYNTHETIC TEST ANSWER]"), not real A/L ICT information. It must never be published: the owner has
+ * not yet supplied the real FAQ topics and answers (PHASE_08G-1_APPROVAL_ADDENDUM.md).
+ */
+export const GENERAL_INFO_KEYWORDS = ["info", "faq"] as const;
+export const GENERAL_INFO_TOPIC_KEYS = ["t1", "t2", "t3", "t4"] as const;
+
+export function generalInfoFlow(): Json {
+  const topic = (key: string, title: string, description: string) => ({
+    key,
+    title,
+    description,
+    next: `ans_${key}`,
+  });
+  const answer = (n: number) => ({
+    type: "MESSAGE",
+    text: `[SYNTHETIC TEST ANSWER ${n}] This is placeholder text for automated tests. It is not real A/L ICT information.`,
+    next: "more",
+  });
+  return {
+    schemaVersion: 1,
+    name: "General information (SYNTHETIC TEST)",
+    startNodeId: "welcome",
+    errorNodeId: "error_to_staff",
+    triggers: [{ kind: "keyword", words: [...GENERAL_INFO_KEYWORDS] }],
+    settings: { idleTimeoutMinutes: 30, maxInvalidAttempts: 2 },
+    variables: {},
+    nodes: {
+      welcome: {
+        type: "MESSAGE",
+        text: "Welcome to A/L ICT classes. I can answer common questions. If I don't have the answer, I'll pass you to our staff.",
+        next: "topics",
+      },
+      topics: {
+        type: "LIST",
+        body: "Which topic would you like to know about?",
+        buttonLabel: "Choose a topic",
+        footer: "A/L ICT",
+        options: [
+          topic("t1", "[TEST] Topic one", "Synthetic test topic"),
+          topic("t2", "[TEST] Topic two", "Synthetic test topic"),
+          topic("t3", "[TEST] Topic three", "Synthetic test topic"),
+          topic("t4", "[TEST] Topic four", "Synthetic test topic"),
+          { key: "other", title: "Other question", next: "needs_staff" },
+          { key: "staff", title: "Talk to staff", next: "to_staff" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      ans_t1: answer(1),
+      ans_t2: answer(2),
+      ans_t3: answer(3),
+      ans_t4: answer(4),
+      more: {
+        type: "BUTTONS",
+        body: "Is there anything else I can help with?",
+        options: [
+          { key: "again", title: "Ask another", next: "topics" },
+          { key: "staff", title: "Talk to staff", next: "to_staff" },
+          { key: "done", title: "That's all", next: "bye" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      to_staff: {
+        type: "HANDOVER",
+        reason: "student_requested",
+        message:
+          "Sure. I've passed this chat to our staff. Please wait here for their reply. I can't say how soon.",
+      },
+      needs_staff: {
+        type: "HANDOVER",
+        reason: "needs_staff",
+        message:
+          "I can't help with that here, so I've passed this chat to our staff. Please wait here for their reply. I can't say how soon.",
+      },
+      invalid_to_staff: {
+        type: "HANDOVER",
+        reason: "invalid_input",
+        message:
+          "I couldn't understand your reply, so I've passed this chat to our staff. Please wait here for their reply.",
+      },
+      error_to_staff: {
+        type: "HANDOVER",
+        reason: "error_fallback",
+        message:
+          "Sorry, something went wrong on our side. I've passed this chat to our staff. Please wait here for their reply.",
+      },
+      bye: { type: "END", message: "Thank you. This enquiry is complete." },
+    },
+    layout: {},
+  };
+}
+
 /** A deep copy (fixtures are plain JSON). */
 export const clone = <T>(value: T): T => structuredClone(value);
 
