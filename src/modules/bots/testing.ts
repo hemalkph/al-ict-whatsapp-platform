@@ -263,6 +263,79 @@ export function generalInfoFlow(): Json {
   };
 }
 
+/**
+ * Phase 08G-2 golden flow: the Class Information bot's SHAPE with SYNTHETIC content. Every class name, schedule, format and
+ * joining line is test data (marked "[TEST]" / "[SYNTHETIC TEST CLASS]"), not a real A/L ICT class: the owner has not yet
+ * supplied the real classes (PHASE_08G-1_APPROVAL_ADDENDUM.md). It must never be published. No fee, teacher, venue or link is
+ * written anywhere, so none can be mistaken for a real claim. The shared handover and END nodes are General Information's own.
+ */
+export const CLASS_INFO_KEYWORDS = ["classes", "class"] as const;
+export const CLASS_INFO_CLASS_KEYS = ["c1", "c2", "c3"] as const;
+
+export function classInfoFlow(): Json {
+  const shared = generalInfoFlow().nodes as Record<string, Json>;
+  const cls = (key: string, title: string) => ({
+    key,
+    title,
+    description: "Synthetic test class",
+    next: `cls_${key}`,
+  });
+  const detail = (n: number) => ({
+    type: "MESSAGE",
+    text: `[SYNTHETIC TEST CLASS ${n}]\nSchedule: example day and time (test only)\nFormat: example format (test only)\nWhere or how to join: example only. This is not a real class.`,
+    next: "more",
+  });
+  return {
+    schemaVersion: 1,
+    name: "Class information (SYNTHETIC TEST)",
+    startNodeId: "welcome",
+    errorNodeId: "error_to_staff",
+    triggers: [{ kind: "keyword", words: [...CLASS_INFO_KEYWORDS] }],
+    settings: { idleTimeoutMinutes: 30, maxInvalidAttempts: 2 },
+    variables: {},
+    nodes: {
+      welcome: {
+        type: "MESSAGE",
+        text: "Welcome. Here are the A/L ICT classes we have right now.",
+        next: "class_list",
+      },
+      class_list: {
+        type: "LIST",
+        body: "Which class would you like to know about?",
+        buttonLabel: "Choose a class",
+        footer: "A/L ICT",
+        options: [
+          cls("c1", "[TEST] Class one"),
+          cls("c2", "[TEST] Class two"),
+          cls("c3", "[TEST] Class three"),
+          { key: "other", title: "Class not listed", next: "needs_staff" },
+          { key: "staff", title: "Talk to staff", next: "to_staff" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      cls_c1: detail(1),
+      cls_c2: detail(2),
+      cls_c3: detail(3),
+      more: {
+        type: "BUTTONS",
+        body: "Is there anything else I can help with?",
+        options: [
+          { key: "again", title: "Another class", next: "class_list" },
+          { key: "staff", title: "Talk to staff", next: "to_staff" },
+          { key: "done", title: "That's all", next: "bye" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      to_staff: shared.to_staff!,
+      needs_staff: shared.needs_staff!,
+      invalid_to_staff: shared.invalid_to_staff!,
+      error_to_staff: shared.error_to_staff!,
+      bye: shared.bye!,
+    },
+    layout: {},
+  };
+}
+
 /** A deep copy (fixtures are plain JSON). */
 export const clone = <T>(value: T): T => structuredClone(value);
 
