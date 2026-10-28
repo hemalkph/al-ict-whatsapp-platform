@@ -417,6 +417,62 @@ export function paymentEnquiryFlow(): Json {
 }
 
 /**
+ * Phase 08G-4 golden flow: the Staff Routing bot's SHAPE with SYNTHETIC test content (approved D-12 generic categories,
+ * D-13 category reaches staff only through the handover wording). It must never be published. Each category hands over
+ * directly with wording that names the category, because the six reason codes cannot carry it and the Inbox bot panel
+ * shows no variables. No department, staff name, hours or response time is stated. The shared invalid/error handovers
+ * are General Information's own.
+ */
+export const STAFF_ROUTING_KEYWORDS = ["staff", "agent", "human"] as const;
+
+export function staffRoutingFlow(): Json {
+  const shared = generalInfoFlow().nodes as Record<string, Json>;
+  const handover = (reason: string, what: string) => ({
+    type: "HANDOVER",
+    reason,
+    message: `Thank you. I've passed your ${what} to our staff. Please wait here for their reply. I can't say how soon.`,
+  });
+  return {
+    schemaVersion: 1,
+    name: "Staff routing (SYNTHETIC TEST)",
+    startNodeId: "welcome",
+    errorNodeId: "error_to_staff",
+    triggers: [{ kind: "keyword", words: [...STAFF_ROUTING_KEYWORDS] }],
+    settings: { idleTimeoutMinutes: 30, maxInvalidAttempts: 2 },
+    variables: {},
+    nodes: {
+      welcome: {
+        type: "MESSAGE",
+        text: "Hello. I'll help you reach our staff. First, what is your enquiry about?",
+        next: "reason_menu",
+      },
+      reason_menu: {
+        type: "LIST",
+        body: "Please choose the closest match.",
+        buttonLabel: "Choose one",
+        footer: "A/L ICT",
+        options: [
+          { key: "classes", title: "Class question", next: "h_classes" },
+          { key: "payment", title: "Payment question", next: "h_payment" },
+          { key: "register", title: "Registration", next: "h_register" },
+          { key: "technical", title: "Problem joining class", next: "h_technical" },
+          { key: "other", title: "Something else", next: "h_other" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      h_classes: handover("student_requested", "class question"),
+      h_payment: handover("student_requested", "payment question"),
+      h_register: handover("student_requested", "registration question"),
+      h_technical: handover("student_requested", "problem joining class"),
+      h_other: handover("other", "other question"),
+      invalid_to_staff: shared.invalid_to_staff!,
+      error_to_staff: shared.error_to_staff!,
+    },
+    layout: {},
+  };
+}
+
+/**
  * Test-only payment-claim scanner (08G-3 P3-2). Returns the sentences in which the BOT claims a payment status. It is
  * contextual, not a word ban: a status word counts only beside a payment noun, and a sentence with explicit negation
  * ("not confirmed", "can't confirm") is allowed. Amounts, dates and bank text are NOT claims and are not judged here.
