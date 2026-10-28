@@ -336,6 +336,135 @@ export function classInfoFlow(): Json {
   };
 }
 
+/**
+ * Phase 08G-3 golden flow: the Payment Enquiry bot's SHAPE with SYNTHETIC content. The "how to pay" and "payment dates"
+ * messages are placeholders that say so and instruct nothing: no account, link, merchant, amount or deadline is written
+ * anywhere (PHASE_08G-1_APPROVAL_ADDENDUM.md; D-9/D-10 data still pending). It must never be published. The bot is
+ * enquiry-only: "I have paid" and "Payment problem" hand over, and no message confirms, verifies or requests a payment
+ * artefact. The shared handover and END nodes are General Information's own.
+ */
+export const PAYMENT_ENQUIRY_KEYWORDS = ["payment", "payments", "pay"] as const;
+
+export function paymentEnquiryFlow(): Json {
+  const shared = generalInfoFlow().nodes as Record<string, Json>;
+  return {
+    schemaVersion: 1,
+    name: "Payment enquiry (SYNTHETIC TEST)",
+    startNodeId: "welcome",
+    errorNodeId: "error_to_staff",
+    triggers: [{ kind: "keyword", words: [...PAYMENT_ENQUIRY_KEYWORDS] }],
+    settings: { idleTimeoutMinutes: 30, maxInvalidAttempts: 2 },
+    variables: {},
+    nodes: {
+      welcome: {
+        type: "MESSAGE",
+        text: "Welcome. I can share general payment information. I can't check or confirm payments. Our staff do that.",
+        next: "pay_menu",
+      },
+      pay_menu: {
+        type: "LIST",
+        body: "What do you need help with?",
+        buttonLabel: "Payment options",
+        footer: "A/L ICT",
+        options: [
+          { key: "how", title: "How to pay", next: "pay_how" },
+          { key: "info", title: "Payment dates", next: "pay_info" },
+          { key: "verify", title: "I have paid", next: "verify_staff" },
+          { key: "problem", title: "Payment problem", next: "problem_staff" },
+          { key: "staff", title: "Talk to staff", next: "to_staff" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      pay_how: {
+        type: "MESSAGE",
+        text: "[SYNTHETIC TEST PAYMENT INSTRUCTIONS] This is placeholder text for automated tests. It is not a real payment instruction. Do not make any payment because of this message.\n\nPlease never send card numbers, PINs, passwords or OTP codes in this chat.",
+        next: "more",
+      },
+      pay_info: {
+        type: "MESSAGE",
+        text: "[SYNTHETIC TEST PAYMENT DATES] This is placeholder text for automated tests. It is not a real payment date. Do not rely on it.",
+        next: "more",
+      },
+      verify_staff: {
+        type: "HANDOVER",
+        reason: "needs_staff",
+        message:
+          "Thank you. Only our staff can check a payment and I can't confirm it, so I've passed this chat to them. Please wait here for their reply. I can't say how soon.",
+      },
+      problem_staff: {
+        type: "HANDOVER",
+        reason: "needs_staff",
+        message:
+          "I'm sorry about the problem. I've passed this chat to our staff. Please wait here for their reply. I can't say how soon.",
+      },
+      more: {
+        type: "BUTTONS",
+        body: "Is there anything else I can help with?",
+        options: [
+          { key: "again", title: "Ask another", next: "pay_menu" },
+          { key: "staff", title: "Talk to staff", next: "to_staff" },
+          { key: "done", title: "That's all", next: "bye" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      to_staff: shared.to_staff!,
+      invalid_to_staff: shared.invalid_to_staff!,
+      error_to_staff: shared.error_to_staff!,
+      bye: shared.bye!,
+    },
+    layout: {},
+  };
+}
+
+/**
+ * Test-only payment-claim scanner (08G-3 P3-2). Returns the sentences in which the BOT claims a payment status. It is
+ * contextual, not a word ban: a status word counts only beside a payment noun, and a sentence with explicit negation
+ * ("not confirmed", "can't confirm") is allowed. Amounts, dates and bank text are NOT claims and are not judged here.
+ * shortcut: sentence-level regexes, no grammar; extend the lists when a new claim phrasing is found.
+ */
+const PAY_NOUN = "(?:payments?|transactions?|transfers?|slips?|receipts?)";
+const PAY_STATUS =
+  "(?:received|confirmed|verified|approved|successful(?:ly)?|completed?|processed|cleared|accepted|settled|credited)";
+const CLAIM_PATTERNS = [
+  new RegExp(`\\b${PAY_NOUN}\\b.{0,40}\\b${PAY_STATUS}\\b`), // "Your payment is complete"
+  new RegExp(`\\b${PAY_STATUS}\\b.{0,40}\\b${PAY_NOUN}\\b`), // "We have received your payment"
+  new RegExp(`\\b(?:we|i)\\s+(?:\\w+\\s+)?(?:confirm|verify)\\b.{0,40}\\b${PAY_NOUN}\\b`),
+  /\bthank you for (?:your |the )?payment/,
+  /\byou(?:'ve| have) paid\b/,
+];
+const NEGATION = /\b(?:not|never|cannot|unable|no)\b|n't/;
+
+export function paymentClaimViolations(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .split(/[.!?\n]+/)
+    .map((sentence) => sentence.trim())
+    .filter(
+      (sentence) => !NEGATION.test(sentence) && CLAIM_PATTERNS.some((re) => re.test(sentence)),
+    );
+}
+
+/**
+ * The bot-authored strings of a stored/sent message: a text body, or an interactive body, footer, button label, section
+ * titles and row descriptions. Option and button TITLES are the student's own selectable words ("I have paid") and are
+ * deliberately excluded: choosing one is not a bot claim.
+ */
+export function botAuthoredText(message: Json): string[] {
+  if (message.type === "text") return [message.body as string];
+  const p = (message.payload ?? message) as Json;
+  const out = [p.body, p.footer, p.buttonLabel].filter((x): x is string => typeof x === "string");
+  const rows = [
+    ...((p.buttons as Json[] | undefined) ?? []),
+    ...((p.sections as Json[] | undefined) ?? []).flatMap((s) => {
+      if (typeof s.title === "string") out.push(s.title);
+      return (s.rows as Json[]) ?? [];
+    }),
+  ];
+  for (const r of rows) if (typeof r.description === "string") out.push(r.description);
+  return out;
+}
+
 /** A deep copy (fixtures are plain JSON). */
 export const clone = <T>(value: T): T => structuredClone(value);
 
