@@ -28,7 +28,12 @@ export type ButtonOption = { readonly key: string; readonly title: string; reado
 export type ListOption = ButtonOption & { readonly description?: string };
 
 export type Answer =
-  | { readonly kind: "text"; readonly min?: number; readonly max: number }
+  | {
+      readonly kind: "text";
+      readonly min?: number;
+      readonly max: number;
+      readonly rejectLinks?: true;
+    }
   | { readonly kind: "integer"; readonly min?: number; readonly max?: number }
   | { readonly kind: "yes_no" };
 

@@ -135,3 +135,69 @@ function assessHttps(candidate: string): UrlFinding[] {
   if (unusual) out.push({ code: "URL_HOST_UNUSUAL", context: { host } });
   return out;
 }
+
+/**
+ * Link-like detection for a short free-text ANSWER (a person's name), opt-in via `answer.rejectLinks`. It is deliberately
+ * separate from `scanUrls`: that scanner judges links an author wrote on purpose and misses a bare domain (`example.org`).
+ * Here any link-like shape is refused. Fixed rules, no author-supplied pattern, no lookup. Checked on an NFKC copy with the
+ * ideographic/fullwidth full stops folded to "."; the stored answer is not changed.
+ *   1. `scheme://` for any scheme, or a scheme that works without slashes (javascript:, mailto:, http:, ...).
+ *   2. `www.` ; an `@` between word characters (an email address); a dotted IPv4 address.
+ *   3. A hostname shape: two or more dot-separated labels of letters, digits, marks and hyphens, in any script.
+ *      a. followed by `/`, `?`, `#` or `:port` (a path or port): always link-like;
+ *      b. otherwise link-like when the last label is 2+ letters (any script, so any suffix, listed or not) or an ASCII
+ *         IDN label (`xn--...`, any case), UNLESS it is written as dotted initials and a surname (the exception below).
+ * Initials exception (an intentional data-quality trade-off): TWO OR MORE labels before the last, each one initial (a
+ * single uppercase letter, or one Sinhala/Tamil syllable of at most 3 code points), and the last label name-cased (an
+ * uppercase letter then lowercase letters, or Sinhala/Tamil). So `K.M.Silva`, `K.M.Dev` and `A.B.De` pass, while `T.Co`,
+ * `X.Com`, `x.com`, `example.nz` and a Chinese domain such as `<two CJK letters>.<two CJK letters>` do not.
+ * Consequences: a multi-initial shape such as `A.B.Com` also passes; a single joined initial (`K.Perera`) and joined words
+ * (`Dr.Nimal`, `Nimal.Perera`, `St.John`) are refused and re-prompted (the spaced forms pass). A label of digits only
+ * does not count as a suffix, so `1.5` passes.
+ * shortcut: spaced or bracketed dots (`example dot org`) and other deliberate obfuscation are NOT recognised. This is a
+ * data-quality rule, not a security boundary.
+ */
+const SCHEME_SLASHES = /[a-z][a-z0-9+.\-]*:\/\//i;
+const SCHEME_BARE =
+  /(?<![a-z0-9])(?:javascript|vbscript|data|file|blob|about|mailto|tel|sms|intent|ftp|sftp|ws|wss|http|https):/i;
+const EMAIL = /[\p{L}\p{N}._%+-]@[\p{L}\p{N}-]/u;
+const DOTTED_IPV4 = /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/;
+const LABEL = String.raw`[\p{L}\p{N}][\p{L}\p{N}\p{M}-]*`;
+const HOSTNAME = new RegExp(
+  String.raw`(?<![\p{L}\p{N}\p{M}.\-])${LABEL}(?:\.${LABEL})+(?![\p{L}\p{N}\p{M}\-])`,
+  "gu",
+);
+const AFTER_HOST_IS_URL = /^(?:[/?#]|:\d)/;
+/** 2+ letters in any script, or an ASCII IDN (punycode) label such as `xn--fiqs8s`. */
+const SUFFIX = /^(?:[\p{L}\p{M}]{2,}|xn--[a-z0-9-]+)$/iu;
+const SI_TA = String.raw`[\p{Script=Sinhala}\p{Script=Tamil}]`;
+const INITIAL = new RegExp(String.raw`^(?:\p{Lu}|${SI_TA}{1,3})$`, "u");
+const SURNAME = new RegExp(String.raw`^(?:\p{Lu}[\p{Ll}\p{M}]+|${SI_TA}+)$`, "u");
+
+function hostnameLike(text: string): boolean {
+  for (const match of text.matchAll(HOSTNAME)) {
+    const after = text.slice((match.index ?? 0) + match[0].length);
+    if (AFTER_HOST_IS_URL.test(after)) return true;
+    const labels = match[0].split(".");
+    const last = labels.at(-1)!;
+    if (!SUFFIX.test(last)) continue;
+    const initials =
+      labels.length >= 3 && // two or more initials: `T.Co` / `X.Com` get no exception
+      labels.slice(0, -1).every((l) => INITIAL.test(l)) &&
+      SURNAME.test(last);
+    if (!initials) return true;
+  }
+  return false;
+}
+
+export function looksLikeLink(value: string): boolean {
+  const folded = value.normalize("NFKC").replace(/[\u3002\uff0e\uff61]/g, ".");
+  return (
+    SCHEME_SLASHES.test(folded) ||
+    SCHEME_BARE.test(folded) ||
+    /(?<![\p{L}\p{N}])www\./iu.test(folded) ||
+    EMAIL.test(folded) ||
+    DOTTED_IPV4.test(folded) ||
+    hostnameLike(folded)
+  );
+}

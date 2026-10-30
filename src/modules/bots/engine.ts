@@ -13,6 +13,7 @@ import {
   type SessionState,
 } from "./session";
 import { textProblem } from "./text";
+import { looksLikeLink } from "./urls";
 import type {
   Answer,
   ButtonsNode,
@@ -241,6 +242,7 @@ export function parseAnswer(answer: Answer, text: string): Literal | undefined {
       const value = trimmed.normalize("NFC");
       if (textProblem(value) !== null) return undefined;
       if (value.length < (answer.min ?? 1) || value.length > answer.max) return undefined;
+      if (answer.rejectLinks && looksLikeLink(value)) return undefined;
       return value;
     }
     case "integer": {

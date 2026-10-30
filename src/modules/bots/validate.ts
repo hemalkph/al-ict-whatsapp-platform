@@ -643,13 +643,18 @@ function checkQuestion(
   id: string,
   node: {
     variable: string;
-    answer: { kind: (typeof ANSWER_KINDS)[number]; min?: number; max?: number };
+    answer: {
+      kind: (typeof ANSWER_KINDS)[number];
+      min?: number;
+      max?: number;
+      rejectLinks?: boolean;
+    };
   },
   ctx: Ctx,
 ): Answer | undefined {
   const { c } = ctx;
   const base: ConfigPath = ["nodes", id];
-  const { kind, min, max } = node.answer;
+  const { kind, min, max, rejectLinks } = node.answer;
   let ok = true;
 
   if (!ctx.declared.has(node.variable)) {
@@ -662,6 +667,14 @@ function checkQuestion(
     c.add("VARIABLE_TYPE_MISMATCH", [...base, "answer", "kind"], {
       variable: node.variable,
       variableType: decl.type,
+    });
+    ok = false;
+  }
+
+  if (rejectLinks !== undefined && kind !== "text") {
+    c.add("ANSWER_FIELD_NOT_ALLOWED", [...base, "answer", "rejectLinks"], {
+      field: "rejectLinks",
+      kind,
     });
     ok = false;
   }
@@ -715,7 +728,12 @@ function checkQuestion(
   }
   if (!ok) return undefined;
   return kind === "text"
-    ? { kind, ...(min === undefined ? {} : { min }), max: max! }
+    ? {
+        kind,
+        ...(min === undefined ? {} : { min }),
+        max: max!,
+        ...(rejectLinks ? { rejectLinks: true as const } : {}),
+      }
     : { kind, ...(min === undefined ? {} : { min }), ...(max === undefined ? {} : { max }) };
 }
 

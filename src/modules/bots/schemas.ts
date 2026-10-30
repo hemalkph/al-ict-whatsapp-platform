@@ -145,6 +145,8 @@ export const questionNodeSchema = z.strictObject({
     kind: z.enum(ANSWER_KINDS),
     min: z.number().optional(),
     max: z.number().optional(),
+    /** Text answers only: refuse link-like text (see `looksLikeLink`). Absent means off. */
+    rejectLinks: z.boolean().optional(),
   }),
   next: identifier,
   onInvalid: identifier,

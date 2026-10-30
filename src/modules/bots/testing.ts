@@ -473,6 +473,140 @@ export function staffRoutingFlow(): Json {
 }
 
 /**
+ * Phase 08G-5 golden flow: the New Registration Enquiry bot's SHAPE with SYNTHETIC test content (approved D-14 name, A/L year
+ * and class interest only; D-15 the confirmation message is the consolidated staff-readable summary, beside the student's own replies; D-16 allowed years still pending). It
+ * must never be published. It is an ENQUIRY note for staff, not a registration: nothing is enrolled, paid or created, and no
+ * message claims otherwise. The synthetic years are deliberately far outside any real A/L year. There is no free-text cancel
+ * (the runtime has none): Cancel exists only on the two BUTTONS screens, and at free-text steps the idle timeout applies.
+ * Earlier student replies stay in the conversation timeline; no message promises deletion. Shared handovers are General
+ * Information's own.
+ */
+export const REGISTRATION_ENQUIRY_KEYWORDS = ["register", "registration", "join"] as const;
+export const REGISTRATION_SYNTHETIC_YEARS = { min: 2101, max: 2103 } as const;
+export const REGISTRATION_SYNTHETIC_CLASSES = [
+  ["c1", "[TEST] Class one"],
+  ["c2", "[TEST] Class two"],
+  ["c3", "[TEST] Class three"],
+] as const;
+
+export function registrationEnquiryFlow(): Json {
+  const shared = generalInfoFlow().nodes as Record<string, Json>;
+  return {
+    schemaVersion: 1,
+    name: "Registration enquiry (SYNTHETIC TEST)",
+    startNodeId: "welcome",
+    errorNodeId: "error_to_staff",
+    triggers: [{ kind: "keyword", words: [...REGISTRATION_ENQUIRY_KEYWORDS] }],
+    settings: { idleTimeoutMinutes: 30, maxInvalidAttempts: 2 },
+    variables: {
+      reg_name: { type: "string", sensitive: true, maxLength: 80 },
+      al_year: { type: "integer", sensitive: true },
+      class_pref: { type: "string", sensitive: true, maxLength: 40 },
+    },
+    nodes: {
+      welcome: {
+        type: "MESSAGE",
+        text: "Thank you for your interest in A/L ICT classes. I'll ask you a few short questions so our staff can follow up with you.",
+        next: "consent",
+      },
+      consent: {
+        type: "BUTTONS",
+        body: "This is a preliminary enquiry, not a registration. It does not register you for a class, and no payment is taken here. Your answers are used only for this enquiry and are seen by our staff. Shall we continue?",
+        options: [
+          { key: "go", title: "Continue", next: "ask_name" },
+          { key: "cancel", title: "Cancel", next: "cancelled" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      ask_name: {
+        type: "QUESTION",
+        text: "What is your full name?",
+        variable: "reg_name",
+        answer: { kind: "text", min: 2, max: 80, rejectLinks: true },
+        next: "ask_year",
+        onInvalid: "invalid_to_staff",
+      },
+      ask_year: {
+        type: "QUESTION",
+        text: `Which A/L year are you in? Please send the year as a number, for example ${REGISTRATION_SYNTHETIC_YEARS.min + 1}.`,
+        variable: "al_year",
+        answer: { kind: "integer", ...REGISTRATION_SYNTHETIC_YEARS },
+        next: "ask_class",
+        onInvalid: "invalid_to_staff",
+      },
+      ask_class: {
+        type: "LIST",
+        body: "Which class are you interested in?",
+        buttonLabel: "Choose a class",
+        footer: "A/L ICT",
+        options: [
+          ...REGISTRATION_SYNTHETIC_CLASSES.map(([key, title]) => ({
+            key,
+            title,
+            description: "Synthetic test class",
+            next: `set_${key}`,
+          })),
+          { key: "staff", title: "Talk to staff", next: "to_staff" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      ...Object.fromEntries(
+        REGISTRATION_SYNTHETIC_CLASSES.map(([key, title]) => [
+          `set_${key}`,
+          { type: "SET_VARIABLE", variable: "class_pref", value: title, next: "confirm" },
+        ]),
+      ),
+      confirm: {
+        type: "BUTTONS",
+        body: "Please check your details:\nName: {{reg_name}}\nA/L year: {{al_year}}\nClass: {{class_pref}}\n\nWould you like to hand this enquiry over to our staff for review?",
+        options: [
+          { key: "yes", title: "Yes, hand over", next: "to_review" },
+          { key: "edit", title: "Change answers", next: "ask_name" },
+          { key: "cancel", title: "Cancel", next: "cancelled" },
+        ],
+        onInvalid: "invalid_to_staff",
+      },
+      to_review: {
+        type: "HANDOVER",
+        reason: "needs_staff",
+        message:
+          "Thank you. I've sent your enquiry to our staff. This is not a confirmed registration. They will contact you here. I can't say when.",
+      },
+      cancelled: {
+        type: "END",
+        message:
+          "Your registration enquiry has been cancelled. No registration has been completed.",
+      },
+      to_staff: shared.to_staff!,
+      invalid_to_staff: shared.invalid_to_staff!,
+      error_to_staff: shared.error_to_staff!,
+    },
+    layout: {},
+  };
+}
+
+/**
+ * Test-only registration-claim scanner (08G-5). Returns the sentences that AFFIRM a registration, enrolment, completion,
+ * confirmation or reservation. A sentence with explicit negation ("not a confirmed registration") is allowed.
+ * shortcut: sentence-level regexes, no grammar; extend the patterns when a new claim phrasing is found.
+ */
+const REG_CLAIMS = [
+  /\bregistration\b.{0,30}\b(?:is|was|has been|have been)\b.{0,15}\b(?:complete|completed|successful|confirmed|done|received|accepted|approved)\b/,
+  /\b(?:you(?:'re| are| have been|'ve been)|you've)\s+(?:now\s+)?(?:registered|enrolled|enrolled|confirmed|accepted)\b/,
+  /\b(?:confirmed|accepted|approved|processed)\b.{0,30}\b(?:registration|enrolment|enrollment)\b/,
+  /\b(?:place|seat|spot)\b.{0,20}\b(?:reserved|secured|booked|confirmed)\b/,
+  /\b(?:payment|lead)\b.{0,20}\b(?:received|created|recorded|confirmed)\b/,
+];
+export function registrationClaimViolations(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .split(/[.!?\n]+/)
+    .map((sentence) => sentence.trim())
+    .filter((s) => !NEGATION.test(s) && REG_CLAIMS.some((re) => re.test(s)));
+}
+
+/**
  * Test-only payment-claim scanner (08G-3 P3-2). Returns the sentences in which the BOT claims a payment status. It is
  * contextual, not a word ban: a status word counts only beside a payment noun, and a sentence with explicit negation
  * ("not confirmed", "can't confirm") is allowed. Amounts, dates and bank text are NOT claims and are not judged here.
