@@ -1,6 +1,6 @@
 # Phase 08G-4 definition and acceptance draft (Staff Routing golden flow)
 
-Status: **INDEPENDENT REVIEW: APPROVED FOR ISOLATED CLOSED-LOOP TEST IMPLEMENTATION (no blocking P1/P2).** TEST-ONLY, SYNTHETIC. Owner Git checkpoint: **PENDING**. Production activation: **NOT AUTHORIZED**. PostgreSQL status: **PASSED on the isolated server (second run: 25 of 25, exit 0, about 5 s)**. First run: 25 executed, 20 passed, 5 failed, all in SR-CL-4 (the test asserted a causal order the Inbox does not guarantee); database safety and cleanup passed on both runs. Staff-scoped persistence and retrieval via `listMessages()` is proven by SR-CL-4; browser rendering and real WhatsApp delivery are NOT verified (future integrated Phase 08G obligation). GI-CL-14 remains an outstanding integrated-acceptance obligation (not reopened here).
+Status: **INDEPENDENT REVIEW: APPROVED FOR ISOLATED CLOSED-LOOP TEST IMPLEMENTATION (no blocking P1/P2).** TEST-ONLY, SYNTHETIC. Owner Git checkpoint: **COMMITTED (`506e664` on `origin/Bot-Foundation`; reconciled from Git history in Phase 08G-6)**. Production activation: **NOT AUTHORIZED**. PostgreSQL status: **PASSED on the isolated server (second run: 25 of 25, exit 0, about 5 s)**. First run: 25 executed, 20 passed, 5 failed, all in SR-CL-4 (the test asserted a causal order the Inbox does not guarantee); database safety and cleanup passed on both runs. Staff-scoped persistence and retrieval via `listMessages()` is proven by SR-CL-4; browser rendering and real WhatsApp delivery are NOT verified (future integrated Phase 08G obligation). GI-CL-14 remains an outstanding integrated-acceptance obligation (not reopened here).
 
 ## 1. Implemented flow
 
@@ -28,9 +28,9 @@ Two invalid replies → `invalid_input`. Configured error node → `error_fallba
 
 ## 4. Staff timeline visibility
 
-The handover notice is a terminal-notice BOT message persisted in the conversation, and the student's list selection is an inbound message. Staff identify the category from these two. The reviewer's nonblocking P3 is resolved: the `other` notice now reads "I've passed your other question to our staff. Please wait here for their reply. I can't say how soon.", so all five categories are identifiable from the notice alone (the golden test asserts it). Reason `other` and the list option "Something else" are unchanged. Not claimed: that a department was chosen, a staff member assigned, a reply time, or any payment or registration processed. Persisted-timeline evidence is SR-CL-4 (written, NOT RUN).
+The handover notice is a terminal-notice BOT message persisted in the conversation, and the student's list selection is an inbound message. Staff identify the category from these two. The reviewer's nonblocking P3 is resolved: the `other` notice now reads "I've passed your other question to our staff. Please wait here for their reply. I can't say how soon.", so all five categories are identifiable from the notice alone (the golden test asserts it). Reason `other` and the list option "Something else" are unchanged. Not claimed: that a department was chosen, a staff member assigned, a reply time, or any payment or registration processed. Persisted-timeline evidence is SR-CL-4 (passed on the second PostgreSQL run; see section 7).
 
-## 5. SR-CL scenarios (implemented, NOT RUN)
+## 5. SR-CL scenarios (implemented; PostgreSQL validation passed 25/25 on the second run, see the status line and section 7)
 
 File: `src/modules/bot-runtime/closed-loop-staff-routing.db.test.ts` (reuses `staffRoutingFlow()` and the shared `closedLoopKit`; no new infrastructure). 25 test cases.
 
@@ -65,4 +65,4 @@ L4 no bot-to-bot jump, 30-minute cooldown, 3 sessions per 24 h. L6 no category r
 
 ## 7. Verification state
 
-Database-free: see the report. PostgreSQL: **NOT RUN**. GI-CL-14 (PostgreSQL engine-error evidence) outstanding for integrated Phase 08G acceptance.
+Database-free: see the report. PostgreSQL: **PASSED on the isolated server** — first run 25 executed, 20 passed, 5 failed (all SR-CL-4, an unsupported causal-order assertion; see the SR-CL-4 correction above); second run after that test correction 25/25 passed, exit 0, about 5 s. Database safety and cleanup passed on both runs. (Reconciled in Phase 08G-6 from the status line; this section previously still read "NOT RUN".) GI-CL-14 (PostgreSQL engine-error evidence) outstanding for integrated Phase 08G acceptance.

@@ -1,6 +1,6 @@
 # Phase 08G-3 acceptance (Payment Enquiry golden flow)
 
-Status: **DATABASE VALIDATION PASSED — OWNER GIT CHECKPOINT PENDING.** The database-free work is verified and the isolated PostgreSQL closed-loop run passed (section 5). The owner Git checkpoint (commit) has not happened, so Phase 08G-3 is not closed. **PRODUCTION ACTIVATION: NOT AUTHORIZED.** This document authorizes no further database run, deployment, worker, Meta call, live send or activation.
+Status: **DATABASE VALIDATION PASSED — OWNER GIT CHECKPOINT COMMITTED (`e00b261`).** The database-free work is verified and the isolated PostgreSQL closed-loop run passed (section 5). The owner Git checkpoint is commit `e00b261` on `origin/Bot-Foundation` (status reconciled from Git history in Phase 08G-6; evidence and scope unchanged). **PRODUCTION ACTIVATION: NOT AUTHORIZED.** This document authorizes no further database run, deployment, worker, Meta call, live send or activation.
 
 ## 1. Review and scope
 
@@ -88,6 +88,6 @@ Staff takeover and both suppression orderings, operator Stop and deployment Paus
 | GI-CL-14 (integrated Phase 08G acceptance)                                          | **Pending PostgreSQL evidence.**                                                                                                                                     |
 | PostgreSQL execution of PE-CL-1 to PE-CL-9                                          | **PASSED** (19/19, section 5). Any further run needs separate owner authorization.                                                                                   |
 | Production activation                                                               | **NOT AUTHORIZED.** All live automation gates remain OFF.                                                                                                            |
-| Owner Git checkpoint                                                                | **PENDING.** Nothing staged, committed or pushed.                                                                                                                    |
+| Owner Git checkpoint                                                                | **COMMITTED**: `e00b261` on `origin/Bot-Foundation` (reconciled in Phase 08G-6).                                                                                     |
 
 Any rerun uses the same isolated container, fresh `al_ict_test_*` databases and the approved direct-execution safety preflight, and needs separate owner authorization.

@@ -1,6 +1,7 @@
 # Phase 08G-5 — New Registration Enquiry golden flow (acceptance)
 
-Status: **POSTGRESQL VALIDATION PASSED — OWNER GIT CHECKPOINT PENDING.** Production activation: **NOT AUTHORIZED.**
+Status: **POSTGRESQL VALIDATION PASSED — OWNER GIT CHECKPOINT COMMITTED (`b4f2df6` on `origin/Bot-Foundation`; reconciled from
+Git history in Phase 08G-6).** Production activation: **NOT AUTHORIZED.**
 
 Evidence layers: the implementation (flow, `rejectLinks` contract and boundary, tests) was **independently reviewed** (name-
 validation P2 CLOSED). The PostgreSQL execution in section 5.2 is **developer-reported** run evidence, accepted by the owner.

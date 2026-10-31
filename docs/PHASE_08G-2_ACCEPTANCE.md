@@ -1,6 +1,6 @@
 # Phase 08G-2 acceptance (Class Information golden flow)
 
-Status: **DATABASE VALIDATION PASSED — OWNER GIT CHECKPOINT PENDING.** The database-free work is verified and the isolated PostgreSQL closed-loop run passed (section 5). The owner Git checkpoint (commit) has not happened, so 08G-2 is not closed. This document authorizes no further database run, deployment, worker, Meta call, live send or production activation.
+Status: **DATABASE VALIDATION PASSED — OWNER GIT CHECKPOINT COMMITTED (`f0af1f9`).** The database-free work is verified and the isolated PostgreSQL closed-loop run passed (section 5). The owner Git checkpoint is commit `f0af1f9` on `origin/Bot-Foundation` (status reconciled from Git history in Phase 08G-6; evidence and scope unchanged). This document authorizes no further database run, deployment, worker, Meta call, live send or production activation.
 
 ## 1. Review and scope
 
@@ -61,8 +61,8 @@ Staff takeover and both suppression orderings (H1 to H4, GI-CL-8a/8b), operator 
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | Class Information flow and 28 database-free tests | Verified (unit suite)                                                                                               |
 | CI-CL-1 to CI-CL-8 (14 tests)                     | **PostgreSQL validation passed**                                                                                    |
-| Milestone                                         | **DATABASE VALIDATION PASSED — OWNER GIT CHECKPOINT PENDING**                                                       |
-| Owner Git checkpoint                              | **Pending** (nothing committed)                                                                                     |
+| Milestone                                         | **DATABASE VALIDATION PASSED — OWNER GIT CHECKPOINT COMMITTED**                                                     |
+| Owner Git checkpoint                              | **Committed**: `f0af1f9` on `origin/Bot-Foundation` (reconciled in Phase 08G-6)                                     |
 | GI-CL-14 (SEND_BUDGET integrated evidence)        | **Still pending PostgreSQL evidence**; not passed. The engine-error contract is covered only by the simulator tests |
 | Content                                           | Synthetic, test-only; real class data unapproved                                                                    |
 | Production publication and activation             | **Not authorized**                                                                                                  |
