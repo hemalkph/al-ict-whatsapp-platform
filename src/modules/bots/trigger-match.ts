@@ -71,3 +71,47 @@ export function matchTrigger(
   }
   return null;
 }
+
+/** One deployment as start matching sees it: its bot key (for reporting), its priority and its pinned version's triggers. */
+export type RoutedDeployment = {
+  readonly key: string;
+  readonly priority: number;
+  readonly triggers: readonly Trigger[];
+};
+
+/**
+ * A pair of deployments whose order makes start matching route a message to the wrong bot (owner decision OD-1, 08G-7A):
+ *  - catch_all_first: `first` has a first_message or referral_source trigger and precedes `then`, which has keywords, so a
+ *    keyword sent as a first (or attributed) message starts `first`;
+ *  - shared_keyword: both have a keyword with the same comparison key, so `then` never starts by it.
+ */
+export type RoutingConflict = {
+  readonly kind: "catch_all_first" | "shared_keyword";
+  readonly first: string;
+  readonly then: string;
+};
+
+/**
+ * Every routing conflict among deployments that are matched together (the ACTIVE deployments of one account), in matching
+ * order: ascending priority, as the runtime tries them. Priorities are unique per account, so the key tie-break only keeps
+ * the result deterministic. An empty result means no message can reach a bot other than the one its keyword names.
+ */
+export function routingConflicts(deployments: readonly RoutedDeployment[]): RoutingConflict[] {
+  const ordered = [...deployments].sort(
+    (a, b) => a.priority - b.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+  );
+  const keywords = ordered.map(
+    (d) =>
+      new Set(d.triggers.flatMap((t) => (t.kind === "keyword" ? t.words.map(triggerKey) : []))),
+  );
+  const conflicts: RoutingConflict[] = [];
+  for (let i = 0; i < ordered.length; i++)
+    for (let j = i + 1; j < ordered.length; j++) {
+      const pair = { first: ordered[i]!.key, then: ordered[j]!.key };
+      if (ordered[i]!.triggers.some((t) => t.kind !== "keyword") && keywords[j]!.size > 0)
+        conflicts.push({ kind: "catch_all_first", ...pair });
+      if ([...keywords[j]!].some((k) => keywords[i]!.has(k)))
+        conflicts.push({ kind: "shared_keyword", ...pair });
+    }
+  return conflicts;
+}

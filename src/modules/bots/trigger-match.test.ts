@@ -3,6 +3,7 @@ import {
   TRIGGER_ELIGIBLE_TYPES,
   isTriggerEligibleType,
   matchTrigger,
+  routingConflicts,
   triggerKey,
   type Trigger,
 } from "./index";
@@ -170,5 +171,63 @@ describe("trigger order", () => {
     expect(
       matchTrigger([kw("menu")], text("hello"), { firstEligible: true, hasAttribution: true }),
     ).toBeNull();
+  });
+});
+
+describe("routingConflicts (08G-7A activation routing guard rule, OD-1)", () => {
+  const d = (key: string, priority: number, ...triggers: Trigger[]) => ({
+    key,
+    priority,
+    triggers,
+  });
+
+  it("keyword deployments before the catch-all, with disjoint keywords, conflict with nothing", () => {
+    expect(
+      routingConflicts([
+        d("pay", 1, kw("pay", "payment")),
+        d("info", 2, kw("info")),
+        d("front", 3, kw("hi"), first, referral),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("a first_message or referral_source deployment before a keyword one conflicts with each later keyword deployment", () => {
+    expect(
+      routingConflicts([d("info", 3, kw("info")), d("front", 1, first), d("pay", 2, kw("pay"))]),
+    ).toEqual([
+      { kind: "catch_all_first", first: "front", then: "pay" },
+      { kind: "catch_all_first", first: "front", then: "info" },
+    ]);
+    expect(routingConflicts([d("ad", 1, referral), d("pay", 2, kw("pay"))])).toEqual([
+      { kind: "catch_all_first", first: "ad", then: "pay" },
+    ]);
+  });
+
+  it("catch-alls with no keywords after them, and catch-alls among themselves, are not conflicts", () => {
+    expect(routingConflicts([d("pay", 1, kw("pay")), d("a", 2, first), d("b", 3, first)])).toEqual(
+      [],
+    );
+  });
+
+  it("two deployments sharing a keyword under the comparison key (case, spaces, NFC) conflict, whatever their order", () => {
+    expect(
+      routingConflicts([
+        d("x", 2, kw(" PAY ")),
+        d("y", 1, kw("menu", "pay")),
+        d("z", 3, kw("payz")),
+      ]),
+    ).toEqual([{ kind: "shared_keyword", first: "y", then: "x" }]);
+    expect(routingConflicts([d("x", 1, kw("café")), d("y", 2, kw("café"))])).toEqual([
+      { kind: "shared_keyword", first: "x", then: "y" },
+    ]);
+  });
+
+  it("reports both kinds for one pair, and nothing for an empty or single set", () => {
+    expect(routingConflicts([d("a", 1, kw("hi"), first), d("b", 2, kw("hi"))])).toEqual([
+      { kind: "catch_all_first", first: "a", then: "b" },
+      { kind: "shared_keyword", first: "a", then: "b" },
+    ]);
+    expect(routingConflicts([])).toEqual([]);
+    expect(routingConflicts([d("a", 1, kw("hi"), first)])).toEqual([]);
   });
 });

@@ -176,8 +176,10 @@ describe("bots module boundaries (08A, 08B)", () => {
       "RequestState",
       "type RequestState",
     ]);
-    // bot-control's approved pure surface: validation, canonicalization, limits and types. Never the engine or the simulator.
+    // bot-control's approved pure surface: validation, canonicalization, limits and types, and (08G-7A) the routing rule of
+    // the activation guard. Never the engine or the simulator.
     const controlAllowed = new Set([
+      "routingConflicts",
       "validateFlow",
       "canonicalFlowJson",
       "checkJsonShape",

@@ -39,9 +39,12 @@ export {
   TRIGGER_ELIGIBLE_TYPES,
   isTriggerEligibleType,
   matchTrigger,
+  routingConflicts,
   triggerKey,
 } from "./trigger-match";
 export type {
+  RoutedDeployment,
+  RoutingConflict,
   TriggerEligibleType,
   TriggerFacts,
   TriggerMatch,

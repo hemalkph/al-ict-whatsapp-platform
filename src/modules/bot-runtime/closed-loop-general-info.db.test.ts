@@ -21,7 +21,9 @@ import { closedLoopKit, type LoopWorld, type SentMessage } from "./testing";
 // (closedLoopKit: signed webhook -> ingest -> webhook worker with capture -> bot worker -> dispatcher -> FakeTransport), on a
 // disposable PostgreSQL 17 database only. Nothing here can reach Meta. The tests are WRITTEN BUT NOT YET EXECUTED (they need
 // owner-authorized isolated database validation). GI-CL-14 (internal engine error) is NOT implemented: see the addendum, section
-// 5, for the test-design blocker; the engine contract itself is pinned by the database-free simulator regression.
+// 5, for the test-design blocker; the engine contract itself is pinned by the database-free simulator regression. GI-CL-14a
+// (Phase 08G-7A) is SUPPLEMENTARY counter evidence only: it proves the persisted send_count follows real sends up to 29, under
+// the hourly cap; it does NOT reach the 60-send budget and does NOT close GI-CL-14.
 
 type Node = Record<string, unknown> & { type: string };
 const FLOW = generalInfoFlow();
@@ -750,6 +752,46 @@ describe("closed loop: General Information (SYNTHETIC golden flow), 08G-1", () =
     expect(keep(after)).toEqual(keep(before)); // state, end_reason, handover_reason, step_seq, notice step, control sequences, times
     expect(await history()).toEqual(messagesBefore); // message history has its own retention rules
     expect(await k.eventsOf(sid)).toEqual(eventsBefore);
+  });
+
+  // ------------------------------------------------------------------------------------------------ GI-CL-14a (counter)
+
+  /**
+   * SUPPLEMENTARY to GI-CL-14 (which stays OPEN): the step.db ENG regression seeds send_count = 60 and proves the SEND_BUDGET
+   * hand-over; this proves, with ordinary processing only (no seeded counter, no clock, no rate-limit history), that the
+   * persisted send_count is exactly the number of the session's accepted BOT sends at each of 19 settled checkpoints (after the
+   * opening and each of the 18 taps; ten of them follow two separately committed sends). 29 sends stay under the
+   * hourly cap of 30 BOT requests per conversation (C-4), so the 60-send budget itself is NOT reached here.
+   */
+  it("GI-CL-14a (supplementary; GI-CL-14 stays OPEN): over 29 real sends, send_count and step_seq equal the session's accepted BOT requests and provider calls at each of 19 settled checkpoints", async () => {
+    const x = await k.world(FLOW);
+    const sid = await start(x);
+    const expectCounter = async (sends: number) => {
+      const [s] = await k.sessionsOf(x);
+      const requests = (await k.requestsOf(x)).filter((r) => r.bot_session_id === sid);
+      expect(requests.map((r) => [r.origin, r.state])).toEqual(
+        Array.from({ length: sends }, () => ["BOT", "ACCEPTED"]),
+      );
+      expect(k.transport.calls.filter((c) => c.recipient.id === x.phone)).toHaveLength(sends);
+      expect([s!.send_count, s!.step_seq]).toEqual([sends, sends]);
+    };
+    await expectCounter(2); // welcome, topics
+    let sends = 2;
+    for (let cycle = 0; cycle < 8; cycle++) {
+      await tap(x, cycle % 2 === 0 ? TOPIC_ONE : TOPIC_TWO);
+      await expectCounter((sends += 2)); // answer, more
+      await tap(x, "Ask another");
+      await expectCounter((sends += 1)); // topics again
+    }
+    await tap(x, TOPIC_ONE);
+    await expectCounter((sends += 2));
+    await tap(x, "That's all");
+    await expectCounter((sends += 1)); // the END notice counts as a send
+    expect(sends).toBe(29);
+    expect(await k.sessionsOf(x)).toMatchObject([
+      { id: sid, state: "COMPLETED", end_reason: "flow_end", terminal_notice_step_seq: 29 },
+    ]);
+    expect((await eventRows(sid)).filter(([kind]) => kind === "ERROR")).toEqual([]);
   });
 
   // ------------------------------------------------------------------------------------------------ GI-CL-15 (idle)

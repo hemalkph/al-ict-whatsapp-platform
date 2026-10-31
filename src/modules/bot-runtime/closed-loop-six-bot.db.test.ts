@@ -30,6 +30,7 @@ import {
   stopActiveSessions,
   updateDraft,
 } from "../bot-control";
+import { routingConflicts, validateFlow, type FlowConfig } from "@/modules/bots";
 import { BOTS_ON, publishedBot } from "../bot-control/testing";
 import { closedLoopKit, type LoopWorld } from "./testing";
 
@@ -38,8 +39,9 @@ import { closedLoopKit, type LoopWorld } from "./testing";
 // -> FakeTransport) on a disposable PostgreSQL 17 database only. Nothing here can reach Meta. WRITTEN BUT NOT YET EXECUTED
 // (needs owner-authorized isolated database validation). Every bot's own paths are proven by its 08G suite and are not
 // repeated; this file proves what only appears when the six coexist. Bot selection is by deployment priority (owner decision
-// OD-1): Student Enquiry, the only first_message bot, must be last. Nothing enforces that order at activation; SIX-CL-2
-// characterizes the inverted order. GI-CL-14 (SEND_BUDGET in a closed loop) stays OPEN and is not attempted here (OD-2).
+// OD-1): Student Enquiry, the only first_message bot, must be last. Since 08G-7A the activation, resume and version-change
+// services refuse any other order (ROUTING_CONFLICT; routing-guard.db.test.ts), so SIX-CL-2's inverted world is written by
+// test-only SQL (insertDeploymentBySql) to keep characterizing what the RUNTIME does with it. GI-CL-14 (SEND_BUDGET in a closed loop) stays OPEN and is not attempted here (OD-2).
 
 type BotKey =
   | "staff_routing"
@@ -105,17 +107,21 @@ const confirmBody = (name: string, year: number, cls: string) =>
 type Deployed = { bot: { id: string }; version: { id: string }; deployment: { id: string } };
 type Six = LoopWorld & { readonly six: Record<BotKey, Deployed> };
 
-/**
- * A test-only characterization of OD-1 (NOT an activation guard; none exists in production): every deployment whose pinned
- * version has a first_message or referral_source trigger must have a higher priority number than every keyword-only one.
- */
+/** The production routing rule (bots `routingConflicts`, enforced by the deployment services since 08G-7A) over stored rows. */
 function activationOrderViolations(
-  rows: ReadonlyArray<{ key: string; priority: number; triggers: Array<{ kind: string }> }>,
+  rows: ReadonlyArray<{ key: string; priority: number; triggers: unknown }>,
 ): string[] {
-  const implicit = rows.filter((r) => r.triggers.some((t) => t.kind !== "keyword"));
-  const explicit = rows.filter((r) => r.triggers.every((t) => t.kind === "keyword"));
-  return implicit.flatMap((i) =>
-    explicit.filter((e) => e.priority > i.priority).map((e) => `${i.key} precedes ${e.key}`),
+  return routingConflicts(
+    rows.map((r) => ({
+      key: r.key,
+      priority: r.priority,
+      triggers: (
+        validateFlow({ ...FLOWS[r.key as BotKey](), triggers: r.triggers }).config as FlowConfig
+      ).triggers,
+    })),
+  ).map(
+    (c) =>
+      `${c.first} ${c.kind === "catch_all_first" ? "precedes" : "shares a keyword with"} ${c.then}`,
   );
 }
 
@@ -164,13 +170,35 @@ describe("closed loop: six SYNTHETIC bots deployed together, 08G-6", () => {
     ).value;
     return { bot, version, deployment };
   }
-  /** One organization and account with the six flows published and deployed ACTIVE at priority 1..6 in `order`. */
+  /**
+   * TEST-ONLY, for SIX-CL-2's runtime characterization: an ACTIVE deployment row written by plain SQL, as activateDeployment
+   * writes it (the database guard stamps status, epoch and times), bypassing the routing guard that would refuse the inverted
+   * order. Production code has no such path; this helper exists only in this file.
+   */
+  async function insertDeploymentBySql(
+    x: LoopWorld,
+    key: BotKey,
+    priority: number,
+  ): Promise<Deployed> {
+    const { bot, version } = await publishedBot(t.db, x.w, FLOWS[key]());
+    const row = (await k.one(
+      `insert into bot_deployments (organization_id, whatsapp_account_id, bot_id, version_id, priority)
+       values ($1, $2, $3, $4, $5) returning id`,
+      [x.w.org.id, x.w.account.id, bot.id, version.id, priority],
+    ))!;
+    return { bot, version, deployment: { id: row.id as string } };
+  }
+  /**
+   * One organization and account with the six flows published and deployed ACTIVE at priority 1..6 in `order`: through the
+   * production activation path for the approved order, through insertDeploymentBySql for INVERTED (which the guard refuses).
+   */
   async function sixBotWorld(order: BotKey[] = APPROVED): Promise<Six> {
     const x = await k.world(FLOWS[order[0]!]()); // the kit deploys its flow at priority 1
     const six = {
       [order[0]!]: { bot: x.bot, version: x.version, deployment: x.deployment },
     } as Record<BotKey, Deployed>;
-    for (let i = 1; i < order.length; i++) six[order[i]!] = await deploy(x, order[i]!, i + 1);
+    const add = order === INVERTED ? insertDeploymentBySql : deploy;
+    for (let i = 1; i < order.length; i++) six[order[i]!] = await add(x, order[i]!, i + 1);
     return { ...x, six };
   }
   /** A fresh contact in the same organization and account (the first webhook creates the conversation). */
@@ -370,7 +398,7 @@ describe("closed loop: six SYNTHETIC bots deployed together, 08G-6", () => {
     ).toBe(0);
   });
 
-  it("SIX-CL-2: the inverted configuration is recognized as unsuitable for activation; the approved one is not (test-only check: no activation guard exists)", async () => {
+  it("SIX-CL-2: the inverted configuration is recognized as unsuitable for activation by the production routing rule; the approved one is not", async () => {
     const approved = await deploymentRows(await sixBotWorld());
     const inverted = await deploymentRows(await sixBotWorld(INVERTED));
     expect(activationOrderViolations(approved)).toEqual([]);

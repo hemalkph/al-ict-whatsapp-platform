@@ -1,6 +1,6 @@
 # Phase 08G-6 — Integrated six-bot acceptance
 
-Status: **INTEGRATED POSTGRESQL VALIDATION PASSED — OWNER GIT CHECKPOINT PENDING.** SIX-CL-1 to SIX-CL-13: 36 passed, 0
+Status: **INTEGRATED POSTGRESQL VALIDATION PASSED — OWNER GIT CHECKPOINT COMMITTED (`0bd24b6` on `origin/Bot-Foundation`; reconciled from Git history in Phase 08G-7A).** SIX-CL-1 to SIX-CL-13: 36 passed, 0
 failed, 0 skipped, on one owner-authorized isolated run (section 9). Production activation: **NOT AUTHORIZED.**
 
 Evidence layers: the PostgreSQL closed-loop run is the evidence for the SIX-CL assertions (developer-reported, owner-accepted).
@@ -237,15 +237,23 @@ The database-free SIX-CL-3 case (`src/modules/bots/six-bot.test.ts`) passed earl
 
 ## 10. Status
 
-| Item                        | State                                                                      |
-| --------------------------- | -------------------------------------------------------------------------- |
-| SIX-CL-1..13 (36 cases)     | **PASSED** (36/0/0, one run)                                               |
-| SIX-CL-3 database-free case | Passed (unit suite)                                                        |
-| OD-1                        | Approved; activation-time priority guard **NOT IMPLEMENTED**               |
-| OD-2 / GI-CL-14             | **OPEN**; two-hour real-time test **NOT AUTHORIZED**                       |
-| Obligations 1–8 (section 7) | **Open**                                                                   |
-| Bot content                 | Synthetic test fixtures only                                               |
-| Milestone                   | **INTEGRATED POSTGRESQL VALIDATION PASSED — OWNER GIT CHECKPOINT PENDING** |
-| Production activation       | **NOT AUTHORIZED**                                                         |
+| Item                        | State                                                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| SIX-CL-1..13 (36 cases)     | **PASSED** (36/0/0, one run)                                                             |
+| SIX-CL-3 database-free case | Passed (unit suite)                                                                      |
+| OD-1                        | Approved; activation-time priority guard **NOT IMPLEMENTED**                             |
+| OD-2 / GI-CL-14             | **OPEN**; two-hour real-time test **NOT AUTHORIZED**                                     |
+| Obligations 1–8 (section 7) | **Open**                                                                                 |
+| Bot content                 | Synthetic test fixtures only                                                             |
+| Milestone                   | **INTEGRATED POSTGRESQL VALIDATION PASSED — OWNER GIT CHECKPOINT COMMITTED (`0bd24b6`)** |
+| Production activation       | **NOT AUTHORIZED**                                                                       |
 
 Any further database run needs separate owner authorization.
+
+**Reconciliation note (Phase 08G-7A, documentation only).** The checkpoint lines above were changed from "PENDING" to the
+verified commit `0bd24b6`; the baseline table (section 1) still records the HEAD at the time of writing (`b4f2df6`). The run
+results of section 9 are unchanged and apply to `closed-loop-six-bot.db.test.ts` as committed in `0bd24b6`. Phase 08G-7A
+(uncommitted) changes that file: SIX-CL-2's inverted world is now written by test-only SQL, because the new production
+routing guard refuses it, and its third case uses the production rule. That changed version was validated separately in the
+owner-authorized 08G-7A isolated run (SIX-CL-2: 3 selected, 3 passed; `PHASE_08G-7_READINESS_AUDIT.md`, section 10.7); the
+36/36 above is not that evidence.

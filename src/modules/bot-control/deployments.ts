@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { schema } from "@/db";
 import { BOT_LIVE_SESSION_STATES } from "@/db/schema/enums";
 import type { AccessContext } from "@/modules/access";
+import { routingConflicts, validateFlow } from "@/modules/bots";
 import { NotFoundError } from "@/shared/errors/http-errors";
 import {
   UNIQUE_VIOLATION,
@@ -41,6 +42,13 @@ import {
 // requests (live sessions' and terminal notices alike) through the non-blocking primitive of suppression.ts (FOR UPDATE SKIP
 // LOCKED; never waits on a request row), hold code `bot_stopped` for all three (the event kind tells them apart), and record
 // requests_suppressed and requests_in_flight on the deployment event (semantics in schema/bots.ts and ADR 0020).
+//
+// Phase 08G-7A routing guard (owner decision OD-1): Activate, Resume and Change Version are the only operations that can add a
+// deployment to an account's ACTIVE set or change the triggers of one in it (Pause, Stop, Emergency Stop and Retire only
+// remove). Each takes the account's routing advisory lock FIRST (before the bot), makes its change, then re-reads the
+// account's ACTIVE set in the same transaction and refuses with ROUTING_CONFLICT, rolling everything back, when a catch-all
+// deployment precedes a keyword one or two share a keyword (bots `routingConflicts`). Admin lock order is therefore:
+// routing lock -> bot -> deployment. The runtime never takes the routing lock, and no operation reorders priorities.
 
 type Deployment = typeof schema.botDeployments.$inferSelect;
 
@@ -100,10 +108,13 @@ async function recordEvent(tx: Tx, ctx: AccessContext, e: EventInput): Promise<v
   });
 }
 
-/** The deployment's bot, by a plain read (the binding never changes), so the bot can be locked before the deployment. */
-async function botOf(tx: Tx, organizationId: string, deploymentId: string): Promise<string> {
+/** The deployment's bot and account, by a plain read (the binding never changes), so both can be locked before the deployment. */
+async function bindingOf(tx: Tx, organizationId: string, deploymentId: string) {
   const [row] = await tx
-    .select({ botId: schema.botDeployments.botId })
+    .select({
+      botId: schema.botDeployments.botId,
+      whatsappAccountId: schema.botDeployments.whatsappAccountId,
+    })
     .from(schema.botDeployments)
     .where(
       and(
@@ -112,7 +123,81 @@ async function botOf(tx: Tx, organizationId: string, deploymentId: string): Prom
       ),
     );
   if (!row) throw new NotFoundError();
-  return row.botId;
+  return row;
+}
+
+/**
+ * The routing-lock key of one account. Both UUIDs are lower-cased: the input schema accepts any letter case and PostgreSQL
+ * treats the spellings as one UUID, so an activation (caller's spelling) and a Resume (stored spelling) must meet on one key.
+ * Exported for the unit test only; not part of the module's public API (index.ts).
+ */
+export const routingLockKey = (organizationId: string, whatsappAccountId: string): string =>
+  `bot-routing:${organizationId.toLowerCase()}:${whatsappAccountId.toLowerCase()}`;
+
+/**
+ * Serializes every change of one account's ACTIVE routing (transaction-scoped, waits). A row lock cannot do it: an activation
+ * inserts a row nobody can lock yet. The key is organization-scoped; a hash collision only serializes two unrelated accounts.
+ */
+async function lockAccountRouting(tx: Tx, organizationId: string, whatsappAccountId: string) {
+  const key = routingLockKey(organizationId, whatsappAccountId);
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+}
+
+/**
+ * Refuses the transaction's resulting ACTIVE set of the account when start matching would misroute (see the header). It reads
+ * the pinned versions as the runtime does: a version that fails validation has no triggers (it can never match).
+ */
+async function assertSupportedRouting(tx: Tx, organizationId: string, whatsappAccountId: string) {
+  const rows = await tx
+    .select({
+      key: schema.bots.key,
+      priority: schema.botDeployments.priority,
+      config: schema.botVersions.config,
+    })
+    .from(schema.botDeployments)
+    .innerJoin(
+      schema.bots,
+      and(
+        eq(schema.bots.organizationId, schema.botDeployments.organizationId),
+        eq(schema.bots.id, schema.botDeployments.botId),
+      ),
+    )
+    .innerJoin(
+      schema.botVersions,
+      and(
+        eq(schema.botVersions.organizationId, schema.botDeployments.organizationId),
+        eq(schema.botVersions.id, schema.botDeployments.versionId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.botDeployments.organizationId, organizationId),
+        eq(schema.botDeployments.whatsappAccountId, whatsappAccountId),
+        eq(schema.botDeployments.status, "ACTIVE"),
+      ),
+    );
+  const conflicts = routingConflicts(
+    rows.map((r) => {
+      const v = validateFlow(r.config);
+      return {
+        key: r.key,
+        priority: r.priority,
+        triggers: v.ok && v.config ? v.config.triggers : [],
+      };
+    }),
+  );
+  if (conflicts.length > 0)
+    throw new BotControlError(
+      "ROUTING_CONFLICT",
+      "This change would let one active deployment take messages meant for another: a first-message deployment must have a higher priority number than every keyword deployment, and active deployments must not share a keyword. Nothing was changed; pause or retire a conflicting deployment, or activate with another priority.",
+      conflicts
+        .map((c) =>
+          c.kind === "catch_all_first"
+            ? `${c.first} precedes ${c.then}`
+            : `${c.first} shares a keyword with ${c.then}`,
+        )
+        .join("; "),
+    );
 }
 
 async function lockDeployment(tx: Tx, organizationId: string, deploymentId: string) {
@@ -130,9 +215,11 @@ async function lockDeployment(tx: Tx, organizationId: string, deploymentId: stri
   return row;
 }
 
-/** Admin path of L.2: bot, then deployment. */
-async function lockForAdmin(tx: Tx, organizationId: string, deploymentId: string) {
-  await lockBot(tx, organizationId, await botOf(tx, organizationId, deploymentId));
+/** Admin path of L.2: (the account's routing lock, for Resume and Change Version), bot, then deployment. */
+async function lockForAdmin(tx: Tx, organizationId: string, deploymentId: string, routing = false) {
+  const binding = await bindingOf(tx, organizationId, deploymentId);
+  if (routing) await lockAccountRouting(tx, organizationId, binding.whatsappAccountId);
+  await lockBot(tx, organizationId, binding.botId);
   return lockDeployment(tx, organizationId, deploymentId);
 }
 
@@ -175,6 +262,7 @@ export async function activateDeployment(
   const input = parse(activateSchema, raw);
   try {
     const written = await write(ctx, "bot.publish", deps, options, async (tx) => {
+      await lockAccountRouting(tx, ctx.organizationId, input.whatsappAccountId);
       const bot = await lockBot(tx, ctx.organizationId, input.botId);
       const [version] = await tx
         .select({ id: schema.botVersions.id })
@@ -206,6 +294,7 @@ export async function activateDeployment(
           priority: input.priority,
         })
         .returning(summaryColumns);
+      await assertSupportedRouting(tx, ctx.organizationId, account.id);
       await recordEvent(tx, ctx, { deployment: row!, kind: "ACTIVATED", fromStatus: null });
       return row!;
     });
@@ -243,7 +332,7 @@ export async function changeDeploymentVersion(
 ): Promise<Written<DeploymentSummary>> {
   const input = parse(changeVersionSchema, raw);
   const written = await write(ctx, "bot.publish", deps, options, async (tx) => {
-    const current = await lockForAdmin(tx, ctx.organizationId, input.deploymentId);
+    const current = await lockForAdmin(tx, ctx.organizationId, input.deploymentId, true);
     if (current.status === "RETIRED") throw refuseTransition(current.status);
     if (current.versionId === input.versionId)
       throw new BotControlError("SAME_VERSION", "The deployment already runs this version.");
@@ -261,6 +350,7 @@ export async function changeDeploymentVersion(
     const row = await updateDeployment(tx, ctx.organizationId, current.id, {
       versionId: version.id,
     });
+    await assertSupportedRouting(tx, ctx.organizationId, row.whatsappAccountId);
     await recordEvent(tx, ctx, {
       deployment: row,
       kind: "VERSION_CHANGED",
@@ -305,10 +395,11 @@ export async function resumeDeployment(
 ): Promise<Written<DeploymentSummary>> {
   const input = parse(deploymentSchema, raw);
   const written = await write(ctx, "bot.publish", deps, options, async (tx) => {
-    const current = await lockForAdmin(tx, ctx.organizationId, input.deploymentId);
+    const current = await lockForAdmin(tx, ctx.organizationId, input.deploymentId, true);
     if (current.status !== "PAUSED" && current.status !== "STOPPED")
       throw refuseTransition(current.status);
     const row = await updateDeployment(tx, ctx.organizationId, current.id, { status: "ACTIVE" });
+    await assertSupportedRouting(tx, ctx.organizationId, row.whatsappAccountId);
     await recordEvent(tx, ctx, { deployment: row, kind: "RESUMED", fromStatus: current.status });
     return row;
   });
