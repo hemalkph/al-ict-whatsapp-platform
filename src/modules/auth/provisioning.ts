@@ -14,6 +14,11 @@ import { readAuthEnv } from "./env";
 // staff_provisioning_intents row first), and must themselves check that the email is unused: with
 // autoSignIn:false a duplicate email returns a fabricated success response (fake user id) instead of an error.
 //
+// Phase 08G-7B C1A: the TENANT reset and staff-provisioning resume no longer use this flow; they hash with Better Auth's
+// hashPassword and write the credential inside their authorization transaction (access/staff/guards.ts,
+// replaceCredentialInTx), because a write in a separate, later transaction could land after a platform grant. Only the
+// operator-only `auth:bootstrap-admin` interrupted recovery calls replaceCredentialPassword (database-credential path, C1-G3).
+//
 // Administrator password replacement: Better Auth core has no "set password for user" API (setPassword is for
 // users without one, changePassword needs the current password, the Admin plugin is excluded). The supported
 // server-side route is the documented requestPasswordReset -> resetPassword pair, whose token normally goes out by

@@ -1,11 +1,18 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { getDb, schema, type Database } from "@/db";
-import { getProvisioningAuth, replaceCredentialPassword } from "@/modules/auth/provisioning";
+import { hashPassword } from "better-auth/crypto";
+import { getProvisioningAuth } from "@/modules/auth/provisioning";
+import { hasActivePlatformRole } from "@/modules/platform";
 import { OperationRefusedError, ProvisioningIncompleteError } from "@/shared/errors/http-errors";
 import { emitSecurityEvent, hashForLog } from "@/shared/security/events";
 import type { AccessContext } from "../access";
 import { assertCan } from "../permissions";
-import { countMemberships, revalidateActor } from "./guards";
+import {
+  countMemberships,
+  markAdministratorPassword,
+  replaceCredentialInTx,
+  revalidateActor,
+} from "./guards";
 import { createStaffSchema, parseInput } from "./schemas";
 import type { StaffDeps, StaffMember } from "./types";
 
@@ -18,8 +25,22 @@ import type { StaffDeps, StaffMember } from "./types";
 //     ACTIVE membership, delete the intent last
 // Every failure leaves the intent in place and the user without any ACTIVE membership (fail closed).
 // An existing identity is NEVER attached; refusals are one generic error whatever the reason.
+//
+// Resuming a crashed attempt (Phase 08G-7B C1A) needs PROVENANCE, not an email match: right after THIS workflow's sign-up
+// created the identity (and the persisted row was confirmed), the intent is bound to it with a compare-and-set
+// (auth_user_id NULL -> that id). Only a bound intent can resume, only for that identity, only by the membership that created
+// it, and the replacement password is written in step 5's transaction under the intent and user row locks, after
+// re-checking the binding, that the identity has no membership and no ACTIVE platform role. An unbound intent next to an
+// existing identity (a pre-existing account, or a crash between sign-up and binding) is never resumable here: it goes to the
+// operator recovery (`auth:intents`), which has its own provenance checks. A platform grant takes the same user row lock and
+// refuses while any intent names the user, so a grant and a resume are strictly ordered.
 
-type IntentHandle = { id: string; resumed: boolean; authUserId: string | null };
+type IntentHandle = {
+  id: string;
+  resumed: boolean;
+  authUserId: string | null;
+  requestedByMembershipId: string | null;
+};
 
 async function acquireIntent(
   db: Database,
@@ -35,14 +56,30 @@ async function acquireIntent(
     })
     .onConflictDoNothing({ target: schema.staffProvisioningIntents.emailKey })
     .returning();
-  if (inserted) return { id: inserted.id, resumed: false, authUserId: null };
+  if (inserted)
+    return {
+      id: inserted.id,
+      resumed: false,
+      authUserId: null,
+      requestedByMembershipId: ctx.membershipId,
+    };
   const [existing] = await db
     .select()
     .from(schema.staffProvisioningIntents)
     .where(eq(schema.staffProvisioningIntents.emailKey, emailKey));
-  // Held by another organization (or vanished in a race): refuse without saying which.
-  if (!existing || existing.organizationId !== ctx.organizationId) return null;
-  return { id: existing.id, resumed: true, authUserId: existing.authUserId };
+  // Only the original requester may advance even an UNBOUND intent, before any private sign-up can commit.
+  if (
+    !existing ||
+    existing.organizationId !== ctx.organizationId ||
+    existing.requestedByMembershipId !== ctx.membershipId
+  )
+    return null;
+  return {
+    id: existing.id,
+    resumed: true,
+    authUserId: existing.authUserId,
+    requestedByMembershipId: existing.requestedByMembershipId,
+  };
 }
 
 async function findUserByEmail(db: Database, email: string) {
@@ -74,24 +111,60 @@ export async function createStaff(
 
   const existing = await findUserByEmail(db, input.email);
   let userId: string;
+  // Set only when resuming onto an identity the crashed attempt created: written inside step 5's transaction.
+  let replacementHash: string | null = null;
   const provisioner = deps.provisioner ?? getProvisioningAuth();
 
   try {
     if (!existing) {
-      const res = await provisioner.api.signUpEmail({
-        body: { name: input.name, email: input.email, password: input.initialPassword },
+      // Hold the intent claim across private sign-up's separate transaction and binding; re-check before creating anything.
+      userId = await db.transaction(async (tx) => {
+        const [locked] = await tx
+          .select()
+          .from(schema.staffProvisioningIntents)
+          .where(eq(schema.staffProvisioningIntents.id, intent.id))
+          .for("update");
+        if (
+          !locked ||
+          locked.organizationId !== ctx.organizationId ||
+          locked.emailKey !== input.email ||
+          locked.requestedByMembershipId !== ctx.membershipId ||
+          locked.authUserId !== null
+        )
+          return refuse("intent_no_longer_eligible");
+        await revalidateActor(tx, ctx, "staff.manage");
+        const res = await provisioner.api.signUpEmail({
+          body: { name: input.name, email: input.email, password: input.initialPassword },
+        });
+        // Never trust only the returned object (a duplicate sign-up returns a fabricated id): the persisted row decides.
+        const persisted = await findUserByEmail(db, input.email);
+        if (!persisted || persisted.id !== res.user.id)
+          throw new Error("provisioned user not found");
+        const bound = await tx
+          .update(schema.staffProvisioningIntents)
+          .set({ authUserId: persisted.id })
+          .where(
+            and(
+              eq(schema.staffProvisioningIntents.id, intent.id),
+              eq(schema.staffProvisioningIntents.organizationId, ctx.organizationId),
+              eq(schema.staffProvisioningIntents.requestedByMembershipId, ctx.membershipId),
+              isNull(schema.staffProvisioningIntents.authUserId),
+            ),
+          )
+          .returning({ id: schema.staffProvisioningIntents.id });
+        if (bound.length !== 1) throw new Error("intent no longer ours");
+        return persisted.id;
       });
-      // Never trust only the returned object (a duplicate sign-up returns a fabricated id): the persisted row decides.
-      const persisted = await findUserByEmail(db, input.email);
-      if (!persisted || persisted.id !== res.user.id) throw new Error("provisioned user not found");
-      userId = persisted.id;
     } else {
-      // Resumable crash of THIS organization's workflow: the intent pre-existed, is ours, is unbound or bound to
-      // this very user, and the identity has no membership anywhere. Anything else is an unrelated identity.
+      // Resumable crash of THIS administrator's attempt: the intent pre-existed, was created by this membership, is BOUND
+      // to this very identity (provenance: our sign-up created it), and the identity has no membership anywhere and no
+      // platform role. Anything else is an unrelated or unproven identity. (Re-checked under lock in step 5.)
       const resumable =
         intent.resumed &&
-        (intent.authUserId === null || intent.authUserId === existing.id) &&
-        (await db.transaction((tx) => countMemberships(tx, existing.id))) === 0;
+        intent.requestedByMembershipId === ctx.membershipId &&
+        intent.authUserId === existing.id &&
+        (await db.transaction((tx) => countMemberships(tx, existing.id))) === 0 &&
+        !(await hasActivePlatformRole(db, existing.id));
       if (!resumable) {
         // A freshly inserted intent is ours to remove; a pre-existing one is left untouched.
         if (!intent.resumed) {
@@ -101,12 +174,8 @@ export async function createStaff(
         }
         return refuse("existing_identity");
       }
-      // Make the retry's initial password the effective one (the crashed attempt's password is unknown here).
-      await replaceCredentialPassword(
-        provisioner,
-        { userId: existing.id, email: input.email },
-        input.initialPassword,
-      );
+      // The retry's initial password becomes the effective one (the crashed attempt's password is unknown here).
+      replacementHash = await hashPassword(input.initialPassword);
       userId = existing.id;
     }
   } catch (error) {
@@ -130,7 +199,9 @@ export async function createStaff(
       if (
         !locked ||
         locked.organizationId !== ctx.organizationId ||
-        locked.emailKey !== input.email
+        locked.emailKey !== input.email ||
+        locked.requestedByMembershipId !== ctx.membershipId ||
+        locked.authUserId !== userId
       ) {
         throw new Error("intent no longer ours");
       }
@@ -156,18 +227,15 @@ export async function createStaff(
       if (!user || user.id !== userId) throw new Error("user mismatch");
       if ((await countMemberships(tx, user.id)) > 0)
         throw new OperationRefusedError("existing_membership");
+      if (await hasActivePlatformRole(tx, user.id))
+        throw new OperationRefusedError("existing_identity");
 
       await tx
         .update(schema.staffProvisioningIntents)
         .set({ authUserId: user.id })
         .where(eq(schema.staffProvisioningIntents.id, intent.id));
-      await tx
-        .insert(schema.userSecurityState)
-        .values({ userId: user.id, passwordChangeRequired: true })
-        .onConflictDoUpdate({
-          target: schema.userSecurityState.userId,
-          set: { passwordChangeRequired: true },
-        });
+      if (replacementHash !== null) await replaceCredentialInTx(tx, user.id, replacementHash);
+      else await markAdministratorPassword(tx, user.id);
       const [created] = await tx
         .insert(schema.organizationMemberships)
         .values({

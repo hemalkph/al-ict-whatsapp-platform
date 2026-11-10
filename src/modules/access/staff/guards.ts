@@ -169,3 +169,39 @@ export async function countMemberships(tx: Tx, userId: string): Promise<number> 
 export async function revokeUserSessions(tx: Tx, userId: string): Promise<void> {
   await tx.delete(schema.sessions).where(eq(schema.sessions.userId, userId));
 }
+
+/** Records that an ADMINISTRATOR chose this user's current password (provisioning or reset): a change is required. */
+export async function markAdministratorPassword(tx: Tx, userId: string): Promise<void> {
+  await tx
+    .insert(schema.userSecurityState)
+    .values({ userId, passwordChangeRequired: true })
+    .onConflictDoUpdate({
+      target: schema.userSecurityState.userId,
+      set: { passwordChangeRequired: true },
+    });
+}
+
+/**
+ * Phase 08G-7B C1A (P1): replaces the credential password INSIDE the caller's transaction, so the authorization checks the
+ * caller made under the user row lock (FOR UPDATE; a platform grant takes the same lock) and the write commit together or
+ * not at all. `hash` comes from Better Auth's own hashPassword. The row written is Better Auth's CANONICAL credential
+ * (provider_id 'credential' AND account_id = user id, as internalAdapter.findCredentialAccount/updatePassword use); migration
+ * 0010's trigger increments credential_generation with it. Also marks an administrator password and revokes every session.
+ * Throws if the user has no canonical credential account.
+ */
+export async function replaceCredentialInTx(tx: Tx, userId: string, hash: string): Promise<void> {
+  const updated = await tx
+    .update(schema.accounts)
+    .set({ password: hash, updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.accounts.userId, userId),
+        eq(schema.accounts.providerId, "credential"),
+        eq(schema.accounts.accountId, userId),
+      ),
+    )
+    .returning({ id: schema.accounts.id });
+  if (updated.length !== 1) throw new Error("no credential account");
+  await markAdministratorPassword(tx, userId);
+  await revokeUserSessions(tx, userId);
+}

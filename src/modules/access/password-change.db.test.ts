@@ -9,11 +9,9 @@ import {
   login,
   provisionUser,
   realAuth,
-  serviceDb,
   type RealAuth,
 } from "@/db/__tests__/real-auth";
 import {
-  PasswordChangeIncompleteError,
   PasswordChangeRequiredError,
   UnauthenticatedError,
   ValidationError,
@@ -162,7 +160,7 @@ describe("forced password change (real PostgreSQL + Better Auth)", () => {
     expect(await hash(u.user.id)).toBe(before);
   });
 
-  it("succeeds with the right current password: password changed by Better Auth, flag cleared, new session works", async () => {
+  it("succeeds with the right current password: password changed in one transaction, flag cleared, new session works", async () => {
     const u = await flaggedUser();
     const second = await login(a, u.email); // another session that must be revoked
     const before = await hash(u.user.id);
@@ -182,7 +180,7 @@ describe("forced password change (real PostgreSQL + Better Auth)", () => {
     expect(after).not.toContain(NEW_PASSWORD);
     // old password dead, new password works
     expect(await signInStatus(u.email, PASSWORD)).toBe(401);
-    // session behaviour: Better Auth revoked ALL sessions and issued a replacement cookie
+    // session behaviour: ALL sessions were revoked and a replacement session was issued by a normal sign-in
     const replacement = cookieOf(result.headers);
     expect(replacement).toContain("session_token=");
     await expect(requireAccess(u.headers, deps())).rejects.toBeInstanceOf(UnauthenticatedError); // old cookie revoked
@@ -202,12 +200,16 @@ describe("forced password change (real PostgreSQL + Better Auth)", () => {
       expect(all).not.toContain(secret.slice(0, 20));
   });
 
-  it("ORDERING: the flag is still set while Better Auth performs the change, and is cleared only after it succeeds", async () => {
+  it("ORDERING: the replacement session is issued only after the change committed (new hash, flag cleared)", async () => {
     const u = await flaggedUser();
-    const observed: Array<boolean | undefined> = [];
-    const original = a.pub.api.changePassword;
-    const spy = vi.spyOn(a.pub.api, "changePassword").mockImplementation((async (args: never) => {
-      observed.push(await flag(u.user.id)); // state at the moment Better Auth runs
+    const before = await hash(u.user.id);
+    const observed: Array<{ hashChanged: boolean; flag: boolean | undefined }> = [];
+    const original = a.pub.api.signInEmail;
+    const spy = vi.spyOn(a.pub.api, "signInEmail").mockImplementation((async (args: never) => {
+      observed.push({
+        hashChanged: (await hash(u.user.id)) !== before,
+        flag: await flag(u.user.id),
+      });
       return original(args);
     }) as never);
     try {
@@ -219,62 +221,40 @@ describe("forced password change (real PostgreSQL + Better Auth)", () => {
     } finally {
       spy.mockRestore();
     }
-    expect(observed).toEqual([true]);
-    expect(await flag(u.user.id)).toBe(false);
+    expect(observed).toEqual([{ hashChanged: true, flag: false }]);
   });
 
-  it("a Better Auth failure never clears the flag", async () => {
+  it("ATOMIC (C1A): a failure inside the change transaction changes nothing, and a retry completes it", async () => {
     const u = await flaggedUser();
-    const spy = vi
-      .spyOn(a.pub.api, "changePassword")
-      .mockRejectedValue(new Error("auth down") as never);
-    try {
-      await expect(
-        changeOwnPassword(
-          u.headers,
-          { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
-          deps(),
-        ),
-      ).rejects.toThrow("auth down");
-    } finally {
-      spy.mockRestore();
-    }
-    expect(await flag(u.user.id)).toBe(true);
-    expect(await signInStatus(u.email, PASSWORD)).toBe(200);
-  });
-
-  it("FAIL-CLOSED: if clearing the flag fails after Better Auth succeeded, the user stays blocked and a retry completes it", async () => {
-    const u = await flaggedUser();
-    const sdb = serviceDb(t);
-    const spy = vi.spyOn(sdb, "update").mockImplementation((() => {
-      throw new Error("simulated flag-clear failure");
-    }) as never);
+    const before = await hash(u.user.id);
+    await t.pool.query(`
+      create function pw_fail_session_delete() returns trigger language plpgsql as $$
+      begin raise exception 'injected failure after the credential write'; end $$;
+      create trigger pw_fail_session_delete_trg before delete on sessions
+        for each row execute function pw_fail_session_delete();`);
     let err: unknown;
     try {
       err = await rejection(
         changeOwnPassword(
           u.headers,
           { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
-          { db: sdb, auth: a.pub },
+          deps(),
         ),
       );
     } finally {
-      spy.mockRestore();
+      await t.pool.query(
+        "drop trigger pw_fail_session_delete_trg on sessions; drop function pw_fail_session_delete();",
+      );
     }
-    expect(err).toBeInstanceOf(PasswordChangeIncompleteError);
-    // password HAS changed, but the user is still blocked
+    expect(err).toBeInstanceOf(Error);
+    expect(await hash(u.user.id)).toBe(before);
     expect(await flag(u.user.id)).toBe(true);
-    expect(await signInStatus(u.email, PASSWORD)).toBe(401);
-    expect(await signInStatus(u.email, NEW_PASSWORD)).toBe(200);
-    const fresh = await login(a, u.email, NEW_PASSWORD);
-    await expect(requireAccess(headersWith(fresh), deps())).rejects.toBeInstanceOf(
-      PasswordChangeRequiredError,
-    );
+    expect(await signInStatus(u.email, PASSWORD)).toBe(200);
+    expect(await signInStatus(u.email, NEW_PASSWORD)).toBe(401);
 
-    // retry: the password they just set is the "current" one
     const retry = await changeOwnPassword(
-      headersWith(fresh),
-      { currentPassword: NEW_PASSWORD, newPassword: THIRD_PASSWORD },
+      headersWith(await login(a, u.email)),
+      { currentPassword: PASSWORD, newPassword: THIRD_PASSWORD },
       deps(),
     );
     expect(await flag(u.user.id)).toBe(false);
@@ -282,7 +262,28 @@ describe("forced password change (real PostgreSQL + Better Auth)", () => {
       u.user.id,
     );
     expect(await signInStatus(u.email, THIRD_PASSWORD)).toBe(200);
-    expect(JSON.stringify(logs)).not.toContain(NEW_PASSWORD);
+  });
+
+  it("if issuing the replacement session fails, the change stands and the user signs in with the new password", async () => {
+    const u = await flaggedUser();
+    const spy = vi
+      .spyOn(a.pub.api, "signInEmail")
+      .mockRejectedValue(new Error("auth down") as never);
+    let result: Awaited<ReturnType<typeof changeOwnPassword>>;
+    try {
+      result = await changeOwnPassword(
+        u.headers,
+        { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
+        deps(),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(cookieOf(result.headers)).toBe("");
+    expect(await flag(u.user.id)).toBe(false);
+    await expect(requireAccess(u.headers, deps())).rejects.toBeInstanceOf(UnauthenticatedError);
+    expect(await signInStatus(u.email, NEW_PASSWORD)).toBe(200);
+    expect(await signInStatus(u.email, PASSWORD)).toBe(401);
   });
 
   it("a user with nothing pending (no security-state row) can also change their own password", async () => {

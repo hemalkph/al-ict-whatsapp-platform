@@ -71,6 +71,17 @@ describe("auth environment (validated lazily)", () => {
         "/set-password",
         "/sign-up/email",
         "/update-user",
+        // Phase 08G-7B C1A (C1-G10)
+        "/sign-in/social",
+        "/update-session",
+        "/account-info",
+        "/list-accounts",
+        "/unlink-account",
+        "/get-access-token",
+        "/refresh-token",
+        "/send-verification-email",
+        "/verify-email",
+        "/change-password",
       ].sort(),
     );
   });

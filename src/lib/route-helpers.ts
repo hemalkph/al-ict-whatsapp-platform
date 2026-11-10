@@ -5,6 +5,7 @@ import {
   type AccessContext,
 } from "@/modules/access";
 import { getAllowedOrigins } from "@/modules/auth";
+import { withPlatformActor, type PlatformActor, type PlatformPermission } from "@/modules/platform";
 import { ValidationError, toErrorResponse } from "@/shared/errors/http-errors";
 import { assertSameOrigin } from "@/shared/security/same-origin";
 
@@ -70,6 +71,42 @@ export async function handleApi(
       ? await readJsonBody(request, options.body === "optional")
       : undefined;
     const result = await run({ ctx, body });
+    return Response.json(result.data, {
+      status: result.status ?? 200,
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
+}
+
+/**
+ * The platform variant of handleApi (C1A): same-origin guard (mutations), the platform actor from the session (never from
+ * the request), optional JSON body, safe JSON response. Refusals after the user is known get a best-effort DENIED/FAILED
+ * platform audit row under `action`. No tenant AccessContext is created.
+ */
+export async function handlePlatformApi(
+  request: Request,
+  options: {
+    readonly mutation: boolean;
+    readonly body?: "required" | "optional";
+    readonly action: string;
+    readonly permission: PlatformPermission;
+  },
+  run: (input: { actor: PlatformActor; body: unknown; correlationId: string }) => Promise<Handled>,
+): Promise<Response> {
+  try {
+    if (options.mutation) assertSameOrigin(request, getAllowedOrigins());
+    const result = await withPlatformActor(
+      request.headers,
+      options,
+      async (actor, correlationId) => {
+        const body = options.body
+          ? await readJsonBody(request, options.body === "optional")
+          : undefined;
+        return run({ actor, body, correlationId });
+      },
+    );
     return Response.json(result.data, {
       status: result.status ?? 200,
       headers: { "Cache-Control": "no-store" },

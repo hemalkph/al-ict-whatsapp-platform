@@ -17,7 +17,7 @@ import {
   type BotWorld,
   type SessionKeys,
 } from "../../modules/bot-control/testing"; // test fixtures, imported relatively like every other test
-import { createTestDatabase, type TestDb } from "./helpers";
+import { createTestDatabase, migrateThrough, type TestDb } from "./helpers";
 
 // Migration 0009 (decision O-4, plan L.2): two performance-only bot_sessions indexes, on disposable al_ict_test_* databases
 // only. L.2 asks for a pinned-hash test for 0000-0008, an upgrade test from a database at 0008 with representative rows, and
@@ -265,7 +265,7 @@ describe("migration 0009: upgrading a database at 0008 that already holds bot se
       "WAITING_FOR_INPUT",
     ]);
 
-    await migrate(t.db, { migrationsFolder: FULL });
+    await migrateThrough(t, TAG); // exactly 0009 (later migrations add their own objects)
 
     expect(await snapshot()).toEqual(beforeRows);
     expect(await catalog(t)).toEqual(expectedCatalog);
@@ -287,9 +287,9 @@ describe("migration 0009: upgrading a database at 0008 that already holds bot se
     expect(await productionFacts([])).toEqual(beforeFacts);
     // re-running the migrator is a no-op
     const n = (await q("select count(*)::int n from drizzle.__drizzle_migrations")).rows[0].n;
-    await migrate(t.db, { migrationsFolder: FULL });
+    await migrateThrough(t, TAG);
     expect((await q("select count(*)::int n from drizzle.__drizzle_migrations")).rows[0].n).toBe(n);
-    expect(n).toBe(journal.entries.length);
+    expect(n).toBe(BEFORE + 1);
   });
 
   it("the representative production reads give identical, correct results through the new indexes and without them", async () => {

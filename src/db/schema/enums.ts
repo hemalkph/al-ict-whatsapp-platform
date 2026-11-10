@@ -211,3 +211,10 @@ export const BOT_SESSION_EVENT_KINDS = [
   "ERROR",
 ] as const;
 export const BOT_TRIGGER_STATUSES = ["PENDING", "PROCESSED", "IGNORED", "DEAD"] as const;
+
+// Platform operators (Phase 08G-7B C1A). Separate from organization MEMBERSHIP_ROLES: neither implies the other.
+export const PLATFORM_ROLES = ["PLATFORM_OPERATOR", "PLATFORM_SECURITY_ADMIN"] as const;
+export const PLATFORM_ROLE_STATUSES = ["ACTIVE", "REVOKED"] as const;
+export const PLATFORM_GRANT_KINDS = ["NORMAL", "BOOTSTRAP"] as const;
+export const PLATFORM_AUDIT_ACTOR_KINDS = ["HUMAN", "BOOTSTRAP"] as const;
+export const PLATFORM_AUDIT_OUTCOMES = ["SUCCEEDED", "DENIED", "FAILED"] as const;

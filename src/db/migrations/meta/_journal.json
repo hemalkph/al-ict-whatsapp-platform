@@ -71,6 +71,13 @@
       "when": 1792978546178,
       "tag": "0009_bot_runtime_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794295292337,
+      "tag": "0010_platform_operator_foundation",
+      "breakpoints": true
     }
   ]
 }

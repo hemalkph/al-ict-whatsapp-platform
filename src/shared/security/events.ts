@@ -34,7 +34,10 @@ export type SecurityEventName =
   | "bootstrap.incomplete"
   | "provisioning_recovery.resumed"
   | "provisioning_recovery.removed"
-  | "provisioning_recovery.refused";
+  | "provisioning_recovery.refused"
+  | "platform.access_denied"
+  | "platform.audit_write_failed"
+  | "platform.bootstrap_refused";
 
 export type SecurityEvent = {
   event: SecurityEventName;

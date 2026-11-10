@@ -1,6 +1,8 @@
 # ADR 0012: Authentication, organization membership and authorization (Phase 03)
 
-Status: Accepted (supersedes [ADR 0010](0010-better-auth-provisional.md))
+Status: Accepted (supersedes [ADR 0010](0010-better-auth-provisional.md)). **Amended** by Phase 08G-7B C1A (see "Amendment: credential state binding" at the end), which supersedes the
+password-reset mechanism of checkpoint 4/4b for tenant resets and provisioning resumes, the own-password-change mechanism of
+checkpoint 5, and the statement that `/change-password` stays open on the public instance.
 
 ## Context
 
@@ -112,3 +114,80 @@ Service functions only (no HTTP routes, UI or CLI yet), in `src/modules/access/s
 ## Consequences
 
 Provisioning is safe against a failed partial create and against cross-organization identity capture, at the cost of one small coordination table and an explicit two-instance configuration that must be kept in sync (shared base config; differences enumerated and tested). The production dependency tree includes `drizzle-kit` (and its older `esbuild`) because `better-auth` declares it as an optional peer; this is evidence recorded for review, not mitigated here.
+
+## Amendment: credential state binding (Phase 08G-7B C1A, owner-authorized implementation; pending closure review)
+
+**Why.** Platform operator roles (C1A) made two cross-transaction gaps exploitable, because a password an administrator
+knows could otherwise reach platform authority:
+
+1. Password replacement through the private reset-token flow authorized in one transaction and wrote in a later one
+   (`requestPasswordReset` / `resetPassword`), so a platform grant could land between the check and the write.
+2. Better Auth 1.7.7 verifies a password and acts on it in separate statements with no compare-and-swap: email sign-in reads
+   the credential, verifies, then calls `internalAdapter.createSession`; `/change-password` reads, verifies, then calls
+   `internalAdapter.updateAccount(account.id, …)` by id. A proof checked against a credential that is replaced before the
+   session insert or the write could still issue a session or overwrite the newer credential.
+
+**What changed.**
+
+| Operation                                                 | Mechanism now                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tenant administrator reset (`resetStaffPassword`)         | ONE application transaction: actor re-check, user row `FOR UPDATE`, refusal of shared identities and of users with an ACTIVE platform role, credential write, `password_change_required = true`, session revocation. No reset token                                                                                                                               |
+| Staff provisioning resume (`createStaff`)                 | The original requester is checked before sign-up; an unbound intent is locked across private sign-up and binding. Resume requires that binding to the identity this workflow created and the same requester; replacement stays in the final transaction under intent and user locks. Unbound intents beside existing identities go to `auth:intents`              |
+| Own password change (`POST /api/account/change-password`) | ONE transaction under the user and credential row locks: verify the current password against the stored hash, reject a new password that verifies against that hash (including NFKC equivalents), write the new hash, clear `password_change_required`, delete every session; then a replacement session through normal email sign-in. Needs only a valid session |
+| Better Auth `/change-password` (public)                   | **Closed** (`disabledPaths`): its write cannot be made compare-and-swap. No application code calls `api.changePassword`                                                                                                                                                                                                                                           |
+| `auth:bootstrap-admin` interrupted identity recovery      | Unchanged: the remaining private reset-token caller (`replaceCredentialPassword` in `bootstrapFirstAdmin`). A database-credential path (C1-G3)                                                                                                                                                                                                                    |
+| `auth:intents` resume (operator CLI)                      | Revalidates recovery provenance and creates membership/security state; does not replace credentials. A database-credential path (C1-G3)                                                                                                                                                                                                                           |
+| First-admin bootstrap, staff creation of a new identity   | Unchanged: the private instance's `signUpEmail`                                                                                                                                                                                                                                                                                                                   |
+
+**Hashing and canonical account contract.** Direct writes hash with `hashPassword` from `better-auth/crypto` (the library's
+default, used because no custom `emailAndPassword.password.hash` is configured; if one is ever configured, these writers must
+use it). They read and write only Better Auth's **canonical** credential row: `provider_id = 'credential'` AND
+`account_id = user_id`, exactly as `internalAdapter.findCredentialAccount`, `updatePassword` and email sign-in select it. A
+non-canonical row is treated as no credential (tested: sign-in, own change, reset and bootstrap all refuse it).
+
+**Credential generation and sessions (migration 0010).**
+
+- `user_security_state.credential_generation` is incremented by a trigger on every change of a stored password, whoever
+  writes it; no caller supplies it. This is an **AFTER UPDATE** trigger: it takes the `users` row `FOR UPDATE`, but the writer already holds the account row lock. C1A application writers explicitly lock the user before updating the account; the legacy reset-token writer does not.
+- `sessions.credential_generation` and `sessions.credential_verified_at` are Better Auth session `additionalFields`
+  (`input: false`). The session-create hook (shared base config) accepts only `/sign-in/email`, re-verifies the submitted
+  password against the canonical credential, and stamps the generation and the database time read in that statement. A
+  `sessions` trigger takes the `users` row `FOR KEY SHARE` first (conflicting with every credential change) and refuses the
+  insert if the generation moved or the proof time is in the future or over a minute old. `created_at` and the binding
+  columns are immutable.
+- Platform admission reads session existence, authenticated-user binding, expiry, generation, forced-change state and ACTIVE roles in **one statement snapshot**. Permission and audit scope use only those returned roles, never a later role query. Mutation services retain their locked authorization and measure the 10-minute re-authentication window from `credential_verified_at` on `clock_timestamp()`.
+
+**Concurrency guarantees.** For the credential coordination portion of C1A application paths, `users` is locked before
+account/security rows. Grant, tenant reset, bound provisioning resume and own change hold it `FOR UPDATE` while they decide
+and write. Their earlier organization, actor, intent and platform-role locks remain operation-specific. New staff signup
+holds the intent row lock across the private signup transaction and binding, then retains the final locked checks. The legacy
+`auth:bootstrap-admin` reset-token writer can lock the account before the AFTER trigger locks the user: it does **not** share
+a universal user-first ordering and may deadlock with a C1A writer (PostgreSQL aborts one transaction). Migrating/withdrawing
+legacy privileged CLI paths remains a separate gate.
+
+The two sign-in fences prove different invariants (`src/modules/platform/platform.db.test.ts`):
+
+- `C1A-CORR-PREHOOK` parks Better Auth's initial verifier **after real verification**, lets owner replacement and enrollment
+  commit, then exercises the real session hook. The hook must reject the old password against the new canonical hash.
+  Removing only that re-verification makes the test fail even with the generation insert guard intact: stamping the latest
+  generation alone would legitimize a stale proof.
+- `C1A-P1-F` parks the session insert **after both verifications**. A later credential change must make the insert fail its
+  generation check. If the insert commits first, application credential replacement deletes it in its transaction.
+- `C1A-CORR-READ` pauses after the admission query's real result: a temporary-password session cannot inherit a role granted
+  after replacement. Both platform read routes are covered; a separate before-statement barrier checks committed revocation, and revocation/re-enrollment cannot broaden an already admitted own-audit scope.
+- `C1A-CORR-REUSE` verifies exact/NFKC reuse rejection with unchanged hash, generation, sessions and flag, followed by a real
+  distinct-password change and successful enrollment. `C1A-CORR-INTENT` checks unbound requester refusal without identity
+  creation and the original requester's completion; existing bound-recovery and pre-existing-account tests remain.
+
+Bypass by whoever holds the owning database credential is not prevented (C1-G3).
+
+**Behavior changes.** An interrupted reset or own change changes nothing (previously a half state could remain). Own changes
+always revoke every session and issue a new one. Concurrent resets of one user are serialized (both complete; the later
+wins). Sign-in costs one extra password verification (the hook's re-verification).
+
+**Better Auth upgrade checks (in addition to Limitation A).** Before any upgrade, re-verify in the installed package:
+`databaseHooks.session.create.before` still runs inside the endpoint context with `ctx.path` and `ctx.body`, its returned
+`data` is merged into the insert, and `additionalFields` with `input: false` are written; email sign-in still issues sessions
+only through `internalAdapter.createSession`; the canonical credential lookup is unchanged; `hashPassword` / `verifyPassword`
+remain the default hashing; no new public endpoint creates sessions or writes credentials (if one does, it must be closed or
+bound). Then run the auth, access and platform PostgreSQL suites.

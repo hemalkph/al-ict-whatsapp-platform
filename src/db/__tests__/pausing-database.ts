@@ -4,13 +4,13 @@ import * as schema from "../schema";
 import { assertDisposableName, type TestDb } from "./helpers";
 
 // TEST-ONLY (Phase 08E-9 Batch 3, owner-authorized): a second database handle on the SAME validated disposable database whose
-// connections can be PAUSED immediately before one chosen statement is transmitted, with REAL transactions and real locks. It
+// connections can be PAUSED before a statement is transmitted or after its real result arrives, with REAL transactions and locks. It
 // follows the pattern of faulty-database.ts and lost-commit-ack.ts: the driver's client.query is wrapped per connection.
 //
 // What it does: when the armed pattern matches a statement's text for the FIRST time, the call publishes the connection's backend
-// pid, waits until the test releases it, then sends the ORIGINAL statement with its ORIGINAL parameters and returns the server's
+// pid, waits until released (before sending, or after receiving the result), and returns the ORIGINAL statement's
 // own result or error. It never changes text, parameters, results or errors, never skips a statement, and never answers for the
-// server, so it cannot bypass any authorization: it can only move the moment at which a statement is sent.
+// server, so it cannot bypass authorization: it only delays sending a statement or delivering its real result.
 //
 // Safety: the pool targets only the harness's validated disposable database (assertDisposableName); every connection carries
 // connection-local idle_in_transaction_session_timeout and statement_timeout (startup parameters, never a server or database
@@ -28,7 +28,7 @@ function deferred<T = void>(): Deferred<T> {
 export type Paused = { readonly pid: number; readonly text: string };
 
 export type PauseHandle = {
-  /** Resolves when the matching statement is about to be sent (the connection is then idle inside its transaction). */
+  /** Resolves at the armed boundary (before send, or after receiving the database result). */
   readonly reached: Promise<Paused>;
   /** Lets the paused statement go (idempotent). */
   release(): void;
@@ -68,6 +68,7 @@ export function pausingDatabase(t: TestDb, o: PausingDatabaseOptions = {}) {
   const handles: Array<{ go: Deferred<void> }> = [];
   let armed: {
     match: RegExp;
+    phase: "before" | "after";
     fired: number;
     reached: Deferred<Paused>;
     go: Deferred<void>;
@@ -91,6 +92,7 @@ export function pausingDatabase(t: TestDb, o: PausingDatabaseOptions = {}) {
         a.fired++;
         if (a.fired === 1)
           return (async () => {
+            const result = a.phase === "after" ? await query(...args) : undefined;
             a.reached.resolve({ pid: current, text });
             let timer: NodeJS.Timeout | undefined;
             const outcome = await Promise.race([
@@ -103,7 +105,7 @@ export function pausingDatabase(t: TestDb, o: PausingDatabaseOptions = {}) {
               throw new Error(
                 `pausing database: the paused statement was not released within ${pauseLimitMs} ms`,
               );
-            return query(...args);
+            return a.phase === "after" ? result : query(...args);
           })();
       }
       return query(...args);
@@ -113,10 +115,10 @@ export function pausingDatabase(t: TestDb, o: PausingDatabaseOptions = {}) {
   return {
     db: drizzle(pool, { schema }) as unknown as TestDb["db"],
     statements,
-    /** Arms ONE pause for the first statement whose text matches `match`. One arm at a time. */
-    arm(match: RegExp): PauseHandle {
+    /** Arms ONE pause before sending, or after receiving the real result (before the caller sees it). */
+    arm(match: RegExp, phase: "before" | "after" = "before"): PauseHandle {
       if (armed && armed.fired === 0) throw new Error("pausing database: a pause is already armed");
-      const a = { match, fired: 0, reached: deferred<Paused>(), go: deferred() };
+      const a = { match, phase, fired: 0, reached: deferred<Paused>(), go: deferred() };
       armed = a;
       handles.push(a);
       return {
