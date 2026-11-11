@@ -92,15 +92,15 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
         ports:
-          - 5432:5432
+          - 55432:5432
         options: >-
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      # The harness refuses non-local hosts; this is the service container on localhost.
-      TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # Match the bot fixture's exact isolated-server boundary; never use the application database.
+      TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:55432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -108,6 +108,67 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: Verify isolated E2E PostgreSQL service
+        env:
+          E2E_POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { resolveAdminTarget } from './src/db/__tests__/helpers.ts';
+
+          let check = 'administrative target';
+          try {
+            const target = resolveAdminTarget(); // Driver-effective validation, no database connection.
+            assert.equal(target.host, '127.0.0.1');
+            assert.equal(target.port, 55432);
+            assert.equal(target.database, 'postgres');
+            assert.equal(target.user, 'postgres');
+            assert.equal(target.password, 'postgres'); // This service's disposable credentials only.
+            for (const [name, value] of Object.entries(process.env))
+              if (name !== 'TEST_DATABASE_ADMIN_URL' && /^(DATABASE_|TEST_DATABASE_|PG)|^E2E_DATABASE_URL$/.test(name))
+                assert.ok(!value);
+
+            check = 'job service identity and port';
+            const id = process.env.E2E_POSTGRES_SERVICE_ID;
+            assert.match(id ?? '', /^[0-9a-f]{64}$/);
+            const docker = (...args) => execFileSync('docker', args, {
+              encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000,
+            });
+            const [container] = JSON.parse(docker('inspect', '--type', 'container', id));
+            assert.equal(container.Id, id);
+            assert.equal(container.Config.Image, 'postgres:17');
+            assert.equal(container.State.Running, true);
+            assert.equal(container.State.Health.Status, 'healthy');
+            const bindings = container.NetworkSettings.Ports['5432/tcp'];
+            assert.ok(bindings?.length > 0);
+            assert.ok(bindings.every(p => p.HostPort === '55432'));
+            assert.ok(bindings.some(p => ['127.0.0.1', '0.0.0.0'].includes(p.HostIp)));
+
+            check = 'fresh anonymous PostgreSQL storage';
+            // Image-created anonymous storage is allowed; explicit/reused/host-mounted storage is not.
+            for (const field of ['Binds', 'Mounts', 'VolumesFrom'])
+              assert.equal((container.HostConfig[field] ?? []).length, 0);
+            assert.equal(Object.keys(container.HostConfig.Tmpfs ?? {}).length, 0);
+            assert.ok(container.Config.Env.includes('PGDATA=/var/lib/postgresql/data'));
+            assert.equal(container.Mounts.length, 1);
+            const [mount] = container.Mounts;
+            assert.equal(mount.Type, 'volume');
+            assert.equal(mount.Destination, '/var/lib/postgresql/data');
+            assert.equal(mount.Driver, 'local');
+            assert.match(mount.Name, /^[0-9a-f]{64}$/);
+            const [volume] = JSON.parse(docker('volume', 'inspect', mount.Name));
+            assert.equal(volume.Driver, 'local');
+            assert.equal(Object.keys(volume.Options ?? {}).length, 0);
+            const age = Date.parse(container.Created) - Date.parse(volume.CreatedAt);
+            assert.ok(Number.isFinite(age) && Math.abs(age) <= 60000);
+            assert.equal(docker('ps', '-a', '--no-trunc', '--filter', `volume=${mount.Name}`, '--format', '{{.ID}}').trim(), id);
+            console.log(`E2E PostgreSQL service ${id}: verified 127.0.0.1:55432, fresh anonymous storage.`);
+          } catch {
+            console.error(`::error::E2E PostgreSQL preflight refused: ${check}.`);
+            process.exit(1);
+          }
+          NODE
       - name: Install Chromium and its system dependencies
         run: npx playwright install --with-deps chromium
       - name: Production build

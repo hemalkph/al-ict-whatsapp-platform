@@ -1,4 +1,9 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { runInNewContext } from "node:vm";
+import { disposableTarget, resolveAdminTarget } from "../src/db/__tests__/helpers";
 import { BOT_ORG_A, BOT_ORG_B, BOT_USERS } from "../e2e/support/identities";
 import { describe, expect, it } from "vitest";
 import {
@@ -61,6 +66,196 @@ describe("E2E_DATABASE_URL guard", () => {
     } catch (error) {
       expect(String(error)).not.toMatch(/secret-pw|db\.example\.com|user:/);
     }
+  });
+});
+
+type CiJob = {
+  "runs-on": string;
+  env: Record<string, string>;
+  services: Record<
+    string,
+    { image: string; ports: string[]; env: Record<string, string>; volumes?: string[] }
+  >;
+  steps: {
+    name?: string;
+    run?: string;
+    env?: Record<string, string>;
+    if?: string;
+    "continue-on-error"?: boolean;
+  }[];
+};
+// Use ESLint's installed YAML parser; no new dependency or database connection.
+const { load } = createRequire(import.meta.url)("js-yaml") as {
+  load(source: string): { on: Record<string, unknown>; jobs: Record<string, CiJob> };
+};
+const workflowText = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const workflow = load(workflowText);
+const ci = workflow.jobs.e2e!;
+const preflight = ci.steps.find((s) => s.name === "Verify isolated E2E PostgreSQL service")!;
+const serviceId = "a".repeat(64);
+const volumeName = "b".repeat(64);
+const ciContainer = () => ({
+  Id: serviceId,
+  Config: { Image: "postgres:17", Env: ["PGDATA=/var/lib/postgresql/data"] },
+  State: { Running: true, Health: { Status: "healthy" } },
+  Created: "2026-11-11T00:00:00.500Z",
+  NetworkSettings: {
+    Ports: { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "55432" }] },
+  },
+  HostConfig: {
+    Binds: [] as string[],
+    Mounts: [] as unknown[],
+    VolumesFrom: [] as string[],
+    Tmpfs: {} as Record<string, string>,
+  },
+  Mounts: [
+    {
+      Type: "volume",
+      Destination: "/var/lib/postgresql/data",
+      Driver: "local",
+      Name: volumeName,
+    },
+  ],
+});
+
+function runCiPreflight(
+  change: (container: ReturnType<typeof ciContainer>) => void = () => undefined,
+  env: Record<string, string | undefined> = {},
+  volume = { Driver: "local", Options: {}, CreatedAt: "2026-11-11T00:00:00Z" },
+  volumeUsers = serviceId,
+) {
+  const container = ciContainer();
+  change(container);
+  const output: string[] = [];
+  const commands: string[][] = [];
+  const environment: Record<string, string | undefined> = {
+    ...ci.env,
+    E2E_POSTGRES_SERVICE_ID: serviceId,
+    ...env,
+  };
+  // Execute the workflow's actual Node body with Docker replaced by fixtures. No shell or database runs.
+  const code = preflight
+    .run!.match(/<<'NODE'\n([\s\S]*?)\nNODE/)![1]!
+    .replace(/^import .+;\n/gm, "");
+  runInNewContext(code, {
+    assert,
+    resolveAdminTarget: () => resolveAdminTarget(environment.TEST_DATABASE_ADMIN_URL),
+    execFileSync: (command: string, args: string[]) => {
+      expect(command).toBe("docker");
+      commands.push(args);
+      if (args.join(" ") === `inspect --type container ${serviceId}`)
+        return JSON.stringify([container]);
+      if (args.join(" ") === `volume inspect ${volumeName}`) return JSON.stringify([volume]);
+      if (args.join(" ") === `ps -a --no-trunc --filter volume=${volumeName} --format {{.ID}}`)
+        return volumeUsers;
+      throw new Error("unexpected Docker command");
+    },
+    process: {
+      env: environment,
+      exit: () => {
+        throw new Error(output.join("\n"));
+      },
+    },
+    console: { log: (s: string) => output.push(s), error: (s: string) => output.push(s) },
+  });
+  return { output, commands };
+}
+
+describe("CI E2E service contract", () => {
+  it("uses the isolated PostgreSQL 17 service and derives a URL accepted by the real bot guard", () => {
+    expect(Object.keys(workflow.on)).toEqual(["push", "pull_request"]);
+    expect(ci["runs-on"]).toBe("ubuntu-latest");
+    expect(Object.keys(ci.services)).toEqual(["postgres"]);
+    expect(ci.services.postgres).toMatchObject({
+      image: "postgres:17",
+      ports: ["55432:5432"],
+      env: { POSTGRES_USER: "postgres", POSTGRES_PASSWORD: "postgres", POSTGRES_DB: "postgres" },
+    });
+    expect(ci.services.postgres!.volumes).toBeUndefined();
+    expect(ci.env).toEqual({
+      TEST_DATABASE_ADMIN_URL: "postgresql://postgres:postgres@127.0.0.1:55432/postgres",
+    });
+    const admin = resolveAdminTarget(ci.env.TEST_DATABASE_ADMIN_URL);
+    expect(admin).toMatchObject({ host: "127.0.0.1", port: 55432, database: "postgres" });
+    const name = "al_ict_e2e_0123456789ab";
+    const generated = disposableTarget(admin, name);
+    expect(parseTarget(generated.url)).toEqual(generated.target);
+    expect(generated.target.database).toMatch(/^al_ict_e2e_[0-9a-f]{12}$/);
+    expect(() => parseTarget(`postgresql://postgres:postgres@localhost:5432/${name}`)).toThrow(
+      /bad host.*port/,
+    );
+  });
+
+  it("verifies GitHub's service identity before the guarded harness can create or migrate anything", () => {
+    expect(preflight.env).toEqual({ E2E_POSTGRES_SERVICE_ID: "${{ job.services.postgres.id }}" });
+    expect(preflight.if).toBeUndefined();
+    expect(preflight["continue-on-error"]).toBeUndefined();
+    const harness = ci.steps.find((s) => s.run === "npm run test:e2e")!;
+    expect(ci.steps.indexOf(preflight)).toBeLessThan(ci.steps.indexOf(harness));
+    expect(ci.steps.flatMap((s) => s.run?.match(/npm run (?:test:e2e\S*|db:\S+)/g) ?? [])).toEqual([
+      "npm run test:e2e",
+    ]);
+    expect(preflight.run).not.toMatch(/createTestDatabase|\.query\(|\.connect\(|process\.env\.CI/);
+    expect(JSON.stringify(ci)).not.toMatch(
+      /secrets\.|al_ict_whatsapp|--mount|--volume|volumes-from/,
+    );
+  });
+
+  it("keeps the separate database job identical to the approved baseline", () => {
+    // Pin the parsed job at 06998cc without requiring that commit in a shallow Actions checkout.
+    expect(createHash("sha256").update(JSON.stringify(workflow.jobs.database)).digest("hex")).toBe(
+      "a25e834346168d4cd8049ae8a883d75221dc9e901c38cd14610952141ba696d8",
+    );
+  });
+
+  it("accepts a healthy job service with its fresh anonymous image-created volume", () => {
+    const result = runCiPreflight();
+    expect(result.commands).toHaveLength(3);
+    expect(result.output.join("\n")).toContain("verified 127.0.0.1:55432");
+    expect(result.output.join("\n")).not.toMatch(/postgresql:|postgres:postgres/);
+  });
+
+  it.each([
+    ["wrong identity", (c) => (c.Id = "c".repeat(64))],
+    ["wrong image", (c) => (c.Config.Image = "postgres:16")],
+    ["stopped service", (c) => (c.State.Running = false)],
+    ["unhealthy service", (c) => (c.State.Health.Status = "unhealthy")],
+    ["wrong port", (c) => (c.NetworkSettings.Ports["5432/tcp"][0]!.HostPort = "5432")],
+    ["unreachable binding", (c) => (c.NetworkSettings.Ports["5432/tcp"][0]!.HostIp = "::")],
+    ["host bind", (c) => c.HostConfig.Binds.push("/data:/var/lib/postgresql/data")],
+    ["explicit mount", (c) => c.HostConfig.Mounts.push({ Type: "volume" })],
+    ["inherited storage", (c) => c.HostConfig.VolumesFrom.push("other")],
+    ["tmpfs override", (c) => (c.HostConfig.Tmpfs["/data"] = "rw")],
+    ["custom PGDATA", (c) => (c.Config.Env = ["PGDATA=/data"])],
+    ["bind-mounted data", (c) => (c.Mounts[0]!.Type = "bind")],
+    ["named persistent volume", (c) => (c.Mounts[0]!.Name = "reused-postgres")],
+  ] satisfies [string, (c: ReturnType<typeof ciContainer>) => unknown][])(
+    "fails closed for %s",
+    (_name, change) => expect(() => runCiPreflight(change)).toThrow(/preflight refused/),
+  );
+
+  it.each([
+    { E2E_POSTGRES_SERVICE_ID: "" },
+    { TEST_DATABASE_ADMIN_URL: "postgresql://u:secret@localhost:5432/postgres" },
+    { TEST_DATABASE_ADMIN_URL: "postgresql://u:secret@127.0.0.1:55432/al_ict_whatsapp" },
+    { TEST_DATABASE_ADMIN_URL: "postgresql://u:secret@127.0.0.1:55432/postgres?host=remote" },
+    { DATABASE_URL: "postgresql://u:secret@remote/al_ict_whatsapp" },
+    { E2E_DATABASE_URL: GOOD },
+    { PGHOST: "remote" },
+  ])("refuses missing identity or alternate targets without exposing credentials: %j", (env) => {
+    expect(() => runCiPreflight(undefined, env)).toThrow(/preflight refused/);
+    expect(() => runCiPreflight(undefined, env)).not.toThrow(/secret|postgresql:\/\//);
+  });
+
+  it("refuses an old, externally configured or shared volume", () => {
+    for (const volume of [
+      { Driver: "local", Options: {}, CreatedAt: "2026-11-10T00:00:00Z" },
+      { Driver: "local", Options: { type: "nfs" }, CreatedAt: "2026-11-11T00:00:00Z" },
+    ])
+      expect(() => runCiPreflight(undefined, {}, volume)).toThrow(/preflight refused/);
+    expect(() =>
+      runCiPreflight(undefined, {}, undefined, `${serviceId}\n${"c".repeat(64)}`),
+    ).toThrow(/preflight refused/);
   });
 });
 
