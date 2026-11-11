@@ -235,6 +235,59 @@ describe("runBotWorker", () => {
     expect(f.calls.filter((at) => at > stoppedAt)).toEqual([]);
   });
 
+  it("a synchronous pool-close throw is memoized and reported as failure", async () => {
+    const f = unavailableDb("ok");
+    f.database.close = vi.fn(() => {
+      throw new Error("close failed");
+    });
+    expect(
+      await runBotWorker({ env: ON, signal: stopAfter(0), createDatabase: () => f.database }),
+    ).toBe(EXIT_FATAL);
+    expect(f.database.close).toHaveBeenCalledTimes(1);
+    expect(logEvents().some((e) => e.reason === "pool_close_failed")).toBe(true);
+  });
+
+  it("the bot's single deadline includes a pending preflight drain plus pool closure", async () => {
+    vi.useFakeTimers();
+    try {
+      const work = Promise.withResolvers<void>();
+      const entered = Promise.withResolvers<void>();
+      const closing = Promise.withResolvers<void>();
+      const closed = Promise.withResolvers<void>();
+      const execute = async () => {
+        entered.resolve();
+        await work.promise;
+        throw new Error("unavailable");
+      };
+      const close = vi.fn(() => {
+        closing.resolve();
+        return closed.promise;
+      });
+      const c = new AbortController();
+      const running = runBotWorker({
+        env: ON,
+        signal: c.signal,
+        shutdownGraceMs: 1000,
+        createDatabase: () => ({ db: { execute } as unknown as WorkerDatabase["db"], close }),
+      });
+      await entered.promise;
+      c.abort();
+      await vi.advanceTimersByTimeAsync(600);
+      expect(close).not.toHaveBeenCalled();
+      work.resolve();
+      await closing.promise;
+      c.abort();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await running).toBe(EXIT_FATAL);
+      closed.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(logEvents().some((e) => e.reason === "shutdown_deadline")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ---------------------------------------------------------------------------------------- preflight branches
   /** A double that answers the preflight's statements in order with the given rows. */
   const sequenced = (...answers: unknown[][]) => {

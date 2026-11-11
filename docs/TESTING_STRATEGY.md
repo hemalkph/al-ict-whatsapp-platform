@@ -291,3 +291,26 @@ The traceability matrix, evidence and limits are in [PHASE_08E_ACCEPTANCE.md](PH
 - _Oversized webhook (EPIPE)_: `e2e/webhook.spec.ts` "a body over 4 MiB" passes on a 413 the client read, or on a reset, and in both cases only if the harness recorded the server's 413 for that same attempt (`x-e2e-attempt`, control port `/attempts/<id>`). "The oversize verdict cannot be faked" injects EPIPE and ECONNRESET before anything is sent, borrows another attempt's real 413, uses a real 403 attempt and the statuses 200/403/500: every one fails the verdict (and the previous message-only acceptance fails this test). The raw-socket 413 test is unchanged. Stress: 2 x 500 runs at 8 workers, no failure.
 - _Lead Details reflow_ (`e2e/lead-detail.spec.ts` "reflow"): the rich lead at 320px (no page overflow, no element outside the viewport or cut by its own box, the status control, Refresh, Load older and the select's list inside the viewport), a plain lead at 390px, and the layout at 768/1024/1280px (two columns from 1024px). It fails on the previous CSS (43px overflow).
 - Run with `DATABASE_URL`, `BETTER_AUTH_URL` and `BETTER_AUTH_SECRET` blanked; the harness creates and drops its own `al_ict_e2e_*` database.
+
+## Worker Shutdown Reliability checkpoint (2026-11-10)
+
+The [checkpoint record](WORKER_SHUTDOWN_RELIABILITY.md) retains the baseline, exact changed-file inventory, commands, failures and raw process evidence. Unit/process tests use database doubles; database tests use the existing guarded disposable-database harness and synthetic data. All outbound transports are fake or local. No real Meta request is authorized by these tests.
+
+- `bot-worker/process.test.ts` and its test-only fixtures exercise all three real runners with SIGTERM/SIGINT, repeat signals, successful/rejected/hanging closure, pending preflight and application deadline versus external SIGKILL. The parent collects output through `close`, records signal target/time, and handles spawn errors.
+- `bot-worker/run.test.ts`, `bot-worker/loops.test.ts` and `whatsapp/worker/run.test.ts` use barriers and fake timers to verify pending work, no new claims/batches, synchronous cleanup failure, exact combined drain/close deadlines and once-only cleanup. Fatal preflight exits also bound pool closure without an operator signal.
+- `bot-worker/process.db.test.ts`, `whatsapp/worker/process.db.test.ts` and `messaging/process.db.test.ts` use real row/table locks or fake-transport IPC barriers. They cover pending claims, in-flight transactions/sends, normal concurrency, forced termination, restart, lease fencing, `UNKNOWN_OUTCOME` with no resend, and worker sessions disappearing from `pg_stat_activity` after shutdown. Outbound recovery age is advanced by the existing test clock seam, without waiting five minutes or changing sending policy.
+
+The repeatability study runs explicitly, never as a production startup hook:
+
+```sh
+SHUTDOWN_STUDY_PHASE=normal node --import tsx src/modules/bot-worker/__fixtures__/shutdown-study.mts /tmp/shutdown-study.jsonl
+SHUTDOWN_STUDY_PHASE=cpu node --import tsx src/modules/bot-worker/__fixtures__/shutdown-study.mts /tmp/shutdown-study.jsonl
+SHUTDOWN_STUDY_PHASE=parallel-full-unit node --import tsx src/modules/bot-worker/__fixtures__/shutdown-study.mts /tmp/shutdown-study.jsonl
+SHUTDOWN_STUDY_PHASE=faults node --import tsx src/modules/bot-worker/__fixtures__/shutdown-study.mts /tmp/shutdown-study.jsonl
+```
+
+Each normal/CPU/parallel phase records ten cycles per worker and signal, including full output and exit status. Run the parallel phase alongside `npm test` to reproduce full-suite contention. The CPU phase deliberately stalls the application event loop for a bounded interval after the ready barrier. The faults phase records 30 additional cases: repeated signals, rejected close, hanging close, released pending work and work exceeding the deadline, across all workers and both signals. Failures are retained, never retried or accepted as exit 143.
+
+The executed matrix recorded 270 outcomes: 240 clean shutdown cycles (40 per worker/signal across normal, CPU and two parallel phases) plus 30 fault/barrier cases; no unexpected outcome. This is bounded regression evidence, not a measured production failure probability. The launcher experiment separately reproduced tsx CLI exits 143/130 and observed its child exit from SIGKILL. Direct Node handled the same fixture cleanly.
+
+Local database executions for this checkpoint were restricted to the verified `al-ict-phase08c-test-pg` PostgreSQL 17 container at `127.0.0.1:55432`, maintenance database `postgres`, with `DATABASE_URL` unset and only the guarded `TEST_DATABASE_ADMIN_URL` mechanism. Container identity, mapping, PostgreSQL version and refusal of permanent/unsafe names were checked before every execution. Existing scratch databases were preserved; teardown used no forced database drop or unrelated-session termination. The permanent `al_ict_whatsapp` database was never connected to or inspected. The standard full DB suite retains its existing seven opt-in query-plan diagnostic skips; no test was disabled for this checkpoint.

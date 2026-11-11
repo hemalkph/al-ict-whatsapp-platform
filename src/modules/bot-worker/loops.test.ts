@@ -230,6 +230,41 @@ describe("bot worker loops", () => {
     expect(r.exit).toBe("stopped");
   });
 
+  it.each(["preflight", "claim"])(
+    "a stop while %s is pending starts no new claim and drains acquired claims",
+    async (stage) => {
+      const stop = new AbortController();
+      const { t } = timing(stop);
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const wait = async () => {
+        entered.resolve();
+        await release.promise;
+      };
+      const claimed = vi.fn(async () => {
+        if (stage === "claim") await wait();
+        return [claim(1)];
+      });
+      const process = vi.fn(async () => done);
+      const running = runTriggerLoop(
+        {
+          ...t,
+          concurrency: 1,
+          preflight: stage === "preflight" ? wait : async () => undefined,
+          claim: claimed,
+          process,
+        },
+        stop.signal,
+      );
+      await entered.promise;
+      stop.abort();
+      release.resolve();
+      expect((await running).exit).toBe("stopped");
+      expect(claimed).toHaveBeenCalledTimes(stage === "claim" ? 1 : 0);
+      expect(process).toHaveBeenCalledTimes(stage === "claim" ? 1 : 0);
+    },
+  );
+
   it("the sweeper never overlaps itself and waits a jittered interval between sweeps", async () => {
     const stop = new AbortController();
     const { t, sleeps } = timing(stop, 4);

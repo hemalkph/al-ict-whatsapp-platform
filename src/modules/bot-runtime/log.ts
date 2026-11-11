@@ -14,6 +14,9 @@ export type BotRuntimeLogEvent =
   // the bot worker process (Phase 08E-7)
   | "bots.worker_started"
   | "bots.worker_stopping"
+  | "bots.worker_drained"
+  | "bots.worker_pool_closing"
+  | "bots.worker_pool_closed"
   | "bots.worker_stopped"
   | "bots.worker_fatal"
   | "bots.database_unavailable"

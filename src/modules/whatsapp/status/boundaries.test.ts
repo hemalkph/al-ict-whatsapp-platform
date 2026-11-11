@@ -166,7 +166,9 @@ describe("status handler boundaries", () => {
       if (name === "whatsapp:worker" || name === "whatsapp:outbound-worker") continue; // the opt-in worker scripts (their own boundary tests pin them)
       if (name === "bots:worker") {
         // the Phase 08E-7 BOT worker: a separate opt-in process (bot-worker/boundaries.test.ts pins it); never this handler
-        expect(command).toBe("tsx --env-file-if-exists=.env.local scripts/bots-worker.ts");
+        expect(command).toBe(
+          "node --env-file-if-exists=.env.local --import tsx scripts/bots-worker.ts",
+        );
         continue;
       }
       expect(name, name).not.toMatch(/worker/i);

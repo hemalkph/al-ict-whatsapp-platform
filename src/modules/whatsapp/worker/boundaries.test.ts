@@ -160,6 +160,13 @@ describe("worker boundaries", () => {
     const importers = [...walk("src"), ...walk("scripts"), ...walk("e2e")]
       .filter((f) => !/\.test\.ts$/.test(f) && !/(^|\/)testing\.ts$/.test(f))
       .filter((f) => !f.startsWith("src/modules/whatsapp/worker/"))
+      .filter(
+        (f) =>
+          ![
+            "src/modules/bot-worker/__fixtures__/shutdown-child.ts",
+            "src/modules/messaging/__tests__/shutdown-child.ts",
+          ].includes(f),
+      )
       .filter((f) => /whatsapp\/worker|\.\/worker/.test(read(join(repo, f))));
     expect(importers).toEqual(["scripts/whatsapp-worker.ts"]);
     expect(script).toContain("process.on(signal, () => controller.abort())");
@@ -175,14 +182,17 @@ describe("worker boundaries", () => {
     expect(
       Object.entries(pkg.scripts).filter(([n, c]) => /worker/i.test(n) || /worker/i.test(c)),
     ).toEqual([
-      ["whatsapp:worker", "tsx --env-file-if-exists=.env.local scripts/whatsapp-worker.ts"],
+      [
+        "whatsapp:worker",
+        "node --env-file-if-exists=.env.local --import tsx scripts/whatsapp-worker.ts",
+      ],
       // the Phase 05 outbound worker: a different process with its own gates and boundary test
       [
         "whatsapp:outbound-worker",
-        "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
+        "node --env-file-if-exists=.env.local --import tsx scripts/whatsapp-outbound-worker.ts",
       ],
       // the Phase 08E-7 BOT worker: a different process with its own gates and boundary test (bot-worker/boundaries.test.ts)
-      ["bots:worker", "tsx --env-file-if-exists=.env.local scripts/bots-worker.ts"],
+      ["bots:worker", "node --env-file-if-exists=.env.local --import tsx scripts/bots-worker.ts"],
     ]);
     for (const hook of [
       "preinstall",

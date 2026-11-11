@@ -44,7 +44,26 @@ describe("bot worker boundaries (08E-7)", () => {
     );
     // the only subdirectory holds the test-only child process of process.test.ts (never imported by production code)
     expect(dirs.map((d) => d.name)).toEqual(["__fixtures__"]);
-    expect(readdirSync(join(root, "__fixtures__"))).toEqual(["shutdown-child.ts"]);
+    expect(readdirSync(join(root, "__fixtures__"))).toEqual([
+      "process-harness.ts",
+      "shutdown-child.ts",
+      "shutdown-study.mts",
+    ]);
+  });
+
+  it("test fixtures are unreachable from every production source; the pinned loader survives production installs", () => {
+    for (const file of [...walk("src"), ...walk("scripts")].filter(
+      (f) =>
+        !/\.test\.ts$/.test(f) && !/(__tests__|__fixtures__)/.test(f) && !f.endsWith("/testing.ts"),
+    ))
+      expect(read(file), file).not.toMatch(/__fixtures__/);
+    const pkg = JSON.parse(read(join(repo, "package.json")));
+    const lock = JSON.parse(read(join(repo, "package-lock.json")));
+    expect(pkg.dependencies.tsx).toBe("4.23.15");
+    expect(pkg.devDependencies.tsx).toBeUndefined();
+    expect(lock.packages[""].dependencies.tsx).toBe(pkg.dependencies.tsx);
+    expect(lock.packages["node_modules/tsx"].devOptional).toBeUndefined();
+    expect(lock.packages["node_modules/esbuild"].devOptional).toBeUndefined();
   });
 
   it("production composition injects NO test capability: no hooks, clock override, barrier, SQL seam or mutation switch", () => {

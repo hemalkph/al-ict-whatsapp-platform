@@ -77,7 +77,9 @@ export async function runWorkerLoop(deps: LoopDeps, signal: AbortSignal): Promis
         await deps.preflight();
         ready = true;
       }
+      if (signal.aborted) break;
       await heartbeat();
+      if (signal.aborted) break;
       const summary = await deps.processBatch();
       for (const key of Object.keys(totals) as (keyof BatchSummary)[]) totals[key] += summary[key];
       // An outcome that could not be recorded means the database is struggling; the lease expiry recovers the event.

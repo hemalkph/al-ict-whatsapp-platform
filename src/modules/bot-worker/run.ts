@@ -148,8 +148,14 @@ export async function runBotWorker(options: RunOptions): Promise<number> {
   // ONE deadline covers the whole shutdown: the loops settling AND the pool closing. A close that rejects is a failure; a close
   // that never settles is cut off by the deadline (the script then exits; the server rolls back and releases every lock).
   let closing: Promise<void> | null = null;
-  const close = () => (closing ??= database.close());
+  const close = () =>
+    (closing ??= Promise.resolve().then(async () => {
+      emitBotRuntimeLog({ event: "bots.worker_pool_closing", outcome: "success" });
+      await database.close();
+      emitBotRuntimeLog({ event: "bots.worker_pool_closed", outcome: "success" });
+    }));
   const shutdown = loops.then(async (r) => {
+    emitBotRuntimeLog({ event: "bots.worker_drained", outcome: "success" });
     try {
       await close();
       return { loops: r, closed: true };

@@ -465,7 +465,9 @@ describe("bot runtime core boundaries (08E-1)", () => {
       Object.entries(scripts).filter(
         ([k, c]) => /^bots:(worker|runtime)/.test(k) || /bots-worker/.test(c),
       ),
-    ).toEqual([["bots:worker", "tsx --env-file-if-exists=.env.local scripts/bots-worker.ts"]]);
+    ).toEqual([
+      ["bots:worker", "node --env-file-if-exists=.env.local --import tsx scripts/bots-worker.ts"],
+    ]);
     expect(readdirSync(join(repo, "scripts"))).toContain("bots-worker.ts");
     // no lifecycle hook, build, dev or test command runs it
     for (const [name, command] of Object.entries(scripts))

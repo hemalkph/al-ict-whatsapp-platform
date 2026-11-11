@@ -30,6 +30,7 @@ const appSources = () =>
       !/\.test\.ts$/.test(f) &&
       !/(^|\/)testing\.ts$/.test(f) &&
       !/__tests__/.test(f) &&
+      f !== "src/modules/bot-worker/__fixtures__/shutdown-child.ts" &&
       f !== "scripts/repro-next-body-clone-abort.mjs", // a standalone Next.js bug reproduction, never run by the app
   );
 
@@ -554,7 +555,7 @@ export { IdempotencyConflictError, OutboundRefusedError } from "./errors";`,
         ["whatsapp:outbound", "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound.ts"],
         [
           "whatsapp:outbound-worker",
-          "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
+          "node --env-file-if-exists=.env.local --import tsx scripts/whatsapp-outbound-worker.ts",
         ],
       ]);
       for (const hook of [

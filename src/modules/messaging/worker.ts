@@ -188,6 +188,7 @@ export async function runOutboundWorker(options: RunOptions): Promise<number> {
           }
           ready = true;
         }
+        if (signal.aborted) break; // Stopped during preflight: start no recovery or claims.
         const batch = await dispatchBatch(deps, {
           batchSize: config.batchSize,
           concurrency: config.concurrency,
@@ -231,9 +232,20 @@ export async function runOutboundWorker(options: RunOptions): Promise<number> {
     return "stopped";
   })();
 
+  // One deadline includes draining AND pool closure, including a close that never settles.
+  let closing: Promise<void> | undefined;
+  const close = () =>
+    (closing ??= Promise.resolve().then(async () => {
+      emitWebhookLog({ event: "outbound.worker_pool_closing", outcome: "success" });
+      await database.close();
+      emitWebhookLog({ event: "outbound.worker_pool_closed", outcome: "success" });
+    }));
   let deadline: NodeJS.Timeout | undefined;
+  let arm!: () => void;
   const expired = new Promise<"deadline">((resolve) => {
-    const arm = () => {
+    arm = () => {
+      if (deadline) return;
+      emitWebhookLog({ event: "outbound.worker_stopping", outcome: "success" });
       deadline = setTimeout(
         () => resolve("deadline"),
         options.shutdownGraceMs ?? SHUTDOWN_GRACE_MS,
@@ -242,18 +254,37 @@ export async function runOutboundWorker(options: RunOptions): Promise<number> {
     if (signal.aborted) arm();
     else signal.addEventListener("abort", arm, { once: true });
   });
-  const result = await Promise.race([loop, expired]);
+  const shutdown = loop.then(async (result) => {
+    arm(); // Fatal loop exits must bound closure too, even without an operator signal.
+    emitWebhookLog({ event: "outbound.worker_drained", outcome: "success" });
+    try {
+      await close();
+      return { result, closed: true };
+    } catch {
+      return { result, closed: false };
+    }
+  });
+  const finished = await Promise.race([shutdown, expired]);
   clearTimeout(deadline);
-  if (result === "deadline") {
+  signal.removeEventListener("abort", arm);
+  if (finished === "deadline") {
     emitWebhookLog({
       event: "outbound.worker_fatal",
       outcome: "failure",
       reason: "shutdown_deadline",
     });
-    void database.close().catch(() => undefined);
-    return EXIT_FATAL; // an in-flight send stays SENDING and is declared UNKNOWN_OUTCOME by recovery; it is never re-sent
+    void close().catch(() => undefined);
+    return EXIT_FATAL; // An interrupted SENDING request recovers to UNKNOWN_OUTCOME, never a resend.
   }
-  await database.close().catch(() => undefined);
+  if (!finished.closed) {
+    emitWebhookLog({
+      event: "outbound.worker_fatal",
+      outcome: "failure",
+      reason: "pool_close_failed",
+    });
+    return EXIT_FATAL;
+  }
+  const { result } = finished;
   emitWebhookLog({
     event: "outbound.worker_stopped",
     outcome: result === "stopped" ? "success" : "failure",

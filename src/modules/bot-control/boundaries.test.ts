@@ -217,10 +217,11 @@ describe("bot-control boundaries", () => {
       "react",
       "react-dom",
       "tailwind-merge",
+      "tsx", // Existing pinned loader is now required by production worker installs.
       "tw-animate-css",
       "zod",
     ]);
-    expect(Object.keys(pkg.devDependencies)).toHaveLength(15);
+    expect(Object.keys(pkg.devDependencies)).toHaveLength(14);
   });
 });
 

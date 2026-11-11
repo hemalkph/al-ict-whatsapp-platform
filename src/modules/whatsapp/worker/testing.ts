@@ -60,8 +60,11 @@ export function spawnWorker(env: Record<string, string>): WorkerProcess {
   };
   child.stdout!.on("data", feed());
   child.stderr!.on("data", feed());
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
-    child.once("exit", (code, signal) => resolve({ code, signal })),
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    },
   );
   return {
     child,
