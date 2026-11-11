@@ -4,6 +4,7 @@ import { verifyPassword } from "better-auth/crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { schema, type Database } from "@/db";
 import type { AuthEnv } from "./env";
+import { safeAuthLogger } from "./safe-log";
 
 // SHARED BASE CONFIGURATION for the public and private Better Auth instances (ADR 0012). Both instances are
 // built from this single function so they cannot silently drift; the only differences are applied by
@@ -33,6 +34,11 @@ export function buildBaseAuthOptions({ db, env }: AuthDeps): BetterAuthOptions {
     baseURL: env.baseURL,
     trustedOrigins: [env.origin],
     telemetry: { enabled: false },
+    // Phase 08G-7B C1B-P1 closure (safe-log.ts): the library's log calls carry raw database errors (SQL parameters such as
+    // session tokens), emails and URLs; only allowlisted fields are printed. `throw` hands an exception that is not an APIError
+    // to handleAuthRequest instead of the router's raw console.error; APIErrors still become their usual responses.
+    logger: safeAuthLogger,
+    onAPIError: { throw: true },
     database: drizzleAdapter(db, {
       provider: "pg",
       // The adapter looks tables up by model name: the explicit mapping is required (rate_limits: rateLimits).

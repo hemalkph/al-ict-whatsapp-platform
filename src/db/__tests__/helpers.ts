@@ -144,6 +144,22 @@ export function disposableTarget(admin: PgTarget, name: string): { target: PgTar
   return { target: resolveTarget(url, "the disposable database URL", name), url };
 }
 
+/**
+ * The validated explicit target of an EXISTING disposable database given only its URL (for a process that never receives the
+ * admin URL, such as the C1B-P1 proof server): a generated disposable name plus every driver-effective check of resolveTarget.
+ * Parses only; opens nothing.
+ */
+export function resolveDisposableUrl(raw: string | undefined): PgTarget {
+  let name: string;
+  try {
+    name = safeDecode(new URL(raw ?? "").pathname.slice(1));
+  } catch {
+    throw refuse("the disposable database URL is not a valid connection URL");
+  }
+  assertDisposableName(name);
+  return resolveTarget(raw, "the disposable database URL", name);
+}
+
 export type TestDb = Awaited<ReturnType<typeof createTestDatabase>>;
 
 /**
