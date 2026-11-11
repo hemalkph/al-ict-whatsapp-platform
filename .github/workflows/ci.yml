@@ -169,8 +169,10 @@ jobs:
             process.exit(1);
           }
           NODE
-      - name: Install Chromium and its system dependencies
-        run: npx playwright install --with-deps chromium
+      - name: Install Chromium (runner image already provides its system libraries)
+        run: npx playwright install chromium
+      - name: Confirm Chromium launches on this runner
+        run: node -e "require('@playwright/test').chromium.launch().then(b => b.close())"
       - name: Production build
         run: npm run build
       - name: Browser E2E tests
