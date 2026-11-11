@@ -24,12 +24,16 @@ const walk = (dir: string): string[] =>
     .filter((d) => d.isFile() && /\.(m?[tj]sx?)$/.test(d.name))
     .map((d) => relative(repo, join(d.parentPath, d.name)))
     .filter((f) => !/node_modules|\.next\//.test(f));
+// The C1B-P1 proof harness, never run by the app: the client speaks only to the https origin it is given (loopback in its test)
+// and the launcher REPLACES globalThis.fetch to block outbound calls. Checked separately below: it never calls Meta or fetch.
+const PROOF_HARNESS = ["scripts/platform-auth-proof.ts", "scripts/platform-auth-proof-server.ts"];
 const appSources = () =>
   [...walk("src"), ...walk("scripts")].filter(
     (f) =>
       !/\.test\.ts$/.test(f) &&
       !/(^|\/)testing\.ts$/.test(f) &&
       !/__tests__/.test(f) &&
+      !PROOF_HARNESS.includes(f) &&
       f !== "src/modules/bot-worker/__fixtures__/shutdown-child.ts" &&
       f !== "scripts/repro-next-body-clone-abort.mjs", // a standalone Next.js bug reproduction, never run by the app
   );
@@ -72,6 +76,10 @@ describe("outbound boundaries", () => {
       for (const f of server)
         expect(code(read(join(repo, f))), f).not.toMatch(
           /\bfetch\s*\(|globalThis\.fetch|\bfetch:|undici/,
+        );
+      for (const f of PROOF_HARNESS)
+        expect(code(read(join(repo, f))), f).not.toMatch(
+          /\bfetch\s*\(|undici|axios|XMLHttpRequest|graph\.facebook\.com/,
         );
       const script = code(read(join(repo, "scripts/whatsapp-outbound-worker.ts")));
       expect(script).toContain("new MetaTransport({ env: () => process.env })");
