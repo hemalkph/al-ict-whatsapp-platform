@@ -37,6 +37,8 @@ export function serverEnv(source: Source, options: ServerEnvOptions): Record<str
     DATABASE_URL: required(source, "E2E_DATABASE_URL"),
     BETTER_AUTH_SECRET: required(source, "E2E_AUTH_SECRET"),
     BETTER_AUTH_URL: options.baseURL,
+    // never the local-development client-IP fallback (a `.env.local` value would stop the production-mode auth instance)
+    BETTER_AUTH_LOCAL_INGRESS: "",
     // fake, run-only values
     META_APP_SECRET: required(source, "E2E_META_APP_SECRET"),
     WHATSAPP_WEBHOOK_VERIFY_TOKEN: required(source, "E2E_WEBHOOK_VERIFY_TOKEN"),

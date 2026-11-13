@@ -206,6 +206,7 @@ describe("bot-control boundaries", () => {
     };
     expect(Object.keys(pkg.dependencies).sort()).toEqual([
       "@base-ui/react",
+      "@better-auth/core", // Already installed by better-auth at the same exact version; imported directly by auth/client-ip.ts (C1B-P3).
       "@better-auth/drizzle-adapter",
       "better-auth",
       "class-variance-authority",

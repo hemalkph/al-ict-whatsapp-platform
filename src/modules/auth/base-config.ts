@@ -3,6 +3,7 @@ import type { BetterAuthOptions } from "better-auth";
 import { verifyPassword } from "better-auth/crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { schema, type Database } from "@/db";
+import { CLIENT_IP_HEADER, CLIENT_IP_V6_SUBNET } from "./client-ip";
 import type { AuthEnv } from "./env";
 import { safeAuthLogger } from "./safe-log";
 
@@ -72,9 +73,14 @@ export function buildBaseAuthOptions({ db, env }: AuthDeps): BetterAuthOptions {
       maxPasswordLength: MAX_PASSWORD_LENGTH,
       // sendResetPassword is deliberately NOT configured: password reset stays disabled (ADR 0012).
     },
-    advanced: { database: { generateId: "uuid" } },
-    // HTTP-only limiter (server-side auth.api calls bypass it); keyed on client IP and skipped when no IP is
-    // present. Trustworthy client-IP propagation and WAF limiting are a DEPLOYMENT BLOCKER (ADR 0012).
+    advanced: {
+      database: { generateId: "uuid" },
+      // The ONLY client-IP source (client-ip.ts). No trustedProxies: a comma chain is never accepted.
+      ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER], ipv6Subnet: CLIENT_IP_V6_SUBNET },
+    },
+    // HTTP-only limiter (server-side auth.api calls bypass it); keyed on the client IP. Without a resolvable IP the library
+    // does NOT skip: it uses one shared "no-trusted-ip" bucket (127.0.0.1 under NODE_ENV=development/test), so
+    // handleAuthRequest rejects such requests before they reach it. Ingress enforcement is a DEPLOYMENT BLOCKER (ADR 0012).
     rateLimit: {
       enabled: true,
       storage: "database",

@@ -21,6 +21,7 @@ import {
   provisionUser,
   realAuth,
   serviceDb,
+  uniqueIp,
   useGlobalAuth,
   type RealAuth,
 } from "@/db/__tests__/real-auth";
@@ -65,7 +66,8 @@ type Opts = {
 };
 
 function req(method: string, path: string, o: Opts = {}): Request {
-  const headers: Record<string, string> = { ...o.headers };
+  // the synthetic trusted-ingress header (C1B-P3): /api/account/change-password refuses a request without it
+  const headers: Record<string, string> = { "cf-connecting-ip": uniqueIp(), ...o.headers };
   if (o.cookie) headers.cookie = o.cookie;
   if (o.origin !== null) headers.origin = o.origin ?? ORIGIN;
   if (o.body !== undefined) headers["content-type"] = "application/json";

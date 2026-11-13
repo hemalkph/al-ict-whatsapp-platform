@@ -9,8 +9,9 @@ const EXPECTED_NETWORK_NOISE = /Failed to load resource/i;
 
 // The server's database rate limiter keys on the client IP, and every browser here connects from the same address.
 // Without this, the suite's own logins would trip the limiter after five attempts. Each test therefore presents its
-// own deterministic client IP, the same technique the integration tests use (uniqueIp). Application proxy-header
-// trust is unchanged. The dedicated rate-limit test replaces it with a fixed IP on purpose.
+// own deterministic client IP in the synthetic trusted-ingress header (CF-Connecting-IP; the production build rejects auth
+// requests without it), the same technique the integration tests use (uniqueIp). The dedicated rate-limit test replaces it
+// with a fixed IP on purpose.
 const clientIpFor = (testId: string) => {
   const [a = 0, b = 0, c = 0] = createHash("sha1").update(testId).digest();
   return `10.${a}.${b}.${c}`;
@@ -18,7 +19,7 @@ const clientIpFor = (testId: string) => {
 
 export const test = base.extend<{ pageProblems: void }>({
   extraHTTPHeaders: async ({}, run, testInfo) => {
-    await run({ "x-forwarded-for": clientIpFor(testInfo.testId) });
+    await run({ "cf-connecting-ip": clientIpFor(testInfo.testId) });
   },
   pageProblems: [
     async ({ page }, run) => {

@@ -28,7 +28,10 @@ import { bootstrapPlatformSecurityAdmin } from "./bootstrap";
 // e2e/server.mjs (Next's custom-server API) behind the guarded launcher scripts/platform-auth-proof-server.ts. Topology:
 //   client --verified TLS--> node:https on 127.0.0.1 (throwaway certificate) --> Next request handler (proxy.ts, routing,
 //   x-forwarded-for ??= socket address) --> the mounted route handlers --> generated al_ict_test_* database.
-// No reverse proxy: whatever X-Forwarded-For the client sends reaches Next unchanged. Synthetic users only. Opt-in, because it
+// No reverse proxy: whatever header the client sends reaches Next unchanged. Since C1B-P3 the application reads the client IP
+// only from CF-Connecting-IP and refuses auth requests without it, so the harness plays the trusted ingress and sets that header
+// itself. That proves the application's handling; it cannot prove spoof resistance (no Cloudflare here). Synthetic users only.
+// Opt-in, because it
 // builds the application (minutes) and requires the isolated server on 127.0.0.1:55432:
 //   C1B_P1_PROOF=1 TEST_DATABASE_ADMIN_URL=... npx vitest run --config vitest.db.config.mts src/modules/platform/cli-auth-proof.db.test.ts
 
@@ -43,11 +46,13 @@ const PROOF_SOURCES = new Set([
   "scripts/platform-auth-proof.test.ts",
   "scripts/platform-auth-proof-server.ts",
   "src/modules/platform/cli-auth-proof.db.test.ts",
+  // defines the synthetic PASSWORD this proof imports; it shows up as "modified" whenever it has uncommitted edits (C1B-P3)
+  "src/db/__tests__/real-auth.ts",
 ]);
 let n = 0;
 const email = (label: string) => `${label}.${Date.now().toString(36)}${n++}@c1b-p1.example.test`;
 let ipCounter = 0;
-/** A distinct forwarded client IP: one limiter bucket per case (the limiter is the subject of P1-T4..T6 only). */
+/** A distinct synthetic client IP: one limiter bucket per case (the limiter is the subject of P1-T4..T6 only). */
 const ip = () => `198.18.${(++ipCounter >> 8) & 255}.${ipCounter & 255}`;
 
 const freePort = () =>
@@ -207,7 +212,12 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
       if (res.status !== 0) throw new Error("openssl could not create a throwaway certificate");
       return readFileSync(join(dir, cert));
     }
-    const raw = (init: Parameters<typeof httpsJson>[1]) => httpsJson({ origin, ca }, init);
+    /** Every request needs the synthetic ingress header (C1B-P3): its own address unless the case supplies one. */
+    const raw = (init: Parameters<typeof httpsJson>[1]) =>
+      httpsJson(
+        { origin, ca },
+        { ...init, headers: { "cf-connecting-ip": ip(), ...init.headers } },
+      );
     /** A POST with exactly these headers (httpsJson always sets Origin; this can omit or replace it). Verified TLS. */
     const bare = (path: string, headers: Record<string, string>, body: unknown) =>
       new Promise<{ status: number; setCookies: string[] }>((resolve, reject) => {
@@ -233,11 +243,11 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
         req.end(JSON.stringify(body));
       });
     const client = () =>
-      createOperatorClient({ baseUrl: origin, ca, extraHeaders: { "x-forwarded-for": ip() } });
+      createOperatorClient({ baseUrl: origin, ca, extraHeaders: { "cf-connecting-ip": ip() } });
     const signInRaw = (
       e: string,
       password = PASSWORD,
-      headers: Record<string, string> = { "x-forwarded-for": ip() },
+      headers: Record<string, string> = { "cf-connecting-ip": ip() },
     ) =>
       raw({
         method: "POST",
@@ -257,9 +267,10 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
     /** Fixture reset between cases: deleting sessions only ever removes authority. */
     const resetSessions = (userId: string) =>
       t.pool.query("delete from sessions where user_id = $1", [userId]);
-    /** Fixture reset of the TCP-peer limiter bucket, used by the cases whose client sends no forwarding header. */
+    /** The CLI itself sends no client-IP header (the ingress adds it in production); the harness plays the ingress for it. */
+    const CLI_IP = "198.18.255.254";
     const resetPeerBucket = () =>
-      t.pool.query("delete from rate_limits where key = '127.0.0.1|/sign-in/email'");
+      t.pool.query("delete from rate_limits where key = $1", [`${CLI_IP}|/sign-in/email`]);
     const grantBody = (target: string, role = "PLATFORM_OPERATOR") => ({
       email: target,
       role,
@@ -342,7 +353,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
         ]) {
           const res = await bare(
             "/api/auth/sign-in/email",
-            { origin: bad, "x-forwarded-for": ip() },
+            { origin: bad, "cf-connecting-ip": ip() },
             { email: sa1.email, password: PASSWORD },
           );
           expect(res.status, bad).toBe(403);
@@ -351,7 +362,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
         const nav = await bare(
           "/api/auth/sign-in/email",
           {
-            "x-forwarded-for": ip(),
+            "cf-connecting-ip": ip(),
             "sec-fetch-site": "cross-site",
             "sec-fetch-mode": "navigate",
             "sec-fetch-dest": "document",
@@ -363,7 +374,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
           method: "POST",
           path: "/api/auth/sign-in/email",
           body: { email: sa1.email, password: PASSWORD, callbackURL: "https://evil.example/steal" },
-          headers: { "x-forwarded-for": ip() },
+          headers: { "cf-connecting-ip": ip() },
         });
         expect(cb.status).toBe(403);
         expect(cb.setCookies).toEqual([]);
@@ -373,7 +384,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
       it("FINDING: a cookieless sign-in with no Origin, Referer or Fetch-Metadata is accepted (checked only when present)", async () => {
         const res = await bare(
           "/api/auth/sign-in/email",
-          { "x-forwarded-for": ip() },
+          { "cf-connecting-ip": ip() },
           { email: sa1.email, password: PASSWORD },
         );
         expect(res.status).toBe(200);
@@ -391,7 +402,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
           "https://evil.example",
           origin.replace("https:", "http:"),
         ]) {
-          const headers: Record<string, string> = { cookie, "x-forwarded-for": ip() };
+          const headers: Record<string, string> = { cookie, "cf-connecting-ip": ip() };
           if (bad !== undefined) headers.origin = bad;
           expect((await bare("/api/auth/sign-out", headers, {})).status, `sign-out ${bad}`).toBe(
             403,
@@ -406,7 +417,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
           (
             await bare(
               "/api/auth/sign-out",
-              { cookie, referer: "https://evil.example/x", "x-forwarded-for": ip() },
+              { cookie, referer: "https://evil.example/x", "cf-connecting-ip": ip() },
               {},
             )
           ).status,
@@ -501,7 +512,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
         expect(unknown.status).toBe(401);
         expect(wrong.status).toBe(401);
         expect(code(unknown)).toBe(code(wrong));
-        const bucket = { "x-forwarded-for": ip() };
+        const bucket = { "cf-connecting-ip": ip() };
         const statuses: number[] = [];
         for (let i = 0; i < 5; i++)
           statuses.push((await signInRaw(sa1.email, WRONG, bucket)).status);
@@ -512,7 +523,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
       });
 
       it("P1-T5 twelve concurrent attempts from one client IP: exactly five are evaluated, seven are 429", async () => {
-        const bucket = { "x-forwarded-for": ip() };
+        const bucket = { "cf-connecting-ip": ip() };
         const results = await Promise.all(
           Array.from({ length: 12 }, (_, i) =>
             signInRaw(sa1.email, i % 2 ? PASSWORD : WRONG, bucket),
@@ -524,57 +535,60 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
         for (const r of results.filter((x) => x.status === 200)) await signOutRaw(r);
       });
 
-      it("P1-T6 FINDING: a client-chosen single X-Forwarded-For gives each attempt a fresh bucket (limiter bypass)", async () => {
+      it("P1-T6 (C1B-P3) a client-chosen X-Forwarded-For, X-Real-IP or Forwarded no longer selects the bucket", async () => {
+        // The P1 finding (a fresh bucket per forged X-Forwarded-For value), closed in application code: only CF-Connecting-IP
+        // is read. Whether a client can forge THAT header is decided by the ingress, which this topology does not contain.
+        const trusted = ip();
         const statuses: number[] = [];
-        for (let i = 0; i < 12; i++) statuses.push((await signInRaw(sa1.email, WRONG)).status); // a new ip() each time
-        expect(statuses.every((s) => s === 401)).toBe(true); // twelve password guesses in one window, none limited
-      });
-
-      it("P1-T6 untrusted forwarding values (several hops, not an IP) share ONE fallback bucket across all senders", async () => {
-        // Without trustedProxies Better Auth accepts only a single valid IP; anything else resolves to "no IP" and the shared
-        // `no-trusted-ip|/sign-in/email` bucket. Five unrelated senders exhaust it for everyone in that situation.
-        const senders = [
-          "203.0.113.1, 10.0.0.1",
-          "not-an-ip",
-          "unknown",
-          "198.51.100.7, 198.51.100.8",
-          "::ffff:zz",
-        ];
-        const statuses: number[] = [];
-        for (const value of senders)
-          statuses.push((await signInRaw(sa1.email, WRONG, { "x-forwarded-for": value })).status);
-        const victim = await signInRaw(sa1.email, PASSWORD, {
-          "x-forwarded-for": "192.0.2.10, 10.0.0.2",
-        });
-        expect(statuses).toEqual([401, 401, 401, 401, 401]);
-        expect(victim.status).toBe(429); // a correct password from a different sender, refused by the shared bucket
-        const row = await t.pool.query(
-          "select count from rate_limits where key = 'no-trusted-ip|/sign-in/email'",
-        );
-        expect(row.rows[0].count).toBe(5);
-        const ok = await signInRaw(sa1.email); // a sender with a single valid address is unaffected
-        expect(ok.status).toBe(200);
-        await signOutRaw(ok);
-      });
-
-      it("P1-T6 with no forwarding header the bucket is the TCP peer (Next's x-forwarded-for ??= remoteAddress)", async () => {
-        await resetPeerBucket();
-        const statuses: number[] = [];
-        for (let i = 0; i < 6; i++)
+        for (let i = 0; i < 12; i++)
           statuses.push(
             (
-              await bare(
-                "/api/auth/sign-in/email",
-                { origin },
-                { email: sa1.email, password: WRONG },
-              )
+              await signInRaw(sa1.email, WRONG, {
+                "cf-connecting-ip": trusted,
+                "x-forwarded-for": ip(),
+                "x-real-ip": ip(),
+                forwarded: `for=${ip()}`,
+              })
             ).status,
           );
-        expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
-        const row = await t.pool.query(
-          "select count from rate_limits where key = '127.0.0.1|/sign-in/email'",
-        );
+        expect(statuses).toEqual([...Array(5).fill(401), ...Array(7).fill(429)]);
+        const row = await t.pool.query("select count from rate_limits where key = $1", [
+          `${trusted}|/sign-in/email`,
+        ]);
         expect(row.rows[0].count).toBe(5);
+      });
+
+      it("P1-T6 (C1B-P3) a missing or malformed CF-Connecting-IP is refused (403) and never reaches a shared bucket", async () => {
+        // Before C1B-P3 these resolved to "no IP" and the shared `no-trusted-ip|/sign-in/email` bucket, which five unrelated
+        // senders could exhaust for everyone. Next still adds x-forwarded-for from the socket; it is no longer read.
+        await t.pool.query(
+          "delete from rate_limits where key in ('no-trusted-ip|/sign-in/email', '127.0.0.1|/sign-in/email')",
+        );
+        const senders: Array<Record<string, string>> = [
+          {},
+          { "x-forwarded-for": "203.0.113.1" },
+          { "cf-connecting-ip": "203.0.113.1, 10.0.0.1" },
+          { "cf-connecting-ip": "not-an-ip" },
+          { "cf-connecting-ip": "unknown", "x-forwarded-for": "198.51.100.7" },
+          { "cf-connecting-ip": "::ffff:zz" },
+          { "cf-connecting-ip": "203.0.113.1:443" },
+        ];
+        for (const headers of senders) {
+          const res = await bare(
+            "/api/auth/sign-in/email",
+            { origin, ...headers },
+            { email: sa1.email, password: PASSWORD }, // the CORRECT password
+          );
+          expect(res.status, JSON.stringify(headers)).toBe(403);
+          expect(res.setCookies).toEqual([]);
+        }
+        const rows = await t.pool.query(
+          "select key from rate_limits where key in ('no-trusted-ip|/sign-in/email', '127.0.0.1|/sign-in/email')",
+        );
+        expect(rows.rows).toEqual([]);
+        const ok = await signInRaw(sa1.email); // a sender with a trusted address is unaffected
+        expect(ok.status).toBe(200);
+        await signOutRaw(ok);
       });
     });
 
@@ -926,8 +940,13 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
       expect((await signInRaw(op.email, WRONG)).status).toBe(401);
       expect((await raw({ method: "GET", path: "/api/auth/list-sessions" })).status).toBe(401);
       expect(
-        (await bare("/api/auth/sign-out", { cookie: "x=y", origin: "https://evil.example" }, {}))
-          .status,
+        (
+          await bare(
+            "/api/auth/sign-out",
+            { cookie: "x=y", origin: "https://evil.example", "cf-connecting-ip": ip() },
+            {},
+          )
+        ).status,
       ).toBe(403);
       expect(serverLog.slice(from).join("")).not.toContain("auth error response");
       await resetSessions(op.id);
@@ -1054,7 +1073,11 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
           address,
         ];
         try {
-          const exit = await main(argv, { out: (l) => lines.push(l), err: (l) => lines.push(l) });
+          const exit = await main(
+            argv,
+            { out: (l) => lines.push(l), err: (l) => lines.push(l) },
+            { "cf-connecting-ip": CLI_IP },
+          );
           return { exit, lines, argv, ...term };
         } finally {
           term.restore();
@@ -1063,7 +1086,7 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
 
       it("P1-T16 the password goes into a raw-mode prompt that echoes nothing; Ctrl-C sends nothing", async () => {
         const op = await operator();
-        await resetPeerBucket(); // the CLI sends no forwarding header: its bucket is the TCP peer
+        await resetPeerBucket();
         const run = await cli(`${PASSWORD}\r`, op.email);
         expect(run.stdin.rawModes).toEqual([true, false]);
         expect(run.written.join("")).toBe(`Password for ${op.email}: \n`); // the label and a newline, no echo
@@ -1078,9 +1101,9 @@ describe.skipIf(process.env.C1B_P1_PROOF !== "1")(
         expect(cancel.lines).toEqual(["Cancelled. Nothing was sent."]);
         expect(cancel.stdin.rawModes).toEqual([true, false]);
         expect(await sessionsOf(op.id)).toBe(0);
-        const peer = await t.pool.query(
-          "select count from rate_limits where key = '127.0.0.1|/sign-in/email'",
-        );
+        const peer = await t.pool.query("select count from rate_limits where key = $1", [
+          `${CLI_IP}|/sign-in/email`,
+        ]);
         expect(peer.rows[0].count).toBe(1); // only the first run signed in; the cancelled one made no request
       });
 

@@ -179,7 +179,7 @@ test("another organization's bot sessions are invisible, and the other way round
   const other = await browser.newContext({
     ignoreHTTPSErrors: true,
     baseURL: test.info().project.use.baseURL,
-    extraHTTPHeaders: { "x-forwarded-for": "10.77.1.2" }, // its own client IP for the login rate limiter, as fixtures.ts does per test
+    extraHTTPHeaders: { "cf-connecting-ip": "10.77.1.2" }, // its own client IP for the login rate limiter, as fixtures.ts does per test
   });
   try {
     const b = await other.newPage();

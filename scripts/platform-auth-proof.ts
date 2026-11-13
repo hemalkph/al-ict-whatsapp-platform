@@ -245,7 +245,7 @@ export function describeSignIn(result: SignInResult): string {
 export type OperatorClientOptions = {
   readonly baseUrl: string;
   readonly ca: string | Buffer;
-  /** PROOF HARNESS ONLY: extra request headers (the tests give each case its own forwarded-IP limiter bucket). */
+  /** PROOF HARNESS ONLY: extra request headers (the tests give each case its own client-IP limiter bucket). */
   readonly extraHeaders?: Record<string, string>;
 };
 
@@ -393,6 +393,8 @@ function parseArgs(argv: readonly string[]): { baseUrl: string; caFile: string; 
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   io: Io = consoleIo,
+  /** PROOF HARNESS ONLY (no CLI flag): the tests play the trusted ingress and supply the client-IP header. */
+  extraHeaders?: Record<string, string>,
 ): Promise<number> {
   let args: ReturnType<typeof parseArgs>;
   try {
@@ -401,7 +403,11 @@ export async function main(
     io.err((error as Error).message);
     return 2;
   }
-  const client = createOperatorClient({ baseUrl: args.baseUrl, ca: readFileSync(args.caFile) });
+  const client = createOperatorClient({
+    baseUrl: args.baseUrl,
+    ca: readFileSync(args.caFile),
+    extraHeaders,
+  });
   let password: string | undefined;
   try {
     password = await promptHidden(`Password for ${args.email}: `);

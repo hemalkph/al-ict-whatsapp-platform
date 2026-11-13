@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
+    "@better-auth/core": "1.7.7",
     "@better-auth/drizzle-adapter": "1.7.7",
     "better-auth": "1.7.7",
     "class-variance-authority": "^0.7.1",

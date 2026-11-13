@@ -2,8 +2,8 @@ import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, schema, type Database } from "@/db";
-import { getAuth, type PublicAuth } from "@/modules/auth";
-import { UnauthenticatedError, ValidationError } from "@/shared/errors/http-errors";
+import { CLIENT_IP_HEADER, getAuth, trustedClientIp, type PublicAuth } from "@/modules/auth";
+import { ForbiddenError, UnauthenticatedError, ValidationError } from "@/shared/errors/http-errors";
 import { emitSecurityEvent } from "@/shared/security/events";
 import { requireUser, type AccessOptions } from "./access";
 import { parseInput } from "./staff/schemas";
@@ -58,6 +58,12 @@ export async function changeOwnPassword(
   rawInput: unknown,
   options: { db?: Database; auth?: PublicAuth } = {},
 ): Promise<ChangeOwnPasswordResult> {
+  // This operation issues a session: like /api/auth/*, it needs a trusted client IP before anything is evaluated (C1B-P3).
+  const clientIp = trustedClientIp(headers);
+  if (clientIp === null) {
+    emitSecurityEvent({ event: "auth.client_ip_rejected", outcome: "denied" });
+    throw new ForbiddenError("client_ip_required");
+  }
   const user = await requireUser(headers, options);
   const input = parseInput(changePasswordSchema, rawInput);
   const auth = options.auth ?? getAuth();
@@ -109,6 +115,11 @@ export async function changeOwnPassword(
   try {
     const signedIn = await auth.api.signInEmail({
       body: { email, password: input.newPassword },
+      // Only these two reach the session row (ip_address, user_agent); without headers both were stored empty.
+      headers: new Headers({
+        [CLIENT_IP_HEADER]: clientIp,
+        "user-agent": headers.get("user-agent") ?? "",
+      }),
       returnHeaders: true,
     });
     responseHeaders = signedIn.headers;

@@ -113,7 +113,7 @@ describe("forced password change (real PostgreSQL + Better Auth)", () => {
     expect(
       await rejection(
         changeOwnPassword(
-          new Headers(),
+          new Headers({ "cf-connecting-ip": "203.0.113.5" }), // a trusted client IP, no session
           { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
           deps(),
         ),

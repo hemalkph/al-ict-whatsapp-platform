@@ -369,7 +369,7 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
               headers: {
                 "content-type": "application/json",
                 origin: "http://localhost:3000",
-                "x-forwarded-for": "10.9.9.1",
+                "cf-connecting-ip": "10.9.9.1",
               },
               body: JSON.stringify({ email, password: PASSWORD }),
             }),
@@ -1013,7 +1013,7 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
           headers: {
             "content-type": "application/json",
             origin: "http://localhost:3000",
-            "x-forwarded-for": "10.9.9.2",
+            "cf-connecting-ip": "10.9.9.2",
           },
           body: JSON.stringify({ email: target.email, password: PASSWORD }),
         }),

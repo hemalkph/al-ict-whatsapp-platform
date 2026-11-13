@@ -147,7 +147,10 @@ describe("log writers print only fixed fields", () => {
 
 describe("handleAuthRequest 5xx diagnostics (the response is never altered)", () => {
   const request = (path: string) =>
-    new Request(`https://app.example.test/api/auth${path}`, { method: "GET" });
+    new Request(`https://app.example.test/api/auth${path}`, {
+      method: "GET",
+      headers: { "cf-connecting-ip": "203.0.113.9" },
+    });
   const fake = (respond: () => Response | Promise<Response>) => ({
     handler: async () => respond(),
   });

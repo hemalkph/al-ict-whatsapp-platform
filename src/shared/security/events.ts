@@ -15,6 +15,7 @@ export type SecurityEventName =
   | "access.actor_changed"
   | "auth.session_denied"
   | "auth.login_failed"
+  | "auth.client_ip_rejected"
   | "staff.created"
   | "staff.creation_refused"
   | "staff.provisioning_incomplete"
