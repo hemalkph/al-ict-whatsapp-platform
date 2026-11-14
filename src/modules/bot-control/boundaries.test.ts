@@ -45,6 +45,106 @@ const walk = (dir: string): string[] =>
     .filter((d) => d.isFile() && /\.(m?[tj]sx?)$/.test(d.name))
     .map((d) => join(d.parentPath, d.name));
 
+/** The whole Bot management HTTP API (DEV-1): each route file, its methods and the ONE bot-control function each method calls. */
+const BOT_ROUTES = [
+  {
+    file: "src/app/api/bots/[botId]/draft/route.ts",
+    methods: ["PUT"],
+    services: ["updateDraft"],
+  },
+  {
+    file: "src/app/api/bots/[botId]/draft/validation/route.ts",
+    methods: ["GET"],
+    services: ["validateDraft"],
+  },
+  { file: "src/app/api/bots/[botId]/route.ts", methods: ["GET"], services: ["getBot"] },
+  {
+    file: "src/app/api/bots/route.ts",
+    methods: ["GET", "POST"],
+    services: ["createBot", "listBotsPage"],
+  },
+] as const;
+
+describe("bot routes (DEV-1)", () => {
+  // every file under any `bot` / `bots` directory of the app: a page or a fifth route would appear here
+  const routeFiles = walk("src/app")
+    .map((f) => f.slice(repo.length + 1))
+    .filter((f) => /\/bots?\//.test(f));
+
+  it("are exactly the four approved files, with exactly the approved methods", () => {
+    expect(routeFiles.sort()).toEqual(BOT_ROUTES.map((r) => r.file));
+    for (const r of BOT_ROUTES) {
+      const text = code(read(join(repo, r.file)));
+      expect(
+        [...text.matchAll(/export async function (GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/g)].map(
+          (m) => m[1],
+        ),
+        r.file,
+      ).toEqual(r.methods);
+      expect([...text.matchAll(/^export /gm)], r.file).toHaveLength(r.methods.length);
+    }
+  });
+
+  it("are thin: one handleApi call per handler, the public module entrypoint only, no database, environment or business rules", () => {
+    for (const r of BOT_ROUTES) {
+      const text = code(read(join(repo, r.file)));
+      expect(text.match(/handleApi\(/g), r.file).toHaveLength(r.methods.length);
+      expect([...text.matchAll(/from "([^"]+)"/g)].map((m) => m[1]).sort(), r.file).toEqual([
+        "@/lib/route-helpers",
+        "@/modules/bot-control",
+      ]);
+      expect(text, r.file).not.toMatch(
+        /@\/db|process\.env|schema\.|assertCan|\bsql`|getDb|fetch\(/,
+      );
+      expect(text.length, r.file).toBeLessThan(1500);
+    }
+  });
+
+  it("import only their own draft-management services: nothing can publish, deploy, stop, run a bot or send", () => {
+    for (const r of BOT_ROUTES) {
+      const text = code(read(join(repo, r.file)));
+      const imported = [
+        ...text.matchAll(/import\s*\{([^}]+)\}\s*from\s*"@\/modules\/bot-control"/g),
+      ].flatMap((m) =>
+        m[1]!
+          .split(",")
+          .map((n) => n.trim())
+          .filter(Boolean),
+      );
+      expect(imported.sort(), r.file).toEqual([...r.services]);
+      expect(text, r.file).not.toMatch(
+        /publish|activate|deploy|emergency|retire|pause|resume|stopActive|suppress|dryRun|simulate|step\(/i,
+      );
+    }
+  });
+
+  it("state-changing methods are same-origin protected, reads are not marked as mutations, and only the draft save has a larger body allowance", () => {
+    for (const r of BOT_ROUTES) {
+      const text = code(read(join(repo, r.file)));
+      const seen = [
+        ...text.matchAll(
+          /export async function (GET|POST|PATCH|PUT|DELETE)\b[\s\S]*?handleApi\(\s*request,\s*\{\s*mutation:\s*(true|false)/g,
+        ),
+      ];
+      expect(seen, r.file).toHaveLength(r.methods.length);
+      for (const m of seen)
+        expect(m[2], `${r.file} ${m[1]}`).toBe(m[1] === "GET" ? "false" : "true");
+      expect(/maxBodyBytes/.test(text), r.file).toBe(r.file.endsWith("/draft/route.ts"));
+    }
+    const draft = code(read(join(repo, "src/app/api/bots/[botId]/draft/route.ts")));
+    expect(draft).toContain("const MAX_DRAFT_BODY_BYTES = 512 * 1024;");
+    expect(draft).toContain('withTarget(body, botId, "botId")');
+    // no other route anywhere raises its body allowance, and the default is still 16 KiB
+    const raised = walk("src/app").filter((f) => /maxBodyBytes/.test(code(read(f))));
+    expect(raised.map((f) => f.slice(repo.length + 1))).toEqual([
+      "src/app/api/bots/[botId]/draft/route.ts",
+    ]);
+    expect(code(read(join(repo, "src/lib/route-helpers.ts")))).toContain(
+      "export const MAX_BODY_BYTES = 16 * 1024;",
+    );
+  });
+});
+
 describe("bot-control boundaries", () => {
   it("never sends: no network, Meta, messaging, webhook, Inbox or engine-runtime code", () => {
     for (const { file, text } of sources) {
@@ -112,7 +212,7 @@ describe("bot-control boundaries", () => {
     expect(s).toContain('export const SEND_DEADLINE_HOLD_CODE = "bot_send_deadline";');
   });
 
-  it("has no HTTP route or page: only the operator script and (08E-5) the runtime's session-scoped hold use it", () => {
+  it("has no page: only the operator scripts, the four DEV-1 API routes and (08E-5) the runtime's session-scoped hold use it", () => {
     const users = [...walk("src"), ...walk("scripts")].filter(
       (f) =>
         !f.includes("/src/modules/bot-control/") &&
@@ -121,6 +221,7 @@ describe("bot-control boundaries", () => {
     expect(users.map((f) => f.slice(repo.length)).sort()).toEqual([
       "/scripts/bots-admin.ts",
       "/scripts/bots-retention.ts",
+      ...BOT_ROUTES.map((r) => `/${r.file}`),
       "/src/modules/bot-runtime/continue.ts",
       "/src/modules/bot-runtime/reconcile.ts",
       "/src/modules/bot-runtime/trigger-queue.ts",
@@ -330,7 +431,12 @@ describe("operator listings are read-only and bounded (08F-2)", () => {
   });
   it("every listing authorizes through the bot.read reader first, scopes by the context's organization, and is limit-bounded", () => {
     const fns = listings.split(/\nexport async function /).slice(1);
-    expect(fns).toHaveLength(3);
+    expect(fns.map((fn) => fn.slice(0, fn.indexOf("(")))).toEqual([
+      "listBotsPage",
+      "listBotSessions",
+      "listDeadTriggers",
+      "listDeploymentsPage",
+    ]);
     for (const fn of fns) {
       expect(fn.indexOf("reader(ctx, deps)")).toBeGreaterThan(-1);
       expect(fn.indexOf("reader(ctx, deps)")).toBeLessThan(fn.indexOf("parse("));

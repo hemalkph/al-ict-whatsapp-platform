@@ -5,7 +5,8 @@ import type { AccessContext } from "@/modules/access";
 import { reader, type BotControlDeps } from "./common";
 import { parse } from "./schemas";
 
-// Read-only operator listings (Phase 08F-2; V3.2 08F; owner decision D-3): bot sessions, DEAD triggers and deployments. Each is
+// Read-only operator listings (Phase 08F-2; V3.2 08F; owner decision D-3): bot sessions, DEAD triggers and deployments, and
+// (DEV-1) the bot summaries the HTTP list serves. Each is
 // bounded (limit 1..100, keyset pages), organization-scoped from the AccessContext, and gated by bot.read through `reader`.
 // They SELECT named lifecycle columns only: never session variables, awaiting/consumed tokens, input payloads, message text or
 // any secret. Nothing here writes, retries, redeploys or resurrects.
@@ -39,6 +40,8 @@ const calendarValid = (s: string) => {
   const d = new Date(ms);
   return !Number.isNaN(d.getTime()) && d.toISOString() === ms;
 };
+const botsInput = z.strictObject({ limit, cursor });
+const botKey = z.tuple([z.string().regex(/^[a-z][a-z0-9_]{0,63}$/)]);
 const timeKey = z.tuple([z.string().regex(TS).refine(calendarValid), uuid]);
 const deploymentKey = z.tuple([uuid, z.number().int().min(1).max(1000), uuid]);
 
@@ -75,6 +78,54 @@ async function page<T>(
     items: shown.map(map),
     nextCursor: rows.length > size && last ? encode(last.cursor_key) : null,
   };
+}
+
+export type BotListItem = {
+  readonly id: string;
+  readonly key: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly draftRevision: number;
+  readonly hasDraft: boolean;
+  readonly draftUpdatedAt: string | null;
+  readonly createdAt: string;
+};
+
+/**
+ * Bot summaries in key order (the key is unique per organization: bots_org_key_unique), one bounded page at a time. The draft
+ * itself is never selected: bots_draft_shape_check makes "has a draft" equal to "has a draft timestamp". The cursor is the last
+ * key shown; it only chooses where the caller's own page starts.
+ */
+export async function listBotsPage(
+  ctx: AccessContext,
+  raw: unknown,
+  deps: BotControlDeps = {},
+): Promise<Page<BotListItem>> {
+  const db = reader(ctx, deps);
+  const q = parse(botsInput, raw);
+  const after = decode(botKey, q.cursor);
+  const where: SQL[] = [sql`b.organization_id = ${ctx.organizationId}::uuid`];
+  if (after) where.push(sql`b.key > ${after[0]}`);
+  return page(
+    db,
+    sql`SELECT b.id, b.key, b.name, b.description, b.draft_revision,
+               (b.draft_updated_at IS NOT NULL) AS has_draft,
+               ${TS_TEXT("b.draft_updated_at")} AS draft_updated_at, ${TS_TEXT("b.created_at")} AS created_at,
+               jsonb_build_array(b.key) AS cursor_key
+        FROM bots b WHERE ${sql.join(where, sql` AND `)}
+        ORDER BY b.key LIMIT ${q.limit + 1}`,
+    q.limit,
+    (r: SessionRow): BotListItem => ({
+      id: r.id as string,
+      key: r.key as string,
+      name: r.name as string,
+      description: r.description as string | null,
+      draftRevision: r.draft_revision as number,
+      hasDraft: r.has_draft as boolean,
+      draftUpdatedAt: r.draft_updated_at as string | null,
+      createdAt: r.created_at as string,
+    }),
+  );
 }
 
 export type SessionListItem = {

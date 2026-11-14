@@ -4,10 +4,14 @@ import { insertTrigger } from "../bot-runtime/testing";
 import { ForbiddenError, ValidationError } from "@/shared/errors/http-errors";
 import {
   LISTING_LIMIT_MAX,
+  createBot,
+  listBots,
   listBotSessions,
+  listBotsPage,
   listDeadTriggers,
   listDeploymentsPage,
   listDeployments,
+  updateDraft,
 } from "./index";
 import { runBotsCli } from "./operator";
 import {
@@ -299,14 +303,142 @@ describe("operator listings (08F-2)", () => {
     });
   });
 
+  describe("bots (DEV-1)", () => {
+    const pages = async (who: BotWorld["staff"], limit: number) => {
+      const keys: string[] = [];
+      const sizes: number[] = [];
+      let cursor: string | undefined;
+      for (let guard = 0; guard < 20; guard++) {
+        const p = await listBotsPage(who.ctx, { limit, ...(cursor ? { cursor } : {}) }, deps());
+        sizes.push(p.items.length);
+        keys.push(...p.items.map((i) => i.key));
+        if (!p.nextCursor) break;
+        cursor = p.nextCursor;
+      }
+      return { keys, sizes };
+    };
+
+    it("requires bot.read and returns summaries only: never a draft, whatever it contains", async () => {
+      const x = await botWorld(t.db);
+      await expect(listBotsPage(x.viewer.ctx, {}, deps())).rejects.toBeInstanceOf(ForbiddenError);
+      expect(await listBotsPage(x.staff.ctx, {}, deps())).toEqual({ items: [], nextCursor: null });
+      const empty = (await createBot(x.admin.ctx, { key: "empty", name: "Empty" }, deps())).value;
+      const full = (
+        await createBot(x.admin.ctx, { key: "full", name: "Full", description: "D" }, deps())
+      ).value;
+      await updateDraft(
+        x.admin.ctx,
+        { botId: full.id, expectedRevision: 0, config: { marker: "CANARY-DRAFT-TEXT" } },
+        deps(),
+      );
+      const page = await listBotsPage(x.staff.ctx, {}, deps());
+      expect(page.nextCursor).toBeNull();
+      expect(page.items).toMatchObject([
+        { id: empty.id, key: "empty", name: "Empty", description: null, draftRevision: 0 },
+        { id: full.id, key: "full", name: "Full", description: "D", draftRevision: 1 },
+      ]);
+      expect(page.items.map((i) => [i.hasDraft, i.draftUpdatedAt === null])).toEqual([
+        [false, true],
+        [true, false],
+      ]);
+      for (const item of page.items) {
+        expect(Object.keys(item).sort()).toEqual(
+          [
+            "createdAt",
+            "description",
+            "draftRevision",
+            "draftUpdatedAt",
+            "hasDraft",
+            "id",
+            "key",
+            "name",
+          ].sort(),
+        );
+        expect(item.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+      }
+      expect(JSON.stringify(page)).not.toMatch(/CANARY|marker/);
+      // hasDraft agrees with the existing unbounded listing, which reads the draft column itself
+      expect(page.items.map((i) => [i.key, i.hasDraft])).toEqual(
+        (await listBots(x.staff.ctx, deps())).map((i) => [i.key, i.hasDraft]),
+      );
+    });
+
+    it("pages a fixed set by key without gaps or repeats, in the existing listing's order, and stays inside the organization", async () => {
+      const x = await botWorld(t.db);
+      const y = await botWorld(t.db);
+      for (const key of ["m", "a_b", "ab", "z9", "a", "b_1", "b1"])
+        await createBot(x.admin.ctx, { key, name: key }, deps());
+      for (const key of ["a", "c", "zz"]) await createBot(y.admin.ctx, { key, name: key }, deps());
+      const existing = (await listBots(x.staff.ctx, deps())).map((i) => i.key);
+      expect(existing).toHaveLength(7);
+      for (const [limit, sizes] of [
+        [1, [1, 1, 1, 1, 1, 1, 1]],
+        [2, [2, 2, 2, 1]],
+        [3, [3, 3, 1]],
+        [7, [7]],
+        [100, [7]],
+      ] as const) {
+        const got = await pages(x.staff, limit);
+        expect(got.keys, `limit ${limit}`).toEqual(existing);
+        expect(got.sizes, `limit ${limit}`).toEqual(sizes);
+      }
+      expect((await pages(y.staff, 2)).keys).toEqual(
+        (await listBots(y.staff.ctx, deps())).map((i) => i.key),
+      );
+      // A cursor naming a key that exists only in the OTHER organization is just a starting point here: own rows after it.
+      const cursorOf = (key: string) => Buffer.from(JSON.stringify([key])).toString("base64url");
+      const fromForeign = await listBotsPage(x.staff.ctx, { cursor: cursorOf("c") }, deps());
+      expect(fromForeign.items.map((i) => i.key)).toEqual(existing.slice(existing.indexOf("m")));
+      expect(fromForeign.items.every((i) => existing.includes(i.key))).toBe(true);
+      // Replay is not a snapshot: the same cursor reflects current data (a key created after it appears on the replay).
+      const replay = cursorOf("m");
+      const first = await listBotsPage(x.staff.ctx, { cursor: replay }, deps());
+      expect(await listBotsPage(x.staff.ctx, { cursor: replay }, deps())).toEqual(first);
+      await createBot(x.admin.ctx, { key: "n", name: "n" }, deps());
+      const again = await listBotsPage(x.staff.ctx, { cursor: replay }, deps());
+      expect(again.items.map((i) => i.key)).toEqual(["n", ...first.items.map((i) => i.key)]);
+    });
+
+    it("rejects out-of-range limits, unknown fields and malformed cursors, and is bounded", async () => {
+      for (const bad of [
+        { limit: 0 },
+        { limit: LISTING_LIMIT_MAX + 1 },
+        { limit: 1.5 },
+        { limit: Number.NaN },
+        { limit: "50" },
+        { organizationId: b.org.id },
+        { key: "a" },
+        { cursor: "!!!" },
+        { cursor: Buffer.from('["Not A Key"]').toString("base64url") },
+        { cursor: Buffer.from('["a","b"]').toString("base64url") },
+      ])
+        await expect(
+          listBotsPage(a.staff.ctx, bad, deps()),
+          JSON.stringify(bad),
+        ).rejects.toBeInstanceOf(ValidationError);
+      expect(
+        (await listBotsPage(a.staff.ctx, { limit: LISTING_LIMIT_MAX }, deps())).items.length,
+      ).toBeLessThanOrEqual(LISTING_LIMIT_MAX);
+    });
+  });
+
   it("reading changes nothing: sessions, triggers, deployments, deployment events and requests are identical", async () => {
     const before = await fingerprint();
+    const bots = async () =>
+      (
+        await t.pool.query(
+          "select md5(string_agg(to_jsonb(x)::text, '|' order by id)) m from bots x",
+        )
+      ).rows[0];
+    const botsBefore = await bots();
     for (const who of [a.staff, a.admin, b.staff]) {
       await listBotSessions(who.ctx, {}, deps());
       await listDeadTriggers(who.ctx, {}, deps());
       await listDeploymentsPage(who.ctx, {}, deps());
+      await listBotsPage(who.ctx, {}, deps());
     }
     expect(await fingerprint()).toEqual(before);
+    expect(await bots()).toEqual(botsBefore);
   });
 
   describe("operator command line", () => {
@@ -338,6 +470,22 @@ describe("operator listings (08F-2)", () => {
       expect(big.code).toBe(1);
       expect(big.doc).toMatchObject({ ok: false, error: "VALIDATION_ERROR" });
       expect((await run(["sessions", "--limit", "abc"], a.staff)).code).toBe(1);
+    });
+    it("the unbounded `list` is unchanged, and a malformed bot id is a validation error for `show` and `validate` (DEV-1)", async () => {
+      const listed = await run(["list"], a.staff);
+      expect(listed.code).toBe(0);
+      expect((listed.doc as unknown as { bots: unknown[] }).bots).toEqual(
+        await listBots(a.staff.ctx, deps()),
+      );
+      for (const command of ["show", "validate"]) {
+        const bad = await run([command, "not-a-uuid"], a.staff);
+        expect(bad.code, command).toBe(1);
+        expect(bad.doc, command).toMatchObject({
+          ok: false,
+          error: "VALIDATION_ERROR",
+          fields: ["botId"],
+        });
+      }
     });
   });
 });

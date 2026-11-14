@@ -164,6 +164,52 @@ describe("bot-control services", () => {
       ).toBeInstanceOf(ForbiddenError);
       expect(await refused(listBots(w.viewer.ctx, deps()))).toBeInstanceOf(ForbiddenError);
     });
+
+    it("a suspended or demoted ADMIN whose context is stale cannot create a bot or save a draft: the locked membership row decides (DEV-1)", async () => {
+      const own = await botWorld(t.db);
+      const bot = (await createBot(own.admin.ctx, { key: "stale", name: "Stale" }, deps())).value;
+      const state = async () =>
+        (
+          await q(
+            "select (select count(*)::int from bots where organization_id = $1) bots, (select draft_revision from bots where id = $2) revision",
+            [own.org.id, bot.id],
+          )
+        ).rows[0];
+      const before = await state();
+      const attempts = () => [
+        createBot(own.admin.ctx, { key: "after_revocation", name: "N" }, deps()),
+        updateDraft(
+          own.admin.ctx, // still says ADMIN
+          { botId: bot.id, expectedRevision: 0, config: minimalFlow() },
+          deps(),
+        ),
+      ];
+      await setMembershipStatus(t.db, own.admin.membershipId, "SUSPENDED");
+      for (const attempt of attempts())
+        expect(await refused(attempt)).toBeInstanceOf(ForbiddenError);
+      await setMembershipStatus(t.db, own.admin.membershipId, "ACTIVE");
+      await q("update organization_memberships set role = 'STAFF' where id = $1", [
+        own.admin.membershipId,
+      ]);
+      for (const attempt of attempts())
+        expect(await refused(attempt)).toBeInstanceOf(ForbiddenError);
+      expect(await state()).toEqual(before);
+    });
+
+    it("a malformed bot id is a validation error on the read path, after the permission check, never a database error (DEV-1)", async () => {
+      for (const id of ["not-a-uuid", "", "00000000-0000-4000-8000-00000000000", "'; select 1 --"])
+        for (const read of [getBot, validateDraft]) {
+          const e = await refused(read(w.staff.ctx, id, deps()));
+          expect(e, id).toBeInstanceOf(ValidationError);
+          expect((e as ValidationError).fields).toEqual(["botId"]);
+          // a caller without bot.read is refused first and learns nothing about the id
+          expect(await refused(read(w.viewer.ctx, id, deps())), id).toBeInstanceOf(ForbiddenError);
+        }
+      // a well-formed id that does not exist here is still the ordinary 404
+      expect(
+        await refused(getBot(w.staff.ctx, "00000000-0000-4000-8000-0000000000aa", deps())),
+      ).toBeInstanceOf(NotFoundError);
+    });
   });
 
   describe("publishing at the contract boundary", () => {

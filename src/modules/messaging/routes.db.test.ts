@@ -13,7 +13,7 @@ import {
 } from "@/db/__tests__/real-auth";
 import { createTestDatabase, type TestDb } from "@/db/__tests__/helpers";
 import type { Role } from "@/modules/access";
-import { minutesAgo, world } from "./testing";
+import { addTemplate, minutesAgo, world } from "./testing";
 
 // The two HTTP entry points of outbound messaging: the REAL route handlers, real Better Auth sessions and real PostgreSQL.
 // A request QUEUES a message; no transport exists in this process, so nothing here can send.
@@ -253,6 +253,73 @@ describe("outbound messaging HTTP API", () => {
     );
     expect((await send(x.conversation.id, { cookie: s.cookie })).status).toBe(400);
     expect(await requests(x.conversation.id)).toHaveLength(0);
+  });
+
+  // DEV-1 (shared body reader): the 16,384 limit of this route is now RAW BYTES as received, not characters.
+  it("the body limit is 16,384 raw bytes: full-length Sinhala, Tamil and emoji texts still queue; multilingual template parameters are refused once the request passes it", async () => {
+    const x = await w();
+    const s = await staff(x.org.id);
+    const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+    const post = (raw: string) => send(x.conversation.id, { cookie: s.cookie, raw });
+    // texts at the application limit of 4,096 UTF-16 units
+    for (const [text, size] of [
+      ["අ".repeat(4096), 12_288],
+      ["வ".repeat(4096), 12_288],
+      ["😀".repeat(2048), 8_192],
+    ] as const) {
+      expect(text.length).toBe(4096);
+      const raw = JSON.stringify(body(text));
+      expect(bytes(raw)).toBeLessThan(16_384);
+      expect(bytes(raw)).toBeGreaterThan(size);
+      expect((await post(raw)).status).toBe(201);
+    }
+    // The schema's .max(4096) counts code points, so 4,096 four-byte emoji pass it; that text alone is 16,384 bytes, and with
+    // its envelope the request is now over the transport limit (under the old character count it was 8,2xx and accepted).
+    const emojiMax = JSON.stringify(body("😀".repeat(4096)));
+    expect(emojiMax.length).toBeLessThan(16_384);
+    expect(bytes(emojiMax)).toBeGreaterThan(16_384);
+    const refusedEmoji = await post(emojiMax);
+    expect(refusedEmoji.status).toBe(400);
+    expect(await refusedEmoji.json()).toMatchObject({ error: { fields: ["body"] } });
+    // the same value with every character \u-escaped is 6 bytes a unit: over the limit (it was before, too)
+    const escaped = `{"idempotencyKey":"route-key-${uniq()}-abc","message":{"type":"text","body":"${"\\u0d85".repeat(4096)}"}}`;
+    const refusedEscaped = await post(escaped);
+    expect(refusedEscaped.status).toBe(400);
+    expect(await refusedEscaped.json()).toMatchObject({ error: { fields: ["body"] } });
+
+    // template parameters: the schema allows 20 x 1,024 units, the transport 16,384 bytes of request
+    const template = await addTemplate(t.db, x, { category: "UTILITY", params: 20 });
+    let seq = 0;
+    const request = (letters: number, pad = 0) =>
+      JSON.stringify({
+        idempotencyKey: `dev1-key-${String(seq++).padStart(8, "0")}`, // fixed width: every request has the same envelope
+        message: {
+          type: "template",
+          templateId: template.id,
+          parameters: Array.from({ length: 20 }, () => "අ".repeat(letters)),
+        },
+      }) + " ".repeat(pad);
+    const base = bytes(request(265)); // 20 x 265 Sinhala letters = 15,900 bytes of text, plus the envelope
+    expect(base).toBeLessThan(16_384);
+    const atLimit = request(265, 16_384 - base);
+    expect(bytes(atLimit)).toBe(16_384);
+    expect((await post(atLimit)).status).toBe(201);
+    const before = (await requests(x.conversation.id)).length;
+    // one byte more, and a compact request that is valid by its schema and UNDER 16,384 characters (so the old character
+    // count let it through when Content-Length was absent or understated): both are now refused at the transport
+    const oneOver = request(265, 16_385 - base);
+    const compactOver = request(280);
+    expect(bytes(oneOver)).toBe(16_385);
+    expect(compactOver.length).toBeLessThan(16_384);
+    expect(bytes(compactOver)).toBeGreaterThan(16_384);
+    for (const raw of [oneOver, compactOver]) {
+      const res = await post(raw);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: { code: "VALIDATION_ERROR", message: "Invalid input", fields: ["body"] },
+      });
+    }
+    expect(await requests(x.conversation.id)).toHaveLength(before);
   });
 
   it("policy refusals are 422 with a fixed reason and write nothing", async () => {

@@ -1,9 +1,10 @@
 import { and, asc, eq, sql } from "drizzle-orm";
+import { z } from "zod";
 import { schema } from "@/db";
 import type { AccessContext } from "@/modules/access";
 import { FLOW_LIMITS, checkJsonShape, validateFlow, type Diagnostic } from "@/modules/bots";
 import { canonicalJson } from "@/shared/canonical-json";
-import { NotFoundError } from "@/shared/errors/http-errors";
+import { NotFoundError, ValidationError } from "@/shared/errors/http-errors";
 import {
   UNIQUE_VIOLATION,
   audit,
@@ -190,6 +191,8 @@ export async function getBot(
   deps: BotControlDeps = {},
 ): Promise<BotSummary & { readonly draft: unknown }> {
   const db = reader(ctx, deps);
+  // After the permission check (a refused caller learns nothing about the id), before the uuid column would raise on it.
+  if (!z.uuid().safeParse(botId).success) throw new ValidationError(["botId"]);
   const [row] = await db
     .select(summaryColumns)
     .from(schema.bots)
