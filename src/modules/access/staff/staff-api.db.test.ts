@@ -159,7 +159,7 @@ describe("staff management HTTP API (real routes, sessions and PostgreSQL)", () 
           headers: {
             "content-type": "application/json",
             origin: ORIGIN,
-            "x-forwarded-for": `10.77.${n++ % 250}.${(n * 7) % 250}`,
+            "cf-connecting-ip": `10.77.${n++ % 250}.${(n * 7) % 250}`,
           },
           body: JSON.stringify({ email, password }),
         }),

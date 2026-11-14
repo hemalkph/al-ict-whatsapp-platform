@@ -38,6 +38,52 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+function BotSection({ bot }: { bot: NonNullable<ConversationDetail["bot"]> }) {
+  const warn = bot.severity === "warning";
+  return (
+    <Section title="Bot">
+      <p className={warn ? "font-medium text-amber-900" : "font-medium"}>
+        {warn ? "⚠ " : ""}
+        {bot.label}
+      </p>
+      {bot.handover ? (
+        <>
+          <Row label="Reason">{bot.handover.reason}</Row>
+          <Row label="Requested by">
+            {bot.handover.origin === "flow"
+              ? "The bot flow"
+              : bot.handover.origin === "system"
+                ? "The system"
+                : "Unknown"}
+          </Row>
+          {bot.handover.studentMayNotHaveReceivedMessage ? (
+            <p className="rounded-md bg-amber-50 p-2 text-amber-900 ring-1 ring-amber-200">
+              The student may not have received the bot&apos;s last message. Check the chat and
+              follow up if needed.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+      {bot.notice ? (
+        <p
+          className={
+            bot.notice.warning
+              ? "rounded-md bg-amber-50 p-2 text-amber-900 ring-1 ring-amber-200"
+              : "text-zinc-600"
+          }
+        >
+          {bot.notice.label}
+        </p>
+      ) : null}
+      {bot.redacted ? (
+        <p className="text-zinc-600">This session&apos;s stored details were redacted.</p>
+      ) : null}
+      <Row label="Started">{when(bot.startedAt)}</Row>
+      {bot.endedAt ? <Row label="Ended">{when(bot.endedAt)}</Row> : null}
+    </Section>
+  );
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
@@ -190,6 +236,7 @@ export function DetailsPanel({
         <Row label="Started">{when(detail.createdAt)}</Row>
       </Section>
 
+      {detail.bot ? <BotSection bot={detail.bot} /> : null}
       <Section title="Contact">
         <Row label="First seen">{when(contact.firstSeenAt)}</Row>
         <Row label="Last seen">{when(contact.lastSeenAt)}</Row>

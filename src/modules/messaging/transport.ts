@@ -1,3 +1,5 @@
+import type { InteractivePayload } from "./interactive";
+
 // The boundary between the dispatcher and Meta. The dispatcher knows only this interface; tests supply a fake, production
 // supplies MetaTransport. A transport never throws for an expected outcome: it classifies what happened into exactly one
 // SendResult, and the dispatcher treats a thrown error as UNKNOWN (the safe reading).
@@ -6,6 +8,8 @@ export type SendRecipient = { readonly kind: "PHONE" | "BSUID"; readonly id: str
 
 export type SendMessage =
   | { readonly type: "text"; readonly body: string; readonly replyToWamid: string | null }
+  /** Reply buttons or a list (Phase 08D, BOT requests only): the stored, re-validated InteractivePayload. */
+  | { readonly type: "interactive"; readonly payload: InteractivePayload }
   | {
       readonly type: "template";
       readonly name: string;

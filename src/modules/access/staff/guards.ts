@@ -44,6 +44,45 @@ export async function revalidateActor(
   }
 }
 
+/**
+ * Re-validates the actor UNDER LOCK, for operations that must be ordered against a concurrent revocation (bot management,
+ * Phase 08C, ADR 0019). Locks the organization FOR KEY SHARE (which conflicts with the FOR UPDATE every staff membership
+ * change takes first, see lockOrganization) and then the actor's membership row FOR SHARE (which blocks any update of that
+ * row), and only then checks status and permission. A revocation that committed first is seen and refused; one that comes
+ * later waits until this transaction ends. Call it FIRST in the transaction, before any domain lock. Unlike lockOrganization,
+ * it does not serialize operations of the same organization with one another.
+ */
+export async function lockAndRevalidateActor(
+  tx: Tx,
+  ctx: AccessContext,
+  permission: Permission,
+): Promise<void> {
+  const [organization] = await tx
+    .select({ id: schema.organizations.id })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.id, ctx.organizationId))
+    .for("key share");
+  const [actor] = organization
+    ? await tx
+        .select({
+          role: schema.organizationMemberships.role,
+          status: schema.organizationMemberships.status,
+        })
+        .from(schema.organizationMemberships)
+        .where(
+          and(
+            eq(schema.organizationMemberships.id, ctx.membershipId),
+            eq(schema.organizationMemberships.organizationId, ctx.organizationId),
+            eq(schema.organizationMemberships.userId, ctx.userId),
+          ),
+        )
+        .for("share")
+    : [];
+  if (!actor || actor.status !== "ACTIVE" || !can(actor.role, permission)) {
+    throw new ForbiddenError("stale_actor");
+  }
+}
+
 export type TargetMembership = {
   readonly id: string;
   readonly userId: string;
@@ -129,4 +168,40 @@ export async function countMemberships(tx: Tx, userId: string): Promise<number> 
 /** Revokes every Better Auth session of the user (database sessions: effective immediately, no cookie cache). */
 export async function revokeUserSessions(tx: Tx, userId: string): Promise<void> {
   await tx.delete(schema.sessions).where(eq(schema.sessions.userId, userId));
+}
+
+/** Records that an ADMINISTRATOR chose this user's current password (provisioning or reset): a change is required. */
+export async function markAdministratorPassword(tx: Tx, userId: string): Promise<void> {
+  await tx
+    .insert(schema.userSecurityState)
+    .values({ userId, passwordChangeRequired: true })
+    .onConflictDoUpdate({
+      target: schema.userSecurityState.userId,
+      set: { passwordChangeRequired: true },
+    });
+}
+
+/**
+ * Phase 08G-7B C1A (P1): replaces the credential password INSIDE the caller's transaction, so the authorization checks the
+ * caller made under the user row lock (FOR UPDATE; a platform grant takes the same lock) and the write commit together or
+ * not at all. `hash` comes from Better Auth's own hashPassword. The row written is Better Auth's CANONICAL credential
+ * (provider_id 'credential' AND account_id = user id, as internalAdapter.findCredentialAccount/updatePassword use); migration
+ * 0010's trigger increments credential_generation with it. Also marks an administrator password and revokes every session.
+ * Throws if the user has no canonical credential account.
+ */
+export async function replaceCredentialInTx(tx: Tx, userId: string, hash: string): Promise<void> {
+  const updated = await tx
+    .update(schema.accounts)
+    .set({ password: hash, updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.accounts.userId, userId),
+        eq(schema.accounts.providerId, "credential"),
+        eq(schema.accounts.accountId, userId),
+      ),
+    )
+    .returning({ id: schema.accounts.id });
+  if (updated.length !== 1) throw new Error("no credential account");
+  await markAdministratorPassword(tx, userId);
+  await revokeUserSessions(tx, userId);
 }

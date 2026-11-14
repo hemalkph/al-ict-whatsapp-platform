@@ -24,6 +24,11 @@ export const PERMISSIONS = [
   "conversation.manage",
   "tag.manage",
   "webhook.manage",
+  // Bots (Phase 08C, ADR 0019; V3.2 F.6 and X decisions 2 and N1).
+  "bot.read",
+  "bot.edit",
+  "bot.publish",
+  "bot.emergency_stop",
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -41,6 +46,7 @@ const STAFF: readonly Permission[] = [
   "conversation.reply",
   "conversation.manage",
   "tag.manage",
+  "bot.read",
 ];
 
 // Read-only. Must never gain an edit/manage/reply/record permission.

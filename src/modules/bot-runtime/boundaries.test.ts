@@ -1,0 +1,639 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  evaluateBotWorkerStart,
+  gateBehaviour,
+  readRuntimeGates,
+  triggerCaptureEnabled,
+} from "./config";
+
+// Structural guards for the bot runtime core (Phase 08E-1, plan sections C, M and N.1). Decision helpers are pure;
+// emitBotRuntimeLog intentionally writes logs and reads the clock through the shared logger. The source checks below do not
+// prove transitive purity. The core reads no database, sends nothing, and models default-off gates.
+// Later checkpoints (08E-2 and on) add files and change the file list below on purpose, as visible edits to this test.
+
+const root = new URL(".", import.meta.url).pathname;
+const repo = join(root, "../../..");
+const read = (p: string) => readFileSync(p, "utf8");
+const code = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+// A transaction-start clock in SQL (NB-E): now(), current_timestamp, transaction_timestamp(). clock_timestamp() is the clock.
+const TX_START_CLOCK = /\bnow\s*\(\s*\)|current_timestamp|transaction_timestamp/i;
+// 08E-4: the files that reach the database, each ONLY through the SQL primitives of db/ops (no SQL text, driver or ORM here).
+const OPS_IMPORTS: Record<string, readonly string[]> = {
+  "trigger-queue.ts": ["@/db/ops/bot-trigger-queue", "@/db/ops/executor"],
+  "apply.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
+  "context.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
+  "continue.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
+  "flow-cache.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
+  "outbound.ts": ["@/db/ops/bot-session-store", "@/db/ops/executor"],
+  "start.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step"],
+  "step.ts": ["@/db/ops/bot-step", "@/db/ops/executor"],
+  "reconcile.ts": ["@/db/ops/bot-session-store", "@/db/ops/bot-step", "@/db/ops/executor"],
+};
+// 08E-5/08E-6: the files allowed to reach bot-control, the ONLY names each may import from its index (the session-scoped hold,
+// plan I.5) and how many times each calls it. The deadline hold code belongs to the reconciler alone.
+const SUPPRESSION_USES: Record<
+  string,
+  { readonly names: readonly string[]; readonly uses: number }
+> = {
+  "continue.ts": {
+    names: ["OUTPUT_SUPPRESSED_HOLD_CODE", "suppressSessionQueuedRequests"],
+    uses: 2,
+  },
+  "trigger-queue.ts": {
+    names: ["OUTPUT_SUPPRESSED_HOLD_CODE", "suppressSessionQueuedRequests"],
+    uses: 1,
+  },
+  "reconcile.ts": {
+    names: [
+      "OUTPUT_SUPPRESSED_HOLD_CODE",
+      "SEND_DEADLINE_HOLD_CODE",
+      "suppressSessionQueuedRequests",
+    ],
+    uses: 3,
+  },
+};
+const SUPPRESSION_IMPORTERS: readonly string[] = Object.keys(SUPPRESSION_USES);
+const SUPPRESSION_IMPORT = /import\s*\{([^}]+)\}\s*from\s*"@\/modules\/bot-control";/;
+const importedNames = (text: string) =>
+  (text.match(SUPPRESSION_IMPORT)?.[1] ?? "")
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean)
+    .sort();
+// 08E-7: the ONLY files outside the module that may import its internals (the bot worker), each with its exact deep imports.
+const WORKER_DEEP_IMPORTS: Record<string, readonly string[]> = {
+  "src/modules/bot-worker/compose.ts": [
+    "@/modules/bot-runtime/flow-cache",
+    "@/modules/bot-runtime/outbound",
+  ],
+  "src/modules/bot-worker/loops.ts": [
+    "@/modules/bot-runtime/context",
+    "@/modules/bot-runtime/reconcile",
+    "@/modules/bot-runtime/trigger-queue",
+  ],
+  "src/modules/bot-worker/run.ts": [
+    "@/modules/bot-runtime/reconcile",
+    "@/modules/bot-runtime/step",
+    "@/modules/bot-runtime/trigger-queue",
+  ],
+};
+const deepImports = (text: string) =>
+  [...text.matchAll(/from\s+"(@\/modules\/bot-runtime\/[^"]+)"/g)].map((m) => m[1]!).sort();
+const isWorkerFile = (p: string) => relative(repo, p) in WORKER_DEEP_IMPORTS;
+
+const sources = readdirSync(root)
+  .filter((f) => f.endsWith(".ts") && !/\.(db\.)?test\.ts$/.test(f) && f !== "testing.ts")
+  .map((f) => ({ file: f, text: code(read(join(root, f))) }));
+const walk = (dir: string): string[] =>
+  (
+    readdirSync(join(repo, dir), {
+      recursive: true,
+      withFileTypes: true,
+    }) as import("node:fs").Dirent[]
+  )
+    .filter((d) => d.isFile() && /\.(m?[tj]sx?)$/.test(d.name))
+    .map((d) => join(d.parentPath, d.name));
+
+describe("bot runtime core boundaries (08E-1)", () => {
+  it("has exactly the expected production files and no subdirectory", () => {
+    expect(sources.map((s) => s.file).sort()).toEqual([
+      "apply.ts",
+      "backoff.ts",
+      "config.ts",
+      "context.ts",
+      "continue.ts",
+      "eligibility.ts",
+      "flow-cache.ts",
+      "index.ts",
+      "input.ts",
+      "log.ts",
+      "outbound.ts",
+      "policy.ts",
+      "reconcile.ts",
+      "session-row.ts",
+      "start.ts",
+      "step.ts",
+      "takeover.ts",
+      "trigger-queue.ts",
+    ]);
+    const dirs = (readdirSync(root, { withFileTypes: true }) as import("node:fs").Dirent[]).filter(
+      (d) => d.isDirectory(),
+    );
+    expect(dirs.map((d) => d.name)).toEqual([]);
+  });
+
+  it("reads no database and issues no SQL: no database, driver, ORM or query text (the files in OPS_IMPORTS excepted, see below)", () => {
+    for (const { file, text } of sources.filter((s) => !(s.file in OPS_IMPORTS))) {
+      expect(text, file).not.toMatch(
+        /@\/db\b|drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/,
+      );
+      expect(text, file).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM)\b/);
+    }
+  });
+
+  it("trigger-queue.ts (08E-3) is the one file that reaches the database, and only through the db/ops queue primitives", () => {
+    const queue = sources.find((s) => s.file === "trigger-queue.ts")!.text;
+    const specs = [...queue.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    expect(specs.sort()).toEqual(
+      [
+        "./backoff",
+        "./log",
+        "./policy",
+        "@/db/ops/bot-trigger-queue",
+        "@/db/ops/executor",
+        "@/modules/bot-control", // 08E-5: the session-scoped hold, bound into terminalization
+      ].sort(),
+    );
+    expect(queue).not.toMatch(/drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/);
+    expect(queue).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM)\b/);
+    // it is not part of the public index (the webhook worker imports the index), and nothing outside the module imports it
+    expect(sources.find((s) => s.file === "index.ts")!.text).not.toMatch(/trigger-queue/);
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) =>
+        !p.includes("/src/modules/bot-runtime/") &&
+        !p.endsWith("/src/db/ops/bot-trigger-queue.ts") &&
+        !p.endsWith("/src/db/ops/bot-step.ts") &&
+        !p.endsWith("/src/db/ops/bot-session-store.ts") &&
+        !/\.test\.ts$/.test(p),
+    ))
+      if (isWorkerFile(f))
+        expect(deepImports(read(f)), f).toEqual(
+          [...WORKER_DEEP_IMPORTS[relative(repo, f)]!].sort(),
+        );
+      else expect(read(f), f).not.toMatch(/bot-runtime\/trigger-queue|bot-trigger-queue/);
+  });
+
+  it("the 08E-4 step files reach the database only through db/ops primitives: no SQL text, driver, ORM or transaction call", () => {
+    for (const [file, allowed] of Object.entries(OPS_IMPORTS)) {
+      const text = sources.find((s) => s.file === file)!.text;
+      expect(text, file).not.toMatch(
+        /drizzle|from "pg"|\bPool\b|\.execute\s*\(|\.transaction\s*\(/,
+      );
+      expect(text, file).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM)\b/);
+      for (const m of text.matchAll(/from\s+"(@\/db[^"]*)"/g))
+        expect(allowed, `${file}: ${m[1]}`).toContain(m[1]);
+    }
+    // the step is not part of the public index and nothing outside the module imports it
+    expect(sources.find((s) => s.file === "index.ts")!.text).not.toMatch(
+      /step|apply|start|continue|outbound|flow-cache|context|reconcile/,
+    );
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) => !p.includes("/src/modules/bot-runtime/") && !/\.test\.ts$/.test(p),
+    ))
+      if (isWorkerFile(f))
+        expect(deepImports(read(f)), f).toEqual(
+          [...WORKER_DEEP_IMPORTS[relative(repo, f)]!].sort(),
+        );
+      else
+        expect(read(f), f).not.toMatch(
+          /bot-runtime\/(step|apply|start|continue|outbound|flow-cache|context|reconcile)/,
+        );
+    // apply/start/continue stay private even to the worker: it reaches a step only through step.ts (processTrigger)
+    for (const allowed of Object.values(WORKER_DEEP_IMPORTS))
+      for (const spec of allowed) expect(spec).not.toMatch(/\/(apply|start|continue)$/);
+  });
+
+  it("the step SQL never reads a transaction-start time, locks an outbound request, or waits for an advisory lock", () => {
+    // E-CLK (08E-8D2): the trigger-queue SQL (claim, finish, deferral, T2, wake/end, terminalization) is runtime SQL too; the
+    // capture primitive (bot-trigger.ts) is the plan's one named exception and stays out of this scan
+    for (const f of ["src/db/ops/bot-trigger-queue.ts"])
+      expect(code(read(join(repo, f))), f).not.toMatch(TX_START_CLOCK);
+    for (const f of ["src/db/ops/bot-step.ts", "src/db/ops/bot-session-store.ts"]) {
+      const text = code(read(join(repo, f)));
+      expect(text, f).not.toMatch(TX_START_CLOCK);
+      expect(text, f).not.toMatch(/pg_advisory_xact_lock\s*\(|pg_advisory_lock\s*\(/);
+      expect(text, f).not.toMatch(/FROM outbound_requests[^;`]*FOR (UPDATE|SHARE)/i);
+      expect(text, f).not.toMatch(/UPDATE outbound_requests|INSERT INTO outbound_requests/i);
+      expect(text, f).not.toMatch(/bot-runtime|@\/modules\//);
+    }
+    const ops = code(read(join(repo, "src/db/ops/bot-step.ts")));
+    expect(ops).toMatch(/pg_try_advisory_xact_lock/);
+    // the lock order of K.1 is the order of these calls in the step
+    const step = code(read(join(root, "step.ts")));
+    const order = [
+      "lockStepTrigger(",
+      "tryAdvisoryLock(tx, conversationLockKey",
+      "tryAdvisoryLock(tx, contactLockKey",
+      "lockDeploymentsShare(",
+      "lockConversation(",
+      "lockLiveSession(",
+      "lockAccountShare(",
+      "await clockOf(deps)(tx);",
+    ].map((n) => step.indexOf(n));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it("E-CLK: the transaction-start clock pattern matches every forbidden spelling and nothing else; comments are not code", () => {
+    for (const s of [
+      "now()",
+      "NOW ( )",
+      "x = now()",
+      "current_timestamp",
+      "CURRENT_TIMESTAMP",
+      "transaction_timestamp()",
+    ])
+      expect(s).toMatch(TX_START_CLOCK);
+    for (const s of ["clock_timestamp()", "next_attempt_at", "due now", "known()"])
+      expect(s).not.toMatch(TX_START_CLOCK);
+    expect(code("a // now()\nb /* current_timestamp */ c")).not.toMatch(TX_START_CLOCK);
+    expect(code("sql`SELECT now()` // ok")).toMatch(TX_START_CLOCK);
+  });
+
+  it("enqueueAutomatedMessage has exactly one production importer in the runtime: outbound.ts, and it writes no request state", () => {
+    const importers = sources
+      .filter((s) => /enqueueAutomatedMessage/.test(s.text))
+      .map((s) => s.file);
+    expect(importers).toEqual(["outbound.ts"]);
+    const out = sources.find((s) => s.file === "outbound.ts")!.text;
+    const specs = [...out.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    expect(specs.filter((x) => x.startsWith("@/modules/")).sort()).toEqual([
+      "@/modules/bots",
+      "@/modules/messaging/config",
+      "@/modules/messaging/enqueue",
+      "@/modules/messaging/errors",
+    ]);
+    for (const { file, text } of sources)
+      expect(text, file).not.toMatch(
+        /state\s*=\s*'(SENDING|ACCEPTED|REJECTED|UNKNOWN_OUTCOME|HELD|QUEUED)'/,
+      );
+  });
+
+  it("08E-5: request rows are held only through the session-scoped primitive, with its fixed code and no test seam", () => {
+    for (const { file, text } of sources) {
+      const uses = text.match(/suppressSessionQueuedRequests\(/g)?.length ?? 0;
+      expect(uses, file).toBe(SUPPRESSION_USES[file]?.uses ?? 0);
+      if (uses === 0) continue;
+      expect(importedNames(text), file).toEqual([...SUPPRESSION_USES[file]!.names].sort());
+      // every call passes a fixed approved code (the deadline code only in the reconciler), never a caller-supplied seam
+      const fixed =
+        file === "reconcile.ts"
+          ? /suppressSessionQueuedRequests\(\s*(this\.)?tx,\s*[\w.]+,\s*[\w.]+,\s*(OUTPUT_SUPPRESSED_HOLD_CODE|SEND_DEADLINE_HOLD_CODE),?\s*\)/g
+          : /suppressSessionQueuedRequests\(\s*tx,\s*[\w.]+,\s*[\w.]+,\s*OUTPUT_SUPPRESSED_HOLD_CODE,?\s*\)/g;
+      expect(text.match(fixed)?.length ?? 0, file).toBe(uses);
+      expect(text, file).not.toMatch(/lockSessionSuppressionCandidates|lockSuppressionCandidates/);
+    }
+    // the takeover branch suppresses before it ends the session, inside the same step transaction
+    const cont = sources.find((s) => s.file === "continue.ts")!.text;
+    const branch = cont.slice(
+      cont.indexOf("classifyTakeover("),
+      cont.indexOf("c.deps.flows.load("),
+    );
+    expect(branch.indexOf("suppressSessionQueuedRequests(")).toBeGreaterThan(-1);
+    expect(branch.indexOf("suppressSessionQueuedRequests(")).toBeLessThan(
+      branch.indexOf("endSession("),
+    );
+    expect(branch).toMatch(/endConversationTriggers\(/);
+    expect(branch).not.toMatch(/terminalNotice|enqueueEffect|applyEngineResult/);
+    // 08E-6: the flow_invalid hand-over holds the QUEUED request too, before it ends the session
+    const invalid = cont.slice(
+      cont.indexOf("if (!loaded.ok)"),
+      cont.indexOf('"flow_invalid", live.id'),
+    );
+    expect(invalid.indexOf("suppressSessionQueuedRequests(")).toBeGreaterThan(-1);
+    expect(invalid.indexOf("suppressSessionQueuedRequests(")).toBeLessThan(
+      invalid.indexOf("endSession("),
+    );
+  });
+
+  it("08E-6: the reconciler takes the sweeper lock order, locks no request row itself, and never touches a terminal session", () => {
+    const r = sources.find((s) => s.file === "reconcile.ts")!.text;
+    const order = [
+      "tryAdvisoryLock(tx, conversationLockKey",
+      "lockDeploymentsShare(",
+      "lockConversation(",
+      "lockLiveSession(",
+      "(deps.readClock ?? dbClock)(tx)",
+      "readStepRequest(",
+    ].map((n) => r.indexOf(n));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // never waits for an advisory lock, never writes a request, never re-queues or recreates one, never calls a transport
+    expect(r).not.toMatch(
+      /pg_advisory_xact_lock|enqueueEffect|enqueueAutomatedMessage|claimNext|executeClaim/,
+    );
+    // a skipped QUEUED request leaves the session as it is (no transition after a skip)
+    expect(r).toMatch(
+      /if \(!heldIds\.includes\(request\.id\)\) return \{ kind: "skipped", reason: "request_locked" \};/,
+    );
+    // 08E-6 P2 fix: the post-apply hold of a terminal session skips EXACTLY the notice the result authorized
+    expect(r).toMatch(
+      /if \(!LIVE\.has\(applied\.finalState\) && applied\.noticeRequestId === null\)\s*await suppressSessionQueuedRequests\(/,
+    );
+    // the reconciler is gated like T1
+    expect(r).toMatch(/if \(!gatesOn\(deps\)\) return \{ kind: "gates_off" \};/);
+  });
+
+  it("08E-6: no production transaction overrides the isolation level (every participant runs READ COMMITTED, the default)", () => {
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) => !/\.test\.ts$/.test(p) && !/(^|\/)testing\.ts$/.test(p) && !p.includes("__tests__"),
+    ))
+      expect(code(read(f)), f).not.toMatch(
+        /isolationLevel|SET\s+(LOCAL\s+|SESSION\s+)?TRANSACTION\b|default_transaction_isolation/,
+      );
+  });
+
+  it("08E-6 J.5a: a missing request FAILS the session with end_reason error and NO handover reason (send_state_missing is an event code only)", () => {
+    const r = sources.find((s) => s.file === "reconcile.ts")!.text;
+    expect(r).toContain('this.runtimeEnd("FAILED", "error", null, "send_state_missing")');
+    expect(r).not.toMatch(/"HANDED_OVER",\s*"system_handover",\s*"send_state_missing"/);
+  });
+
+  it("the queue primitives never touch outbound requests, messages or any transport, and know no module", () => {
+    const ops = code(read(join(repo, "src/db/ops/bot-trigger-queue.ts")));
+    expect(ops).not.toMatch(
+      /outbound_requests|\bmessages\b|@\/modules\/|fetch\s*\(|transport|Math\.random|process\./,
+    );
+    // the fence on every write to a claimed trigger names organization, id, PENDING and the exact claim token
+    expect(ops).toMatch(/status = 'PENDING' AND claim_token = \$\{uuid\(f\.claimToken/);
+    // 08E-5: terminalization runs the injected session-scoped hold exactly once, after the hand-over and its event, before the
+    // conversation's other triggers end (one transaction)
+    const term = ops.slice(ops.indexOf("export async function terminalizeTrigger"));
+    expect(term.match(/options\.suppressSession\(/g)).toHaveLength(1);
+    const at = (s: string) => term.indexOf(s);
+    expect(at("'HANDED_OVER', 'bot_error'")).toBeGreaterThan(-1);
+    expect(at("'HANDED_OVER', 'bot_error'")).toBeLessThan(at("options.suppressSession("));
+    expect(at("options.suppressSession(")).toBeLessThan(at("endConversationTriggersSql("));
+    // nothing in the queue file holds a request or message row lock
+    expect(ops).not.toMatch(/FROM bot_triggers[^;]*JOIN\s+outbound/);
+  });
+
+  it("sends nothing and reaches no one: no network, transport, outbound service, enqueue, inbox, inbound pipeline, admin services or UI", () => {
+    for (const { file, text } of sources) {
+      expect(text, file).not.toMatch(
+        /\bfetch\s*\(|undici|axios|graph\.facebook\.com|XMLHttpRequest|node:https?|node:net/,
+      );
+      expect(
+        file === "outbound.ts"
+          ? text.replace(/@\/modules\/messaging\/(config|enqueue|errors)"/g, '"')
+          : SUPPRESSION_IMPORTERS.includes(file)
+            ? text.replace(SUPPRESSION_IMPORT, "")
+            : text,
+        file,
+      ).not.toMatch(
+        /@\/modules\/(messaging|bot-control|whatsapp|inbox|leads|access|auth)\b|@\/app\/|next\/|meta-transport|dispatchBatch|claimNext|executeClaim|authorizeSend|OutboundTransport/,
+      );
+      if (file !== "outbound.ts") expect(text, file).not.toMatch(/enqueueAutomatedMessage/);
+    }
+  });
+
+  it("is pure: no clock read, randomness, timer, process access or environment (the gates take an explicit object)", () => {
+    for (const { file, text } of sources) {
+      expect(text, file).not.toMatch(
+        /Date\.now|new Date\s*\(\s*\)|performance\.now|Math\.random|crypto|randomUUID|getRandomValues/,
+      );
+      expect(text, file).not.toMatch(/setTimeout|setInterval|setImmediate|queueMicrotask/);
+      expect(text, file).not.toMatch(/\bprocess\b|import\.meta\.env|\bconsole\./);
+    }
+  });
+
+  it("imports only the bots module's approved pure surface, its own files and the shared logger", () => {
+    for (const { file, text } of sources) {
+      for (const m of text.matchAll(/from\s+"([^"]+)"/g)) {
+        const spec = m[1]!;
+        expect(
+          spec.startsWith("./") ||
+            spec === "@/modules/bots" ||
+            (spec === "@/shared/logging/logger" && file === "log.ts") ||
+            (spec.startsWith("@/db/ops/") && (OPS_IMPORTS[file] ?? []).includes(spec)) ||
+            (file === "outbound.ts" &&
+              ["config", "enqueue", "errors"].some((m) => spec === `@/modules/messaging/${m}`)) ||
+            (spec === "@/modules/bot-control" && SUPPRESSION_IMPORTERS.includes(file)),
+          `${file}: ${spec}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("only log.ts writes logs, and only through the fixed-field whitelist", () => {
+    for (const { file, text } of sources)
+      if (file !== "log.ts") expect(text, file).not.toMatch(/logger\b/);
+    const log = sources.find((s) => s.file === "log.ts")!.text;
+    expect(log).not.toMatch(/JSON\.stringify|\.\.\.\s*e\b|Object\.(assign|entries|keys)/); // no spreading of caller objects
+  });
+
+  it("has only the approved 08E-2 production callers for gates and capture logging", () => {
+    // 08E-2 capture boundaries, plus (08E-7) the bot worker and its script, each with the exact names it imports
+    const APPROVED: Record<string, readonly string[]> = {
+      "src/modules/whatsapp/inbound/handler.ts": ["emitBotRuntimeLog"],
+      "src/modules/whatsapp/worker/registry.ts": ["emitBotRuntimeLog", "triggerCaptureEnabled"],
+      "scripts/bots-worker.ts": ["emitBotRuntimeLog"],
+      "src/modules/bot-worker/compose.ts": ["RuntimeEnv"],
+      "src/modules/bot-worker/config.ts": ["evaluateBotWorkerStart", "type RuntimeEnv"],
+      "src/modules/bot-worker/loops.ts": ["emitBotRuntimeLog"],
+      "src/modules/bot-worker/policy.ts": ["RUNTIME_POLICY"],
+      "src/modules/bot-worker/run.ts": ["emitBotRuntimeLog"],
+    };
+    const importers = [...walk("src"), ...walk("scripts")].filter(
+      (f) =>
+        !f.includes("/src/modules/bot-runtime/") &&
+        !/\.test\.ts$/.test(f) &&
+        !/(^|\/)testing\.ts$/.test(f) &&
+        /(from|import)\s*\(?\s*"[^"]*modules\/bot-runtime"/.test(read(f)),
+    );
+    expect(importers.map((f) => relative(repo, f)).sort()).toEqual(Object.keys(APPROVED).sort());
+    // and no file outside the module imports ANY internal path except the bot worker's listed ones
+    for (const f of [...walk("src"), ...walk("scripts")].filter(
+      (p) =>
+        !p.includes("/src/modules/bot-runtime/") &&
+        !/\.test\.ts$/.test(p) &&
+        !/(^|\/)testing\.ts$/.test(p),
+    ))
+      expect(deepImports(read(f)), f).toEqual(
+        isWorkerFile(f) ? [...WORKER_DEEP_IMPORTS[relative(repo, f)]!].sort() : [],
+      );
+    for (const f of importers) {
+      const imports = [
+        ...read(f).matchAll(/import\s*(?:type\s*)?\{([^}]+)\}\s*from\s*"@\/modules\/bot-runtime"/g),
+      ];
+      expect(imports, f).toHaveLength(1);
+      const names = imports[0]![1]!
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean);
+      expect(names, f).toEqual(APPROVED[relative(repo, f)]);
+    }
+  });
+
+  it("08E-7: the bot worker is opt-in: exactly one package script, the script exists, and the environment example keeps the gate off", () => {
+    const scripts = (
+      JSON.parse(read(join(repo, "package.json"))) as { scripts: Record<string, string> }
+    ).scripts;
+    expect(
+      Object.entries(scripts).filter(
+        ([k, c]) => /^bots:(worker|runtime)/.test(k) || /bots-worker/.test(c),
+      ),
+    ).toEqual([
+      ["bots:worker", "node --env-file-if-exists=.env.local --import tsx scripts/bots-worker.ts"],
+    ]);
+    expect(readdirSync(join(repo, "scripts"))).toContain("bots-worker.ts");
+    // no lifecycle hook, build, dev or test command runs it
+    for (const [name, command] of Object.entries(scripts))
+      if (name !== "bots:worker")
+        expect(command, name).not.toMatch(/bots-worker|bots:worker|bot-worker/);
+  });
+
+  it("the dispatcher and database ops do not know the runtime; inbound imports only at its approved capture boundaries", () => {
+    for (const dir of ["src/modules/whatsapp", "src/modules/messaging", "src/db/ops"])
+      for (const f of walk(dir).filter(
+        (p) =>
+          !/\.test\.ts$/.test(p) &&
+          !p.endsWith("/inbound/handler.ts") &&
+          !p.endsWith("/worker/registry.ts"),
+      ))
+        expect(read(f), f).not.toMatch(/bot-runtime/);
+  });
+});
+
+describe("default-off is testable and holds", () => {
+  it("an empty environment turns every modelled gate off, and nothing can reach Meta", () => {
+    expect(readRuntimeGates({})).toEqual({
+      botsRuntimeEnabled: false,
+      outboundEnabled: false,
+      liveSendEnabled: false,
+    });
+    expect(triggerCaptureEnabled({})).toBe(false);
+    expect(evaluateBotWorkerStart({}).kind).toBe("refused");
+    expect(gateBehaviour({ webhookWorker: {}, botWorker: {}, outboundWorker: {} })).toEqual({
+      capturesTriggers: false,
+      botWorkerStarts: false,
+      outboundWorkerStarts: false,
+      claimsBotRows: false,
+      newBotMessagesCanReachMeta: false,
+    });
+  });
+
+  it(".env.example documents the runtime gate as off", () => {
+    const example = read(join(repo, ".env.example"));
+    expect(example).toMatch(/^# BOTS_RUNTIME_ENABLED=false$/m);
+    expect(example).not.toMatch(/^BOTS_RUNTIME_ENABLED=true/m);
+  });
+});
+
+// ------------------------------------------------------------------------------------- 08E-8D3 H5: message header retention
+// Plan F6 (l.1098) and the retention contract (l.1267): first_message firstness reads retained eligible message HEADERS
+// (id, type, direction, created_at, organization and conversation), and no migration was added because those headers are
+// retained. The database does NOT forbid deleting an unreferenced message or rewriting its type (no guard exists on
+// `messages`; all its foreign keys are ON DELETE NO ACTION, so no cascade path removes one). This scan pins the contract at the
+// source level: no production file, script or migration deletes message rows or rewrites a header column.
+//
+// shortcut: a text scan of literal statements. It cannot see SQL built at run time from strings, a renamed import of the
+// `messages` table, an ORM `.set({...})` whose object contains a nested `}` before a header key, or a header change done
+// through a database function. It does not replace schema constraints; a reviewed cleanup that must remove headers needs a
+// durable replacement first (plan l.1098) and would fail here on purpose.
+const HEADER_SQL =
+  /\b(id|organization_id|conversation_id|whatsapp_account_id|direction|type|created_at)"?\s*=/i;
+const HEADER_ORM =
+  /(^|[{,\s])(id|organizationId|conversationId|whatsappAccountId|direction|type|createdAt)\s*[:,}]/;
+const MESSAGES_SQL = String.raw`(?:only\s+)?(?:"?public"?\.)?"?messages"?(?![\w"])`;
+function messageHeaderViolations(text: string): string[] {
+  const found: string[] = [];
+  const each = (re: RegExp, label: string, header?: RegExp) => {
+    for (const m of text.matchAll(re)) if (!header || header.test(m[1] ?? "")) found.push(label);
+  };
+  each(new RegExp(String.raw`\bdelete\s+from\s+${MESSAGES_SQL}`, "gi"), "SQL DELETE FROM messages");
+  each(
+    new RegExp(String.raw`\btruncate\s+(?:table\s+)?[\w".,\t ]*?\bmessages\b(?![\w-])`, "gi"),
+    "SQL TRUNCATE messages",
+  );
+  each(
+    new RegExp(
+      String.raw`\bupdate\s+${MESSAGES_SQL}(?:\s+(?:as\s+)?(?!set\b)\w+)?\s+set\b([\s\S]*?)(?:\bwhere\b|\breturning\b|\bfrom\b|;|\x60|$)`,
+      "gi",
+    ),
+    "SQL UPDATE of a messages header column",
+    HEADER_SQL,
+  );
+  each(
+    new RegExp(
+      String.raw`\binsert\s+into\s+${MESSAGES_SQL}[^;\x60]*?\bdo\s+update\s+set\b([\s\S]*?)(?:\bwhere\b|\breturning\b|;|\x60|$)`,
+      "gi",
+    ),
+    "SQL upsert rewriting a messages header column",
+    HEADER_SQL,
+  );
+  each(/\.delete\(\s*(?:schema\.)?messages\s*\)/g, "ORM delete(messages)");
+  each(
+    /\.update\(\s*(?:schema\.)?messages\s*\)\s*\.set\(\s*\{([^}]*\})/g,
+    "ORM update(messages) of a header column",
+    HEADER_ORM,
+  );
+  each(
+    /\.insert\(\s*(?:schema\.)?messages\s*\)[^;]*?\.onConflictDoUpdate\(\s*\{[^;]*?\bset\s*:\s*\{([^}]*\})/g,
+    "ORM upsert(messages) rewriting a header column",
+    HEADER_ORM,
+  );
+  return found;
+}
+
+describe("08E-8D3 H5: production code never deletes messages or rewrites their headers (F6)", () => {
+  const isProduction = (p: string) =>
+    /\.(ts|tsx)$/.test(p) &&
+    !/\.test\.tsx?$/.test(p) &&
+    !/(^|\/)(__tests__|__fixtures__)\//.test(p) &&
+    !/(^|\/)testing\.ts$/.test(p);
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+      d.isDirectory() ? walk(join(dir, d.name)) : [join(dir, d.name)],
+    );
+  const files = [
+    ...walk(join(repo, "src")).filter((p) => isProduction(relative(repo, p))),
+    ...walk(join(repo, "scripts")).filter((p) => isProduction(relative(repo, p))),
+    ...walk(join(repo, "src/db/migrations")).filter((p) => p.endsWith(".sql")),
+  ];
+  const sqlCode = (t: string) => t.replace(/--.*$/gm, "");
+
+  it("self-test: every violation shape is detected; the repository's legitimate message updates and look-alikes are not", () => {
+    for (const bad of [
+      "await tx.execute(sql`DELETE FROM messages WHERE created_at < now()`)",
+      'DELETE FROM "public"."messages" WHERE id = $1;',
+      "TRUNCATE TABLE messages;",
+      "UPDATE messages SET type = 'IMAGE' WHERE id = $1",
+      'update "messages" m set "direction" = $1 where m.id = $2',
+      "update messages set body = null, created_at = $1 where id = $2",
+      "insert into messages (id, type) values ($1, $2) on conflict (id) do update set type = excluded.type",
+      "await db.delete(schema.messages).where(eq(schema.messages.id, id))",
+      "await tx.delete(messages)",
+      "await tx.update(messages).set({ type: 'IMAGE' }).where(x)",
+      "await tx.update(schema.messages).set({ body: null, createdAt: d })",
+      "await tx.update(messages).set({ direction })",
+      "db.insert(messages).values(v).onConflictDoUpdate({ target: messages.id, set: { type: 'TEXT' } })",
+    ])
+      expect(messageHeaderViolations(bad), bad).not.toEqual([]);
+    for (const ok of [
+      ".update(messages).set({ replyToMessageId: where.messageId }).where(and(eq(messages.id, x)))",
+      ".update(messages).set({ latestStatus: e.status, latestStatusAt: e.occurredAt, updatedAt: new Date() })",
+      ".update(schema.messages).set({ wamid: result.wamid }).where(eq(schema.messages.id, claim.messageId))",
+      ".update(schema.messages).set({ errorCode: result.providerErrorCode ?? result.reason, errorMessage: result.reason })",
+      "update messages set latest_status = $1 where id = $2",
+      "update messages set body = null, content = null where id = $1",
+      'className="truncate text-sm font-medium"',
+      "records.delete(id); messages.push(x)",
+      "delete from message_attachments where id = $1",
+      "insert into messages (id, type) values ($1, $2) on conflict do nothing",
+    ])
+      expect(messageHeaderViolations(ok), ok).toEqual([]);
+  });
+
+  it("scans every production source, script and migration, and none deletes messages or rewrites a header column", () => {
+    const rel = files.map((p) => relative(repo, p));
+    // non-vacuous: the scan reaches the files that DO write messages, every migration, and the scripts
+    for (const known of [
+      "src/db/ops/inbound-message.ts",
+      "src/db/ops/message-status.ts",
+      "src/modules/messaging/dispatch.ts",
+      "src/db/migrations/0000_init_foundation_schema.sql",
+      "src/db/migrations/0008_bot_outbound_dispatch.sql",
+      "scripts/bots-worker.ts",
+    ])
+      expect(rel).toContain(known);
+    expect(rel.some((p) => p.includes("testing.ts") || /\.test\.tsx?$/.test(p))).toBe(false);
+    const violations = files.flatMap((p) => {
+      const text = p.endsWith(".sql") ? sqlCode(read(p)) : code(read(p));
+      return messageHeaderViolations(text).map((v) => `${relative(repo, p)}: ${v}`);
+    });
+    expect(violations).toEqual([]);
+  });
+});

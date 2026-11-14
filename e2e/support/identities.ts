@@ -220,3 +220,15 @@ export const INTEG_CONTACTS = {
   viewer: "Integ Viewer Sachini",
   mobile: "Integ Mobile Tharindu",
 } as const;
+
+// Inbox bot indicator identities (Phase 08F, e2e/inbox-bot.spec.ts). They are NOT created by scripts/e2e-seed.ts: the spec creates
+// its own organizations, members, conversations and bot history with plain SQL (e2e/support/bot-fixtures.ts), so the shared seed
+// and every other spec are untouched. Organization A holds the bot history; organization B holds one conversation of its own.
+export const BOT_ORG_A = { name: "E2E Bots Org A", slug: "e2e-bots-org-a" } as const;
+export const BOT_ORG_B = { name: "E2E Bots Org B", slug: "e2e-bots-org-b" } as const;
+export const BOT_USERS = {
+  admin: { email: "bots.admin@e2e.test", name: "Bots Admin", org: "A", role: "ADMIN" },
+  staff: { email: "bots.staff@e2e.test", name: "Bots Staff", org: "A", role: "STAFF" },
+  viewer: { email: "bots.viewer@e2e.test", name: "Bots Viewer", org: "A", role: "VIEWER" },
+  orgB: { email: "bots.orgb@e2e.test", name: "Bots Org B Staff", org: "B", role: "STAFF" },
+} as const;

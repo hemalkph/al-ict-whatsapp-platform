@@ -119,6 +119,23 @@ export function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+/**
+ * Race-safe wait for an AbortSignal. `withDeadline` aborts exactly once and never replays it, so a handler that
+ * registers its listener after the abort (e.g. after a slow statement) would wait forever. This resolves at once for an
+ * already-aborted signal and otherwise on the abort event; `dispose` removes the listener (idempotent) and must run in
+ * a `finally`.
+ */
+export function abortWatch(signal: AbortSignal) {
+  let dispose = () => {};
+  const aborted = new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    const onAbort = () => resolve();
+    signal.addEventListener("abort", onAbort, { once: true });
+    dispose = () => signal.removeEventListener("abort", onAbort);
+  });
+  return { aborted, dispose: () => dispose() };
+}
+
 export async function until(check: () => Promise<boolean> | boolean, ms = 5000) {
   const deadline = Date.now() + ms;
   while (!(await check())) {

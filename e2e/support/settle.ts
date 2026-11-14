@@ -3,11 +3,14 @@
 // cancels it; Node then aborts the request and Next logs `Error: aborted` (ECONNRESET). Letting the server finish first
 // removes that race by ordering. It does not hide anything: if requests never drain, this throws and the test fails.
 
+import { controlPortFor } from "./mode";
+
 const POLL_MS = 25;
 
-export async function serverIdle(timeoutMs = 10_000): Promise<void> {
-  const port = process.env.E2E_CONTROL_PORT;
-  if (!port) throw new Error("E2E_CONTROL_PORT is not set. Run with `npm run test:e2e`.");
+export async function serverIdle(
+  timeoutMs = 10_000,
+  port: string = controlPortFor(process.env), // the control port of the server under test (bots-only mode has just the second server)
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let quiet = 0; // consecutive polls that saw nothing in flight
   for (;;) {

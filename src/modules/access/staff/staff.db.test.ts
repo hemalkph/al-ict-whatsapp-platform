@@ -307,7 +307,7 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
       expect(orphan.id).toBeTruthy();
     });
 
-    it("RESUME: the same organization can finish a crashed provisioning (intent + auth user + no membership)", async () => {
+    it("RESUME: the same organization can finish a crashed provisioning (intent BOUND to the auth user it created + no membership)", async () => {
       const orgId = await newOrg();
       const admin = await member(orgId, "ADMIN");
       const email = `resume-${uniq()}@example.com`;
@@ -325,6 +325,27 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
         security_rows: 0,
       });
 
+      // Phase 08G-7B C1A provenance: an UNBOUND intent proves nothing about who created the identity: refused, nothing changes
+      // (the operator recovery `auth:intents` handles that case).
+      await expect(
+        createStaff(
+          admin.ctx,
+          { email, name: "Resumed", role: "VIEWER", initialPassword: SECOND_PASSWORD },
+          deps(),
+        ),
+      ).rejects.toBeInstanceOf(OperationRefusedError);
+      expect(await rowsFor(email)).toMatchObject({
+        users: 1,
+        intents: 1,
+        memberships: 0,
+        security_rows: 0,
+      });
+
+      // The workflow binds the intent right after its own sign-up; a crash after that point is resumable.
+      await t.db
+        .update(schema.staffProvisioningIntents)
+        .set({ authUserId: crashed.id })
+        .where(eq(schema.staffProvisioningIntents.emailKey, email));
       const staff = await createStaff(
         admin.ctx,
         { email, name: "Resumed", role: "VIEWER", initialPassword: SECOND_PASSWORD },
@@ -348,7 +369,7 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
               headers: {
                 "content-type": "application/json",
                 origin: "http://localhost:3000",
-                "x-forwarded-for": "10.9.9.1",
+                "cf-connecting-ip": "10.9.9.1",
               },
               body: JSON.stringify({ email, password: PASSWORD }),
             }),
@@ -422,13 +443,13 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
       const input = validCreate();
       const sdb = serviceDb(t);
       const real = sdb.transaction.bind(sdb);
-      vi.spyOn(sdb, "transaction").mockImplementationOnce((async (
-        cb: (tx: never) => Promise<unknown>,
-      ) =>
-        real(async (tx) => {
-          await cb(tx as never);
-          throw new Error("simulated failure at commit time");
-        })) as never);
+      vi.spyOn(sdb, "transaction")
+        .mockImplementationOnce(real)
+        .mockImplementationOnce((async (cb: (tx: never) => Promise<unknown>) =>
+          real(async (tx) => {
+            await cb(tx as never);
+            throw new Error("simulated failure at commit time");
+          })) as never);
 
       const err = await rejection(createStaff(admin.ctx, input, { db: sdb, provisioner: a.prov }));
       expect(err).toBeInstanceOf(ProvisioningIncompleteError);
@@ -443,11 +464,12 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
         .select()
         .from(schema.staffProvisioningIntents)
         .where(eq(schema.staffProvisioningIntents.emailKey, input.email));
-      expect(intent!.authUserId).toBeNull();
       const [user] = await t.db
         .select()
         .from(schema.users)
         .where(eq(schema.users.email, input.email));
+      // Bound right after this workflow's sign-up created the identity (C1A provenance), so the retry may resume it.
+      expect(intent!.authUserId).toBe(user!.id);
       expect(
         (
           await t.pool.query(
@@ -991,7 +1013,7 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
           headers: {
             "content-type": "application/json",
             origin: "http://localhost:3000",
-            "x-forwarded-for": "10.9.9.2",
+            "cf-connecting-ip": "10.9.9.2",
           },
           body: JSON.stringify({ email: target.email, password: PASSWORD }),
         }),
@@ -1117,26 +1139,31 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
       expect(await login(a, target.email, PASSWORD)).toContain("session_token");
     });
 
-    it("a mid-flow failure is fail-closed: password-change flag set, sessions revoked, old password still valid, retry works", async () => {
+    it("a mid-flow failure changes nothing (one transaction, C1A): no flag, sessions kept, old password still valid, retry works", async () => {
       const orgId = await newOrg();
       const admin = await member(orgId, "ADMIN");
       const target = await member(orgId, "STAFF");
       await login(a, target.email);
-      const broken = {
-        api: {
-          requestPasswordReset: async () => {
-            throw new Error("auth down");
-          },
-          resetPassword: async () => undefined,
-        },
-      } as unknown as ProvisioningAuth;
-      const err = await rejection(
-        resetStaffPassword(
-          admin.ctx,
-          { membershipId: target.membershipId, newPassword: NEW_PASSWORD },
-          { db: t.db, provisioner: broken },
-        ),
-      );
+      // Fault injection inside the reset transaction, after the credential write (the session revocation fails).
+      await t.pool.query(`
+        create function staff_fail_session_delete() returns trigger language plpgsql as $$
+        begin raise exception 'injected failure'; end $$;
+        create trigger staff_fail_session_delete_trg before delete on sessions
+          for each row execute function staff_fail_session_delete();`);
+      let err: unknown;
+      try {
+        err = await rejection(
+          resetStaffPassword(
+            admin.ctx,
+            { membershipId: target.membershipId, newPassword: NEW_PASSWORD },
+            deps(),
+          ),
+        );
+      } finally {
+        await t.pool.query(
+          "drop trigger staff_fail_session_delete_trg on sessions; drop function staff_fail_session_delete();",
+        );
+      }
       expect(err).toBeInstanceOf(PasswordResetIncompleteError);
       expect(
         (
@@ -1144,9 +1171,10 @@ describe("staff lifecycle service (real PostgreSQL + real Better Auth)", () => {
             .select()
             .from(schema.userSecurityState)
             .where(eq(schema.userSecurityState.userId, target.userId))
-        )[0]!.passwordChangeRequired,
-      ).toBe(true);
-      expect(await sessionCount(target.userId)).toBe(0);
+        )[0]?.passwordChangeRequired ?? false,
+      ).toBe(false);
+      expect(await sessionCount(target.userId)).toBe(1);
+      expect(await login(a, target.email, PASSWORD)).toContain("session_token");
       await resetStaffPassword(
         admin.ctx,
         { membershipId: target.membershipId, newPassword: NEW_PASSWORD },

@@ -5,7 +5,7 @@ import { ContactAvatar } from "./contact-avatar";
 import { shortTime } from "./format";
 import { STATUS_LABEL, VIEW_LABEL } from "./labels";
 
-const VIEWS: readonly InboxView[] = [
+const BASE_VIEWS: readonly InboxView[] = [
   "all",
   "OPEN",
   "PENDING",
@@ -14,6 +14,11 @@ const VIEWS: readonly InboxView[] = [
   "unassigned",
   "unread",
 ];
+const BOT_STYLE = {
+  neutral: "bg-zinc-100 text-zinc-700 ring-zinc-200",
+  attention: "bg-sky-50 text-sky-900 ring-sky-200",
+  warning: "bg-amber-50 text-amber-900 ring-amber-300",
+} as const;
 
 export type ListStatus = { loading: boolean; loadingMore: boolean; error: string | null };
 
@@ -21,6 +26,8 @@ type Props = {
   items: ConversationListItem[];
   selectedId: string | null;
   view: InboxView;
+  /** The caller holds bot.read: the Bot attention filter is offered. */
+  botFilter: boolean;
   accountId: string | null;
   accounts: Array<{ id: string; label: string }>;
   searchText: string;
@@ -64,7 +71,7 @@ export function ConversationList(p: Props) {
           <p className="text-xs text-zinc-600">Type at least 2 characters to search.</p>
         ) : null}
         <div role="group" aria-label="Filter conversations" className="flex flex-wrap gap-1.5">
-          {VIEWS.map((v) => (
+          {(p.botFilter ? [...BASE_VIEWS, "botAttention" as const] : BASE_VIEWS).map((v) => (
             <button
               key={v}
               type="button"
@@ -206,6 +213,14 @@ export function ConversationList(p: Props) {
                         <span>Unassigned</span>
                       )}
                       {p.accounts.length > 1 ? <span>· {c.account.label}</span> : null}
+                      {c.bot && (c.bot.state !== "COMPLETED" || c.bot.severity === "warning") ? (
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-medium ring-1 ring-inset ${BOT_STYLE[c.bot.severity]}`}
+                        >
+                          {c.bot.severity === "warning" ? "⚠ " : ""}
+                          {c.bot.label}
+                        </span>
+                      ) : null}
                     </span>
                   </span>
                 </button>

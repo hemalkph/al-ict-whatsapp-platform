@@ -8,7 +8,7 @@ import { SchemaNotReadyError } from "./errors";
 import { readWorkerConfig, type WorkerConfig } from "./config";
 import { runWorkerLoop } from "./loop";
 import { SHUTDOWN_GRACE_MS } from "./policy";
-import { webhookWorkerHandlers } from "./registry";
+import { buildWebhookWorkerHandlers } from "./registry";
 
 // Process-level orchestration of the standalone WhatsApp worker: validate configuration, open ITS OWN bounded connection
 // pool, verify the database is migrated, poll until told to stop, close the pool. It never calls Meta, never sends
@@ -81,7 +81,7 @@ export async function runWorker(options: RunOptions): Promise<number> {
     return EXIT_REFUSED;
   }
   const { config } = read;
-  const handlers = options.handlers ?? webhookWorkerHandlers;
+  const handlers = options.handlers ?? buildWebhookWorkerHandlers(options.env);
   const database = (options.createDatabase ?? defaultDatabase)(config);
   const { db } = database;
   const { signal } = options;
@@ -108,11 +108,19 @@ export async function runWorker(options: RunOptions): Promise<number> {
     signal,
   );
 
-  // Graceful shutdown: the loop stops claiming at once; in-flight handlers finish within their own budget. Past the
-  // grace period the process gives up (non-zero); the leases then expire and another worker reclaims the events.
+  // One deadline includes draining AND pool closure, including a close that never settles.
+  let closing: Promise<void> | undefined;
+  const close = () =>
+    (closing ??= Promise.resolve().then(async () => {
+      emitWebhookLog({ event: "worker.pool_closing", outcome: "success" });
+      await database.close();
+      emitWebhookLog({ event: "worker.pool_closed", outcome: "success" });
+    }));
   let deadline: NodeJS.Timeout | undefined;
+  let arm!: () => void;
   const expired = new Promise<"deadline">((resolve) => {
-    const arm = () => {
+    arm = () => {
+      if (deadline) return;
       emitWebhookLog({ event: "worker.stopping", outcome: "success" });
       deadline = setTimeout(
         () => resolve("deadline"),
@@ -122,15 +130,29 @@ export async function runWorker(options: RunOptions): Promise<number> {
     if (signal.aborted) arm();
     else signal.addEventListener("abort", arm, { once: true });
   });
-  const result = await Promise.race([loop, expired]);
+  const shutdown = loop.then(async (result) => {
+    arm(); // Fatal loop exits must bound closure too, even without an operator signal.
+    emitWebhookLog({ event: "worker.drained", outcome: "success" });
+    try {
+      await close();
+      return { result, closed: true };
+    } catch {
+      return { result, closed: false };
+    }
+  });
+  const finished = await Promise.race([shutdown, expired]);
   clearTimeout(deadline);
-
-  if (result === "deadline") {
+  signal.removeEventListener("abort", arm);
+  if (finished === "deadline") {
     emitWebhookLog({ event: "worker.fatal", outcome: "failure", reason: "shutdown_deadline" });
-    void database.close().catch(() => undefined);
+    void close().catch(() => undefined); // Already failed; best effort without a second close.
     return EXIT_FATAL;
   }
-  await database.close().catch(() => undefined);
+  if (!finished.closed) {
+    emitWebhookLog({ event: "worker.fatal", outcome: "failure", reason: "pool_close_failed" });
+    return EXIT_FATAL;
+  }
+  const { result } = finished;
   emitWebhookLog({
     event: "worker.stopped",
     outcome: result.exit === "stopped" ? "success" : "failure",

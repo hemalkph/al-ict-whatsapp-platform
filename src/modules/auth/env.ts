@@ -10,7 +10,11 @@ export type AuthEnv = {
   readonly baseURL: string;
   /** Exact origin derived from baseURL; the only trusted origin. */
   readonly origin: string;
+  /** Local development only: an ABSENT client-IP header counts as loopback (client-ip.ts). Never true in production. */
+  readonly loopbackClientIp?: boolean;
 };
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 const schema = z.object({
   BETTER_AUTH_SECRET: z.string().min(32),
@@ -34,7 +38,19 @@ export function readAuthEnv(
   if (nodeEnv === "production" && url.protocol !== "https:") {
     throw new Error("BETTER_AUTH_URL must use https in production.");
   }
+  // Explicit opt-in. Configuration validation only (not NODE_ENV=production, the app's own URL is loopback): it does not verify
+  // the peer or the listener, which `npm run dev` binds to 127.0.0.1.
+  const localIngress = source.BETTER_AUTH_LOCAL_INGRESS;
+  if (
+    localIngress &&
+    (localIngress !== "loopback" || nodeEnv === "production" || !LOOPBACK_HOSTS.has(url.hostname))
+  ) {
+    throw new Error(
+      'BETTER_AUTH_LOCAL_INGRESS is only allowed as "loopback", outside production, with a loopback BETTER_AUTH_URL.',
+    );
+  }
   return {
+    loopbackClientIp: localIngress === "loopback",
     secret: parsed.data.BETTER_AUTH_SECRET,
     baseURL: url.origin + url.pathname.replace(/\/$/, ""),
     origin: url.origin,

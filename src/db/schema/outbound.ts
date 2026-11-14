@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   check,
   foreignKey,
   index,
@@ -9,12 +10,15 @@ import {
   smallint,
   text,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import { organizationMemberships } from "./access";
+import { botSessions } from "./bots";
 import { createdAt, oneOf, pk, tz, updatedAt } from "./_shared";
 import {
   OUTBOUND_MESSAGE_TYPES,
+  OUTBOUND_ORIGINS,
   OUTBOUND_REQUEST_STATES,
   RECIPIENT_KINDS,
   TEMPLATE_CATEGORIES,
@@ -83,7 +87,8 @@ export const whatsappTemplates = pgTable(
 );
 
 /**
- * One staff-requested outbound send and its dispatch lifecycle. The logical message is the `messages` row (direction
+ * One outbound send and its dispatch lifecycle, requested by a member (origin STAFF) or, from Phase 08D, by the bot runtime for
+ * one session step (origin BOT; ADR 0020). The logical message is the `messages` row (direction
  * OUTBOUND, wamid NULL until Meta accepts); this row carries what the message row must not: who asked, the idempotency
  * key, the exact recipient, and where the send is in its lifecycle. Provider delivery state is NOT stored here: it comes
  * from message_status_events through the existing STATUS pipeline. No access token is ever stored.
@@ -96,7 +101,8 @@ export const outboundRequests = pgTable(
     whatsappAccountId: uuid("whatsapp_account_id").notNull(),
     conversationId: uuid("conversation_id").notNull(),
     messageId: uuid("message_id").notNull(),
-    requestedByMembershipId: uuid("requested_by_membership_id").notNull(),
+    // STAFF: the requesting member. BOT: NULL (the shape CHECK below enforces which).
+    requestedByMembershipId: uuid("requested_by_membership_id"),
     // Client-chosen, scoped to (organization, account, requesting membership); see outbound_requests_idempotency_unique.
     idempotencyKey: text("idempotency_key").notNull(),
     // sha256 (hex) of the canonical request; the same key with a different fingerprint is a conflict, never a second send.
@@ -106,7 +112,8 @@ export const outboundRequests = pgTable(
     // The exact provider identifier the request will be sent to (a BSUID or a phone-based id), never cut or cleaned.
     recipientKind: text("recipient_kind", { enum: RECIPIENT_KINDS }).notNull(),
     recipientId: text("recipient_id").notNull(),
-    // Sanitized content spec: TEXT {body, replyToWamid?}; TEMPLATE {parameters: string[]}.
+    // Sanitized content spec: TEXT {body, replyToWamid?}; TEMPLATE {parameters: string[]}; INTERACTIVE the versioned
+    // InteractivePayload of messaging/interactive.ts (stored identically on the message row).
     payload: jsonb("payload").notNull(),
     state: text("state", { enum: OUTBOUND_REQUEST_STATES }).notNull().default("QUEUED"),
     holdReason: text("hold_reason"),
@@ -125,6 +132,12 @@ export const outboundRequests = pgTable(
     finishedAt: tz("finished_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
+    // Phase 08D (ADR 0020). Immutable after insert (guard). control_seq is allocated by the database on insert (V3.2 J.1).
+    origin: text("origin", { enum: OUTBOUND_ORIGINS }).notNull().default("STAFF"),
+    botSessionId: uuid("bot_session_id"),
+    botStepSeq: integer("bot_step_seq"),
+    botSendEpoch: bigint("bot_send_epoch", { mode: "number" }),
+    controlSeq: bigint("control_seq", { mode: "number" }),
   },
   (t) => [
     foreignKey({
@@ -168,6 +181,30 @@ export const outboundRequests = pgTable(
       t.idempotencyKey,
     ),
     unique("outbound_requests_org_message_unique").on(t.organizationId, t.messageId),
+    // A BOT request belongs to one session of the same organization, conversation and account (MATCH SIMPLE: skipped for STAFF).
+    foreignKey({
+      name: "outbound_requests_bot_session_fk",
+      columns: [t.organizationId, t.botSessionId, t.conversationId, t.whatsappAccountId],
+      foreignColumns: [
+        botSessions.organizationId,
+        botSessions.id,
+        botSessions.conversationId,
+        botSessions.whatsappAccountId,
+      ],
+    }),
+    // One request per session step; one in-flight BOT request per session and per conversation (V3.2 K.8).
+    uniqueIndex("outbound_requests_bot_step_uidx")
+      .on(t.organizationId, t.botSessionId, t.botStepSeq)
+      .where(sql`${t.origin} = 'BOT'`),
+    uniqueIndex("outbound_requests_bot_inflight_uidx")
+      .on(t.organizationId, t.botSessionId)
+      .where(sql`${t.origin} = 'BOT' AND ${t.state} IN ('QUEUED', 'SENDING')`),
+    uniqueIndex("outbound_requests_bot_conv_inflight_uidx")
+      .on(t.organizationId, t.conversationId)
+      .where(sql`${t.origin} = 'BOT' AND ${t.state} IN ('QUEUED', 'SENDING')`),
+    index("outbound_requests_staff_control_idx")
+      .on(t.organizationId, t.conversationId, t.controlSeq)
+      .where(sql`${t.origin} = 'STAFF'`),
     index("outbound_requests_queue_idx")
       .on(t.nextAttemptAt, t.id)
       .where(sql`${t.state} = 'QUEUED'`),
@@ -182,6 +219,28 @@ export const outboundRequests = pgTable(
     check("outbound_requests_state_check", oneOf(t.state, OUTBOUND_REQUEST_STATES)),
     check("outbound_requests_type_check", oneOf(t.messageType, OUTBOUND_MESSAGE_TYPES)),
     check("outbound_requests_recipient_kind_check", oneOf(t.recipientKind, RECIPIENT_KINDS)),
+    check("outbound_requests_origin_check", oneOf(t.origin, OUTBOUND_ORIGINS)),
+    // NULL-safe shape: each branch states every column explicitly, so a NULL BOT column makes both branches false.
+    check(
+      "outbound_requests_origin_shape_check",
+      sql`(${t.origin} = 'STAFF' AND ${t.requestedByMembershipId} IS NOT NULL
+            AND ${t.botSessionId} IS NULL AND ${t.botStepSeq} IS NULL AND ${t.botSendEpoch} IS NULL)
+          OR (${t.origin} = 'BOT' AND ${t.requestedByMembershipId} IS NULL
+            AND ${t.botSessionId} IS NOT NULL
+            AND ${t.botStepSeq} IS NOT NULL AND ${t.botStepSeq} >= 1
+            AND ${t.botSendEpoch} IS NOT NULL AND ${t.botSendEpoch} >= 1)`,
+    ),
+    // Bots never send templates; staff never send interactive messages.
+    check(
+      "outbound_requests_origin_type_check",
+      sql`(${t.origin} <> 'BOT' OR ${t.messageType} IN ('TEXT', 'INTERACTIVE'))
+        AND (${t.origin} <> 'STAFF' OR ${t.messageType} IN ('TEXT', 'TEMPLATE'))`,
+    ),
+    // A BOT request's idempotency key is derived from its session and step.
+    check(
+      "outbound_requests_bot_key_check",
+      sql`(${t.origin} <> 'BOT' OR ${t.idempotencyKey} = 'bot-' || ${t.botSessionId}::text || '-' || ${t.botStepSeq}::text) IS TRUE`,
+    ),
     check(
       "outbound_requests_idempotency_key_check",
       sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 128 AND ${t.idempotencyKey} ~ '^[A-Za-z0-9._:-]+$'`,

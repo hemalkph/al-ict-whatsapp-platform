@@ -10,3 +10,5 @@ export * from "./auth";
 export * from "./access";
 export * from "./outbound";
 export * from "./inbox";
+export * from "./bots";
+export * from "./platform";

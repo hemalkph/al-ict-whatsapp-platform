@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { createTestDatabase } from "@/db/__tests__/helpers";
 import { seedE2E } from "./e2e-seed";
 import { SERVER_ERROR_PATTERN, flaggedServerLines } from "./e2e-log";
+import { childEnv } from "../e2e/support/server-env";
+import { runCleanup } from "./e2e-cleanup";
 
 // Browser E2E orchestrator (`npm run test:e2e [-- <playwright args>]`).
 //
@@ -30,14 +32,18 @@ const META_APP_SECRET = "e2e-only-meta-app-secret-0123456789abcdef";
 const WEBHOOK_VERIFY_TOKEN = "e2e-only-webhook-verify-token-0123456789abcdef";
 const SERVER_LOG = "e2e-output/server.log";
 
-function run(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): number {
+// Bots-only mode (`npm run test:e2e:bots`): only the outbound-off server starts (see playwright.config.ts and e2e/support/mode.ts).
+// Decided here, from this process's own argument, never inherited by the children from the shell.
+const MODE = process.env.E2E_MODE === "bots" ? "bots" : "";
+
+function run(command: string, args: string[], env: NodeJS.ProcessEnv): number {
   return spawnSync(command, args, { stdio: "inherit", env }).status ?? 1;
 }
 
 async function main(): Promise<number> {
   const t = await createTestDatabase({ prefix: "al_ict_e2e" });
   console.log(`E2E database: ${t.name}`);
-  const tlsDir = mkdtempSync(join(tmpdir(), "al-ict-e2e-tls-"));
+  let tlsDir: string | undefined;
   let exitCode = 1;
   let child: ReturnType<typeof spawn> | undefined;
   const stop = () => child?.kill("SIGTERM");
@@ -45,46 +51,55 @@ async function main(): Promise<number> {
   process.on("SIGTERM", stop);
 
   try {
+    tlsDir = mkdtempSync(join(tmpdir(), "al-ict-e2e-tls-"));
+    // Built only now that the generated database exists and only from explicit values: it throws (before any child starts) when one
+    // is missing, scrubs inherited database targets, PG* overrides, Graph settings and credentials, and pins the three gates off.
+    const CHILD_ENV = childEnv({
+      ...process.env,
+      E2E_MODE: MODE,
+      E2E_DATABASE_URL: t.url,
+      E2E_BASE_URL: BASE_URL,
+      E2E_AUTH_SECRET: AUTH_SECRET,
+      E2E_META_APP_SECRET: META_APP_SECRET,
+      E2E_WEBHOOK_VERIFY_TOKEN: WEBHOOK_VERIFY_TOKEN,
+      E2E_TLS_DIR: tlsDir,
+      E2E_HOST: HOST,
+      E2E_PORT: PORT,
+      E2E_CONTROL_PORT: CONTROL_PORT,
+    }) as NodeJS.ProcessEnv;
     await seedE2E(t, { secret: AUTH_SECRET, baseURL: BASE_URL, origin: BASE_URL });
 
     if (
-      run("openssl", [
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-days",
-        "1",
-        "-subj",
-        `/CN=${HOST}`,
-        "-keyout",
-        join(tlsDir, "key.pem"),
-        "-out",
-        join(tlsDir, "cert.pem"),
-      ]) !== 0
+      run(
+        "openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-days",
+          "1",
+          "-subj",
+          `/CN=${HOST}`,
+          "-keyout",
+          join(tlsDir, "key.pem"),
+          "-out",
+          join(tlsDir, "cert.pem"),
+        ],
+        { PATH: process.env.PATH ?? "" } as unknown as NodeJS.ProcessEnv,
+      ) !== 0
     ) {
       throw new Error("Could not create the throwaway TLS certificate (openssl).");
     }
-    if (process.env.E2E_SKIP_BUILD !== "1" && run("npm", ["run", "build"]) !== 0) {
+    if (process.env.E2E_SKIP_BUILD !== "1" && run("npm", ["run", "build"], CHILD_ENV) !== 0) {
       throw new Error("next build failed.");
     }
 
     const output: string[] = [];
     child = spawn("npx", ["playwright", "test", ...process.argv.slice(2)], {
       stdio: ["inherit", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        E2E_DATABASE_URL: t.url,
-        E2E_BASE_URL: BASE_URL,
-        E2E_AUTH_SECRET: AUTH_SECRET,
-        E2E_META_APP_SECRET: META_APP_SECRET,
-        E2E_WEBHOOK_VERIFY_TOKEN: WEBHOOK_VERIFY_TOKEN,
-        E2E_TLS_DIR: tlsDir,
-        E2E_HOST: HOST,
-        E2E_PORT: PORT,
-        E2E_CONTROL_PORT: CONTROL_PORT,
-      },
+      env: CHILD_ENV,
     });
     const tee = (target: NodeJS.WriteStream) => (chunk: Buffer) => {
       target.write(chunk);
@@ -118,14 +133,23 @@ async function main(): Promise<number> {
       exitCode = exitCode || 1;
     }
   } finally {
-    rmSync(tlsDir, { recursive: true, force: true });
-    try {
-      await t.close();
-      console.log(`E2E database dropped: ${t.name}`);
-    } catch (error) {
-      console.error(`E2E database ${t.name} was NOT dropped:`, error);
-      exitCode = 1;
-    }
+    // Each step is attempted whatever the others do; a failure is reported and fails the run.
+    const clean = await runCleanup([
+      {
+        name: "temporary TLS directory",
+        run: () => {
+          if (tlsDir) rmSync(tlsDir, { recursive: true, force: true });
+        },
+      },
+      {
+        name: `drop database ${t.name}`,
+        run: async () => {
+          await t.close();
+          console.log(`E2E database dropped: ${t.name}`);
+        },
+      },
+    ]);
+    if (!clean) exitCode = 1;
   }
   return exitCode;
 }

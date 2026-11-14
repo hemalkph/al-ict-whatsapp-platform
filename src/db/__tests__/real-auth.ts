@@ -37,7 +37,7 @@ export function authRequest(
     headers: {
       "content-type": "application/json",
       origin: TEST_AUTH_ENV.origin,
-      "x-forwarded-for": init.ip ?? uniqueIp(),
+      "cf-connecting-ip": init.ip ?? uniqueIp(),
       ...init.headers,
     },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
@@ -80,7 +80,7 @@ export async function login(a: RealAuth, email: string, password = PASSWORD): Pr
 }
 
 export const headersWith = (cookie: string, extra: Record<string, string> = {}) =>
-  new Headers({ cookie, ...extra });
+  new Headers({ cookie, "cf-connecting-ip": uniqueIp(), ...extra });
 
 /**
  * A SECOND Drizzle instance over the same pool. Staff-service tests inject it as `deps.db` so that failures can be

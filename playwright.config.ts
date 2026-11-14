@@ -1,4 +1,5 @@
-import { defineConfig, devices } from "@playwright/test";
+import { defineConfig, devices, type PlaywrightTestConfig } from "@playwright/test";
+import { isBotsOnly } from "./e2e/support/mode";
 import { serverEnv } from "./e2e/support/server-env";
 
 // Browser E2E (Chromium only). Run through `npm run test:e2e`: scripts/e2e.ts creates the disposable database,
@@ -19,6 +20,72 @@ const offPort = Number(required("E2E_PORT")) + 2;
 const offControlPort = Number(required("E2E_PORT")) + 3;
 const offBaseURL = `https://${required("E2E_HOST")}:${offPort}`;
 const offSpec = /inbox-outbound-off\.spec\.ts/;
+// The Inbox bot indicator specs (Phase 08F) run on that SAME second server: outbound messaging, live sending and the bot runtime are
+// all off there, so nothing the bot fixtures contain (QUEUED and SENDING notices included) can ever be claimed or sent.
+const botSpec = /inbox-bot\.spec\.ts/;
+
+const composerProject = {
+  name: "chromium",
+  testIgnore: [offSpec, botSpec],
+  use: { ...devices["Desktop Chrome"] },
+};
+const offProject = {
+  name: "chromium-outbound-off",
+  testMatch: offSpec,
+  use: { ...devices["Desktop Chrome"], baseURL: offBaseURL },
+};
+const botsProject = {
+  name: "chromium-bots",
+  testMatch: botSpec,
+  use: { ...devices["Desktop Chrome"], baseURL: offBaseURL },
+};
+// Bots-only mode (`npm run test:e2e:bots`): ONLY the outbound-off server starts and ONLY the bot project exists, so the queue-enabled
+// composer server is never running while the bot acceptance runs. The ordinary mode is unchanged: both servers, all three projects.
+const botsOnly = isBotsOnly(process.env);
+
+type Server =
+  NonNullable<PlaywrightTestConfig["webServer"]> extends infer T
+    ? T extends readonly (infer U)[]
+      ? U
+      : T
+    : never;
+const composerServer: Server = {
+  command: "node e2e/server.mjs",
+  url: `${baseURL}/api/health`,
+  ignoreHTTPSErrors: true,
+  reuseExistingServer: false,
+  // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
+  gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
+  timeout: 90_000,
+  stdout: "pipe",
+  stderr: "pipe",
+  // Explicit and complete (see e2e/support/server-env.ts): nothing about sending or credentials comes from the shell.
+  env: serverEnv(process.env, {
+    outboundEnabled: true,
+    baseURL,
+    port: required("E2E_PORT"),
+    controlPort: required("E2E_CONTROL_PORT"),
+  }),
+};
+
+const outboundOffServer: Server = {
+  command: "node e2e/server.mjs",
+  url: `${offBaseURL}/api/health`,
+  ignoreHTTPSErrors: true,
+  reuseExistingServer: false,
+  // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
+  gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
+  timeout: 90_000,
+  stdout: "pipe",
+  stderr: "pipe",
+  // Outbound messaging is OFF here (the platform default): the inbox must show that and nothing may be queued.
+  env: serverEnv(process.env, {
+    outboundEnabled: false,
+    baseURL: offBaseURL,
+    port: String(offPort),
+    controlPort: String(offControlPort),
+  }),
+};
 
 export default defineConfig({
   testDir: "./e2e",
@@ -42,50 +109,6 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [
-    { name: "chromium", testIgnore: offSpec, use: { ...devices["Desktop Chrome"] } },
-    {
-      name: "chromium-outbound-off",
-      testMatch: offSpec,
-      use: { ...devices["Desktop Chrome"], baseURL: offBaseURL },
-    },
-  ],
-  webServer: [
-    {
-      command: "node e2e/server.mjs",
-      url: `${baseURL}/api/health`,
-      ignoreHTTPSErrors: true,
-      reuseExistingServer: false,
-      // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
-      gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
-      timeout: 90_000,
-      stdout: "pipe",
-      stderr: "pipe",
-      // Explicit and complete (see e2e/support/server-env.ts): nothing about sending or credentials comes from the shell.
-      env: serverEnv(process.env, {
-        outboundEnabled: true,
-        baseURL,
-        port: required("E2E_PORT"),
-        controlPort: required("E2E_CONTROL_PORT"),
-      }),
-    },
-    {
-      command: "node e2e/server.mjs",
-      url: `${offBaseURL}/api/health`,
-      ignoreHTTPSErrors: true,
-      reuseExistingServer: false,
-      // After the browsers are closed Playwright asks the server to stop (SIGTERM) and waits, instead of killing it.
-      gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
-      timeout: 90_000,
-      stdout: "pipe",
-      stderr: "pipe",
-      // Outbound messaging is OFF here (the platform default): the inbox must show that and nothing may be queued.
-      env: serverEnv(process.env, {
-        outboundEnabled: false,
-        baseURL: offBaseURL,
-        port: String(offPort),
-        controlPort: String(offControlPort),
-      }),
-    },
-  ],
+  projects: botsOnly ? [botsProject] : [composerProject, offProject, botsProject],
+  webServer: botsOnly ? [outboundOffServer] : [composerServer, outboundOffServer],
 });

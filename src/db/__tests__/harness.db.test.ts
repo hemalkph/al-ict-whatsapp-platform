@@ -1,16 +1,13 @@
 import { Client, Pool } from "pg";
 import { describe, expect, it } from "vitest";
-import { createTestDatabase } from "./helpers";
+import { createTestDatabase, resolveAdminTarget } from "./helpers";
 
 // Regression tests for the harness lifecycle itself: closing a scratch database must be quiet
 // (no unhandled pg errors), complete (the database is gone) and honest (a leaked connection is
 // reported instead of being killed underneath its owner).
 
-const ADMIN_URL =
-  process.env.TEST_DATABASE_ADMIN_URL ?? "postgresql://postgres:postgres@localhost:5432/postgres";
-
 async function databaseExists(name: string) {
-  const admin = new Pool({ connectionString: ADMIN_URL, max: 1 });
+  const admin = new Pool({ ...resolveAdminTarget(), max: 1 }); // the same validated target as the harness
   try {
     const r = await admin.query("select 1 from pg_database where datname = $1", [name]);
     return r.rowCount === 1;
@@ -31,7 +28,10 @@ describe("test database harness lifecycle", () => {
       await t.close();
       expect(await databaseExists(t.name)).toBe(false);
     }
-  });
+    // 25 sequential CREATE DATABASE + full migrations + DROP cycles: ~5.5 s alone, ~11 s beside eight busy files, and over the
+    // global 30 s when the whole suite shares the server (Phase 08F-1 investigation). A real hang still fails here or in the
+    // harness's own 10 s close/session waits.
+  }, 120_000);
 
   it("close() is idempotent", async () => {
     const t = await createTestDatabase();

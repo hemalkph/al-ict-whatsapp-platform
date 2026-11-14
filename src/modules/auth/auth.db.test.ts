@@ -93,7 +93,7 @@ describe("real public/private Better Auth instances (production configuration)",
   });
 
   describe("public instance: allowed functionality", () => {
-    it("signs in, resolves the session, lists sessions, changes password and signs out", async () => {
+    it("signs in, resolves the session, lists sessions, cannot use the closed public password change, and signs out", async () => {
       await provisionUser(a, t, "full.flow@example.com", { organizationId: orgId });
       const cookie = await login(a, "FULL.flow@example.com");
       const headers = headersWith(cookie);
@@ -116,19 +116,20 @@ describe("real public/private Better Auth instances (production configuration)",
           headers: { cookie },
         }),
       );
-      expect(change.status).toBe(200);
+      // Closed since Phase 08G-7B C1A (ADR 0012 amendment): own changes go through POST /api/account/change-password.
+      expect(change.status).toBe(404);
       const old = await a.pub.handler(
         authRequest("/sign-in/email", {
           body: { email: "full.flow@example.com", password: PASSWORD },
         }),
       );
-      expect(old.status).toBe(401);
+      expect(old.status).toBe(200);
       const fresh = await a.pub.handler(
         authRequest("/sign-in/email", {
           body: { email: "full.flow@example.com", password: "a-brand-new-password-9" },
         }),
       );
-      expect(fresh.status).toBe(200);
+      expect(fresh.status).toBe(401);
 
       const out = await a.pub.handler(authRequest("/sign-out", { body: {}, headers: { cookie } }));
       expect(out.status).toBe(200);

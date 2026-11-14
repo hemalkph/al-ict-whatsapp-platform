@@ -42,6 +42,9 @@ export const conversations = pgTable(
     // A later suspension does not clear it; the history (conversation_events) keeps every change.
     assignedMembershipId: uuid("assigned_membership_id"),
     assignedAt: tz("assigned_at"),
+    // Phase 08C (V3.2 J.1, K.10): the per-conversation control sequence. Incremented ONLY by the database function
+    // allocate_conversation_control_seq() under the conversation row lock; never written by application code.
+    controlSeq: bigint("control_seq", { mode: "number" }).notNull().default(0),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -49,6 +52,8 @@ export const conversations = pgTable(
     unique("conversations_org_id_unique").on(t.organizationId, t.id),
     // FK target so messages can prove their account matches the conversation's account.
     unique("conversations_org_id_account_unique").on(t.organizationId, t.id, t.whatsappAccountId),
+    // FK target binding a bot session to the conversation's contact (Phase 08C).
+    unique("conversations_org_id_contact_unique").on(t.organizationId, t.id, t.contactId),
     unique("conversations_org_account_contact_unique").on(
       t.organizationId,
       t.whatsappAccountId,

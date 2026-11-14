@@ -88,6 +88,26 @@ export class LastAdminRequiredError extends AppError {
   }
 }
 
+/** A platform mutation needs a session created by a password sign-in within the last few minutes (C1A). */
+export class ReauthenticationRequiredError extends AppError {
+  constructor() {
+    super("REAUTHENTICATION_REQUIRED", "Sign in again to continue", 403);
+    this.name = "ReauthenticationRequiredError";
+  }
+}
+
+/** The platform must always keep at least one ACTIVE security administrator. */
+export class LastSecurityAdminRequiredError extends AppError {
+  constructor() {
+    super(
+      "LAST_SECURITY_ADMIN_REQUIRED",
+      "The platform must keep at least one active security administrator",
+      409,
+    );
+    this.name = "LastSecurityAdminRequiredError";
+  }
+}
+
 /** Provisioning stopped part-way; the intent is kept so a retry can safely resume. Fail-closed meanwhile. */
 export class ProvisioningIncompleteError extends AppError {
   constructor() {
@@ -100,7 +120,7 @@ export class ProvisioningIncompleteError extends AppError {
   }
 }
 
-/** A password reset stopped part-way; the account is already locked into a forced password change. */
+/** A password reset could not be completed; nothing was changed (one transaction, Phase 08G-7B C1A). */
 export class PasswordResetIncompleteError extends AppError {
   constructor() {
     super(

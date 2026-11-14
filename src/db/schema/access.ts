@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   foreignKey,
@@ -58,6 +59,9 @@ export const userSecurityState = pgTable("user_security_state", {
     .primaryKey()
     .references(() => users.id, { onDelete: "cascade" }),
   passwordChangeRequired: boolean("password_change_required").notNull().default(false),
+  // Phase 08G-7B C1A: incremented by every administrator-set password (provisioning, reset). A user's own password change
+  // clears password_change_required only if no newer administrator password was set while it ran.
+  credentialGeneration: bigint("credential_generation", { mode: "number" }).notNull().default(0),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });

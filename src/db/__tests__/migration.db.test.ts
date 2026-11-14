@@ -6,6 +6,13 @@ import { createTestDatabase, type TestDb } from "./helpers";
 
 const EXPECTED_TABLES = [
   "accounts",
+  "bot_deployment_events",
+  "bot_deployments",
+  "bot_session_events",
+  "bot_sessions",
+  "bot_triggers",
+  "bot_versions",
+  "bots",
   "contact_bsuids",
   "contact_consents",
   "contact_tags",
@@ -24,6 +31,9 @@ const EXPECTED_TABLES = [
   "organization_memberships",
   "organizations",
   "outbound_requests",
+  "platform_audit_events",
+  "platform_audit_throttle",
+  "platform_operator_roles",
   "quick_replies",
   "rate_limits",
   "sessions",
@@ -62,18 +72,7 @@ describe("migration from empty", () => {
   it("has no deferred feature tables", async () => {
     const r = await t.pool.query(
       "select table_name from information_schema.tables where table_schema = 'public' and table_name = any($1)",
-      [
-        [
-          "students",
-          "campaigns",
-          "bots",
-          "audit_logs",
-          "payments",
-          "invitations",
-          "roles",
-          "permissions",
-        ],
-      ],
+      [["students", "campaigns", "audit_logs", "payments", "invitations", "roles", "permissions"]],
     );
     expect(r.rows).toEqual([]);
   });

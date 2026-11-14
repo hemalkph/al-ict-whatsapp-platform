@@ -587,6 +587,7 @@ async function seedInbox(t: TestDb, orgIds: { A: string; B: string; C: string })
         liveSendEnabled: false,
         bsuidRecipientEnabled: false,
         graphApiVersion: null,
+        botsRuntimeEnabled: false,
       },
     },
   );

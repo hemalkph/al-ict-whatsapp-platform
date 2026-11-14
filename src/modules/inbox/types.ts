@@ -10,6 +10,8 @@ export const INBOX_VIEWS = [
   "mine",
   "unassigned",
   "unread",
+  // Phase 08F-2 (owner decision D-2): unresolved conversations whose latest bot session is HANDED_OVER or FAILED. Needs bot.read.
+  "botAttention",
 ] as const;
 export type InboxView = (typeof INBOX_VIEWS)[number];
 export type ConversationStatus = "OPEN" | "PENDING" | "RESOLVED";
@@ -29,6 +31,44 @@ export type AssigneeView = {
   readonly suspended: boolean;
 };
 
+export type BotSessionStatus =
+  "ACTIVE" | "WAITING_FOR_SEND" | "WAITING_FOR_INPUT" | "COMPLETED" | "HANDED_OVER" | "FAILED";
+
+/** The terminal notice's request state, as recorded. NONE: the session has no notice (or none was queued). PENDING: still QUEUED or SENDING. */
+export type BotNoticeOutcome =
+  "NONE" | "PENDING" | "ACCEPTED" | "HELD" | "REJECTED" | "UNKNOWN_OUTCOME";
+
+/**
+ * Read-only view of a conversation's LATEST bot session (Phase 08F-2, V3.2 J.4 and I.5). Present only for callers holding
+ * bot.read. It is built from lifecycle columns alone: never session variables, captured input, tokens or any message text.
+ */
+export type BotIndicator = {
+  readonly state: BotSessionStatus;
+  /** Plain-language headline, e.g. "Bot asked for a human". */
+  readonly label: string;
+  readonly severity: "neutral" | "attention" | "warning";
+  readonly handover: {
+    /** flow: a HANDOVER node asked for a human. system: the platform handed over. unrecognized: a code this build does not know. */
+    readonly origin: "flow" | "system" | "unrecognized";
+    /** The code, only when it is on the published allowlists; otherwise null. */
+    readonly reasonCode: string | null;
+    readonly reason: string;
+    /** The reason means the student may not have received a bot message. */
+    readonly studentMayNotHaveReceivedMessage: boolean;
+  } | null;
+  /** Null when the session has no terminal notice. */
+  readonly notice: {
+    readonly outcome: BotNoticeOutcome;
+    readonly label: string;
+    /** HELD, REJECTED or UNKNOWN_OUTCOME. */
+    readonly warning: boolean;
+  } | null;
+  /** The session's sensitive fields were cleared by the retention job; the lifecycle summary above is unaffected. */
+  readonly redacted: boolean;
+  readonly startedAt: string;
+  readonly endedAt: string | null;
+};
+
 export type ConversationListItem = {
   readonly id: string;
   readonly status: ConversationStatus;
@@ -43,6 +83,8 @@ export type ConversationListItem = {
   /** This staff member's unread inbound messages, capped (see unreadCapped). */
   readonly unreadCount: number;
   readonly unreadCapped: boolean;
+  /** Present only for callers with bot.read, and only when the conversation has a bot session. */
+  readonly bot?: BotIndicator;
 };
 
 export type ConversationPage = {
@@ -165,6 +207,8 @@ export type ConversationDetail = {
     readonly editContact: boolean;
     readonly manageTags: boolean;
   };
+  /** Present only for callers with bot.read, and only when the conversation has a bot session. */
+  readonly bot?: BotIndicator;
 };
 
 export type NoteView = {

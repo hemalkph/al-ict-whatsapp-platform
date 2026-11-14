@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   check,
   foreignKey,
   index,
@@ -36,6 +37,8 @@ export const conversationEvents = pgTable(
     fromStatus: text("from_status", { enum: CONVERSATION_STATUSES }),
     toStatus: text("to_status", { enum: CONVERSATION_STATUSES }),
     createdAt: createdAt(),
+    // Phase 08D (ADR 0020): allocated by the database on insert (V3.2 J.1); NULL for rows written before migration 0008.
+    controlSeq: bigint("control_seq", { mode: "number" }),
   },
   (t) => [
     foreignKey({
@@ -64,6 +67,10 @@ export const conversationEvents = pgTable(
       t.createdAt.desc().nullsFirst(),
       t.id.desc().nullsFirst(),
     ),
+    index("conversation_events_control_idx").on(t.organizationId, t.conversationId, t.controlSeq),
+    index("conversation_events_resolved_control_idx")
+      .on(t.organizationId, t.conversationId, t.controlSeq)
+      .where(sql`${t.kind} = 'STATUS' AND ${t.toStatus} = 'RESOLVED'`),
     check("conversation_events_kind_check", oneOf(t.kind, CONVERSATION_EVENT_KINDS)),
     check(
       "conversation_events_status_values_check",

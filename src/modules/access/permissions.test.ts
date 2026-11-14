@@ -30,6 +30,10 @@ const EXPECTED: Record<Permission, Record<Role, boolean>> = {
   "conversation.manage": { ADMIN: true, STAFF: true, VIEWER: false },
   "tag.manage": { ADMIN: true, STAFF: true, VIEWER: false },
   "webhook.manage": { ADMIN: true, STAFF: false, VIEWER: false },
+  "bot.read": { ADMIN: true, STAFF: true, VIEWER: false },
+  "bot.edit": { ADMIN: true, STAFF: false, VIEWER: false },
+  "bot.publish": { ADMIN: true, STAFF: false, VIEWER: false },
+  "bot.emergency_stop": { ADMIN: true, STAFF: false, VIEWER: false },
 };
 
 describe("permission model", () => {
@@ -39,8 +43,8 @@ describe("permission model", () => {
   });
 
   it("defines exactly the approved 15 permissions", () => {
-    expect(PERMISSIONS).toHaveLength(15);
-    expect(new Set(PERMISSIONS).size).toBe(15);
+    expect(PERMISSIONS).toHaveLength(19);
+    expect(new Set(PERMISSIONS).size).toBe(19);
     expect(Object.keys(EXPECTED).sort()).toEqual([...PERMISSIONS].sort()); // every permission has an explicit row
   });
 

@@ -13,7 +13,10 @@ import { createdAt, pk, tz, updatedAt } from "./_shared";
 // looks tables up by model name (`rate_limits: rateLimits`), and `drizzleAdapter(..., { transaction: true })`.
 // MANDATORY: the adapter default (`transaction: false`) can leave a user without its credential account.
 //
-// Do NOT add application columns here (no role, no password_change_required, no plugin columns).
+// Do NOT add application columns here (no role, no password_change_required, no plugin columns). The ONE exception is
+// sessions.credential_generation / credential_verified_at (Phase 08G-7B C1A, ADR 0012 amendment): declared to Better Auth as
+// session `additionalFields` (input: false), written only by our session-create hook, and enforced by migration 0010's
+// trigger, so a session is bound to the credential state its password proof was checked against.
 // Application-owned auth state lives in ./access.ts. On every Better Auth upgrade: re-run
 // `npx auth@<installed version> generate` into a scratch file and diff it against this file.
 // Email uniqueness is the library's plain UNIQUE(email); the library lowercases emails and our
@@ -39,6 +42,8 @@ export const sessions = pgTable(
     updatedAt: updatedAt(),
     ipAddress: text("ip_address"),
     userAgent: text("user_agent"),
+    credentialGeneration: bigint("credential_generation", { mode: "number" }).notNull().default(0),
+    credentialVerifiedAt: tz("credential_verified_at"),
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),

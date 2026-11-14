@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { schema } from "@/db";
 import { createTestDatabase, seedOrg, type TestDb } from "@/db/__tests__/helpers";
 import {
@@ -15,8 +15,9 @@ import type { AccessContext } from "../access";
 import { can, type Role } from "../permissions";
 import { resetStaffPassword } from "./index";
 
-// Concurrency and token-lifecycle hardening for administrator password reset. The token is correlated to its own
-// call through request-scoped AsyncLocalStorage (see src/modules/auth/provisioning.ts); these tests prove that.
+// Concurrency and failure behavior of administrator password reset. Since Phase 08G-7B C1A (P1) the reset is ONE
+// transaction: Better Auth's hashPassword runs first, then the actor re-check, the user row lock, the credential write,
+// the flag + credential generation and the session revocation commit together. No reset token is ever issued.
 
 let n = 0;
 const uniq = () => `${Date.now().toString(36)}${n++}`;
@@ -29,15 +30,12 @@ type Member = {
   organizationId: string;
   ctx: AccessContext;
 };
-type ResetCall = { token: string; tokenOwnerUserId: string | undefined; newPassword: string };
 
 describe("administrator password reset: concurrency and token lifecycle (real PostgreSQL + Better Auth)", () => {
   let t: TestDb;
   let a: RealAuth;
   const logs: string[] = [];
   const consoleSpies: Array<{ mockRestore(): void }> = [];
-  const seen: ResetCall[] = [];
-  let failNextReset = false;
 
   beforeAll(async () => {
     t = await createTestDatabase();
@@ -49,38 +47,13 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
           .mockImplementation((...args: unknown[]) => void logs.push(args.map(String).join(" "))),
       );
     }
-    // Observe every resetPassword call: record the token's real owner (from the verification row) next to the
-    // password being applied, optionally failing AFTER the token was issued.
-    const real = a.prov.api.resetPassword;
-    consoleSpies.push(
-      vi.spyOn(a.prov.api, "resetPassword").mockImplementation((async (args: {
-        body: { token: string; newPassword: string };
-      }) => {
-        const row = await t.pool.query("select value from verifications where identifier = $1", [
-          `reset-password:${args.body.token}`,
-        ]);
-        seen.push({
-          token: args.body.token,
-          tokenOwnerUserId: row.rows[0]?.value,
-          newPassword: args.body.newPassword,
-        });
-        if (failNextReset) {
-          failNextReset = false;
-          throw new Error("simulated failure after the token was issued");
-        }
-        return real(args as never);
-      }) as never),
-    );
   });
   afterAll(async () => {
     consoleSpies.forEach((s) => s.mockRestore());
     await t.close();
   });
-  afterEach(() => {
-    failNextReset = false;
-  });
 
-  const deps = () => ({ db: t.db, provisioner: a.prov });
+  const deps = () => ({ db: t.db });
   const newOrg = async () => (await seedOrg(t.db)).id;
   async function member(organizationId: string, role: Role): Promise<Member> {
     const email = `${role.toLowerCase()}-${uniq()}@example.com`;
@@ -108,6 +81,13 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
         .from(schema.userSecurityState)
         .where(eq(schema.userSecurityState.userId, userId))
     )[0]?.passwordChangeRequired;
+  const generation = async (userId: string) =>
+    (
+      await t.db
+        .select()
+        .from(schema.userSecurityState)
+        .where(eq(schema.userSecurityState.userId, userId))
+    )[0]?.credentialGeneration ?? 0;
   const resetTokenRows = async () =>
     (
       await t.pool.query(
@@ -125,7 +105,7 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
     return r.rows[0].password as string;
   };
 
-  it("DIFFERENT users reset concurrently: every token resets only its own user, with its own password", async () => {
+  it("DIFFERENT users reset concurrently: each gets exactly its own password; no reset token is ever issued", async () => {
     for (let iteration = 0; iteration < 6; iteration++) {
       const orgId = await newOrg();
       const admin = await member(orgId, "ADMIN");
@@ -139,7 +119,6 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
         await login(a, target.email);
         await login(a, target.email);
       }
-      seen.length = 0;
 
       const results = await Promise.all(
         targets.map((target, i) =>
@@ -151,22 +130,14 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
         ),
       );
 
-      // the service returns no token and no password
+      // the service returns no password
       const returned = JSON.stringify(results);
-      expect(seen).toHaveLength(3);
-      for (const call of seen) expect(returned).not.toContain(call.token);
       for (const p of passwords) expect(returned).not.toContain(p);
 
-      // every token's real owner is the user whose password was applied with it (tokens never cross users)
-      for (const call of seen) {
-        const index = passwords.indexOf(call.newPassword);
-        expect(index).toBeGreaterThanOrEqual(0);
-        expect(call.tokenOwnerUserId).toBe(targets[index]!.userId);
-      }
-
-      // state first (before any new login creates a session)
+      // committed state first (before any new login creates a session)
       for (const target of targets) {
         expect(await flag(target.userId)).toBe(true);
+        expect(await generation(target.userId)).toBe(1);
         expect(await sessionCount(target.userId)).toBe(0);
         expect(await credentialHash(target.userId)).toMatch(SCRYPT_HASH);
       }
@@ -183,8 +154,7 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
     }
   });
 
-  it("SAME user reset concurrently by two administrators: both complete safely, the last writer wins, auth state stays valid", async () => {
-    const outcomes: string[] = [];
+  it("SAME user reset concurrently by two administrators: both complete in order, the last writer wins, auth state stays valid", async () => {
     for (let iteration = 0; iteration < 6; iteration++) {
       const orgId = await newOrg();
       const adminOne = await member(orgId, "ADMIN");
@@ -196,7 +166,6 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
         `iteration-${iteration}-first-admin-password`,
         `iteration-${iteration}-second-admin-password`,
       ];
-      seen.length = 0;
 
       const results = await Promise.allSettled([
         resetStaffPassword(
@@ -210,43 +179,38 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
           deps(),
         ),
       ]);
-
-      const fulfilled = results.filter((r) => r.status === "fulfilled").length;
-      expect(fulfilled).toBeGreaterThanOrEqual(1);
-      for (const r of results) {
-        if (r.status === "rejected") expect(r.reason).toBeInstanceOf(PasswordResetIncompleteError); // clean failure only
-      }
-      outcomes.push(`${fulfilled} fulfilled`);
-
-      // tokens never cross users: every observed token belongs to the single target
-      for (const call of seen) expect(call.tokenOwnerUserId).toBe(target.userId);
+      // serialized on the organization and user row locks: both commit, one after the other
+      expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
 
       expect(await flag(target.userId)).toBe(true);
+      expect(await generation(target.userId)).toBe(2);
       expect(await sessionCount(target.userId)).toBe(0);
       expect(await credentialHash(target.userId)).toMatch(SCRYPT_HASH);
       expect(await resetTokenRows()).toBe(0);
 
-      // exactly one of the two passwords is now valid (the last completed reset); the old one is not
+      // exactly one of the two passwords is now valid (the last committed reset); the old one is not
       expect(await signIn(target.email, PASSWORD)).toBe(401);
       const statuses = [await signIn(target.email, p1), await signIn(target.email, p2)];
       expect(statuses.filter((s) => s === 200)).toHaveLength(1);
       expect(statuses.filter((s) => s === 401)).toHaveLength(1);
     }
-    // Documented behavior (see ADR 0012): concurrent resets of the same user are independent and both normally
-    // complete; whichever completes last determines the final password.
-    expect(outcomes.every((o) => o === "2 fulfilled" || o === "1 fulfilled")).toBe(true);
   });
 
-  describe("failure after the token was issued", () => {
-    it("never logs or returns the token, keeps the account locked down, leaves the old password valid, and a retry succeeds", async () => {
+  describe("failure inside the reset transaction", () => {
+    it("changes NOTHING (old password, flag, generation, sessions), exposes no password, and a retry succeeds", async () => {
       const orgId = await newOrg();
       const admin = await member(orgId, "ADMIN");
       const target = await member(orgId, "STAFF");
       await login(a, target.email);
       await login(a, target.email);
-      seen.length = 0;
-      failNextReset = true;
+      const hashBefore = await credentialHash(target.userId);
 
+      // Fault injection: the session revocation (after the credential write, in the same transaction) fails.
+      await t.pool.query(`
+        create function c1a_fail_session_delete() returns trigger language plpgsql as $$
+        begin raise exception 'injected failure after the credential write'; end $$;
+        create trigger c1a_fail_session_delete_trg before delete on sessions
+          for each row execute function c1a_fail_session_delete();`);
       let failure: unknown;
       try {
         await resetStaffPassword(
@@ -256,50 +220,25 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
         );
       } catch (e) {
         failure = e;
+      } finally {
+        await t.pool.query(
+          "drop trigger c1a_fail_session_delete_trg on sessions; drop function c1a_fail_session_delete();",
+        );
       }
       expect(failure).toBeInstanceOf(PasswordResetIncompleteError);
-      expect(seen).toHaveLength(1);
-      const leaked = seen[0]!;
-      expect(leaked.tokenOwnerUserId).toBe(target.userId);
-
-      // the error response exposes neither token nor passwords
       const body = await toErrorResponse(failure).text();
-      expect(body).not.toContain(leaked.token);
       expect(body).not.toContain("failed-attempt-password-1");
 
-      // locked down: flag true, sessions revoked, OLD password still the only valid one
-      expect(await flag(target.userId)).toBe(true);
-      expect(await sessionCount(target.userId)).toBe(0);
+      // rolled back as a whole: nothing about the account changed
+      expect(await credentialHash(target.userId)).toBe(hashBefore);
+      expect(await flag(target.userId)).toBeUndefined();
+      expect(await generation(target.userId)).toBe(0);
+      expect(await sessionCount(target.userId)).toBe(2);
       expect(await signIn(target.email, "failed-attempt-password-1")).toBe(401);
       expect(await signIn(target.email, PASSWORD)).toBe(200);
-
-      // Token lifecycle (observed, not manipulated): the unused verification row REMAINS until its 60 s expiry.
-      const row = await t.pool.query("select expires_at from verifications where identifier = $1", [
-        `reset-password:${leaked.token}`,
-      ]);
-      expect(row.rows).toHaveLength(1);
-      expect(row.rows[0].expires_at.getTime() - Date.now()).toBeLessThanOrEqual(60_000);
-      expect(row.rows[0].expires_at.getTime() - Date.now()).toBeGreaterThan(0);
-
-      // The public HTTP surface cannot use it: reset and reset-request are closed (404) and nothing changes.
-      const useToken = await a.pub.handler(
-        authRequest("/reset-password", {
-          body: { token: leaked.token, newPassword: "attacker-chosen-password-9" },
-        }),
-      );
-      expect(useToken.status).toBe(404);
-      expect(
-        (
-          await a.pub.handler(
-            authRequest("/request-password-reset", { body: { email: target.email } }),
-          )
-        ).status,
-      ).toBe(404);
-      expect(await signIn(target.email, "attacker-chosen-password-9")).toBe(401);
-      expect(await signIn(target.email, PASSWORD)).toBe(200);
+      expect(await resetTokenRows()).toBe(0);
 
       // retry with a new administrator-provided password succeeds
-      await t.pool.query("delete from sessions where user_id = $1", [target.userId]);
       await resetStaffPassword(
         admin.ctx,
         { membershipId: target.membershipId, newPassword: "retry-admin-password-2" },
@@ -308,24 +247,12 @@ describe("administrator password reset: concurrency and token lifecycle (real Po
       expect(await signIn(target.email, "retry-admin-password-2")).toBe(200);
       expect(await signIn(target.email, PASSWORD)).toBe(401);
       expect(await flag(target.userId)).toBe(true);
-      // the stale token from the failed attempt is still useless over HTTP
-      const again = await a.pub.handler(
-        authRequest("/reset-password", {
-          body: { token: leaked.token, newPassword: "attacker-chosen-password-9" },
-        }),
-      );
-      expect(again.status).toBe(404);
-      expect(await signIn(target.email, "retry-admin-password-2")).toBe(200);
+      expect(await generation(target.userId)).toBe(1);
     });
   });
 
-  it("no reset token, password or token-bearing URL appeared in any log during this file", () => {
+  it("no password appeared in any log during this file", () => {
     const all = logs.join("\n");
-    expect(seen.length + 0).toBeGreaterThanOrEqual(0);
-    for (const call of seen) {
-      expect(all).not.toContain(call.token);
-      expect(all).not.toContain(call.newPassword);
-    }
     for (const secret of [
       "failed-attempt-password-1",
       "retry-admin-password-2",

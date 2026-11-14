@@ -1,6 +1,8 @@
 # ADR 0012: Authentication, organization membership and authorization (Phase 03)
 
-Status: Accepted (supersedes [ADR 0010](0010-better-auth-provisional.md))
+Status: Accepted (supersedes [ADR 0010](0010-better-auth-provisional.md)). **Amended** by Phase 08G-7B C1A (see "Amendment: credential state binding" at the end), which supersedes the
+password-reset mechanism of checkpoint 4/4b for tenant resets and provisioning resumes, the own-password-change mechanism of
+checkpoint 5, and the statement that `/change-password` stays open on the public instance.
 
 ## Context
 
@@ -44,9 +46,9 @@ Fail-closed behavior: if Better Auth fails, the intent remains and there is no m
 
 **Authorization.** Server-side only: organization context comes from the validated session plus an ACTIVE membership; `organization_id`, role and membership ids from the browser are never trusted; foreign-organization resource ids yield 404. `proxy.ts` is optimistic (cookie presence via `getSessionCookie()`) and never an authorization decision.
 
-**Rate limiting.** Better Auth's database-backed limiter (`rate_limits`) with a strict sign-in rule; no `login_throttles` table. It applies to HTTP requests only (server-side `auth.api` calls bypass it), is enabled by default only in production, and **skips requests that carry no client IP**.
+**Rate limiting.** Better Auth's database-backed limiter (`rate_limits`) with a strict sign-in rule; no `login_throttles` table. It applies to HTTP requests only (server-side `auth.api` calls bypass it) and is enabled by default only in production. _Corrected in Phase 08G-7B C1B-P3:_ the installed Better Auth 1.7.7 does **not** skip a request without a resolvable client IP. It counts it in one shared `no-trusted-ip|<path>` bucket (and substitutes `127.0.0.1` under `NODE_ENV=development`/`test`). See the C1B-P3 amendment below.
 
-**Deployment blocker.** Before production exposure the deployment topology must define trustworthy client-IP propagation (so the limiter keys on a real IP, and a missing IP cannot silently disable it) and platform/WAF rate limiting. Proxy/forwarded headers are not trusted until then.
+**Deployment blocker.** Before production exposure the deployment topology must make the client-IP header trustworthy and add platform/WAF rate limiting. The application side of this is implemented (C1B-P3 amendment below); the ingress side is not, so the blocker stays open.
 
 **RLS** is deferred (one privileged application DB role; composite FKs already protect references; revisit when the first read-heavy module lands and the deployment provider is known).
 
@@ -112,3 +114,102 @@ Service functions only (no HTTP routes, UI or CLI yet), in `src/modules/access/s
 ## Consequences
 
 Provisioning is safe against a failed partial create and against cross-organization identity capture, at the cost of one small coordination table and an explicit two-instance configuration that must be kept in sync (shared base config; differences enumerated and tested). The production dependency tree includes `drizzle-kit` (and its older `esbuild`) because `better-auth` declares it as an optional peer; this is evidence recorded for review, not mitigated here.
+
+## Amendment: credential state binding (Phase 08G-7B C1A, owner-authorized implementation; pending closure review)
+
+**Why.** Platform operator roles (C1A) made two cross-transaction gaps exploitable, because a password an administrator
+knows could otherwise reach platform authority:
+
+1. Password replacement through the private reset-token flow authorized in one transaction and wrote in a later one
+   (`requestPasswordReset` / `resetPassword`), so a platform grant could land between the check and the write.
+2. Better Auth 1.7.7 verifies a password and acts on it in separate statements with no compare-and-swap: email sign-in reads
+   the credential, verifies, then calls `internalAdapter.createSession`; `/change-password` reads, verifies, then calls
+   `internalAdapter.updateAccount(account.id, …)` by id. A proof checked against a credential that is replaced before the
+   session insert or the write could still issue a session or overwrite the newer credential.
+
+**What changed.**
+
+| Operation                                                 | Mechanism now                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tenant administrator reset (`resetStaffPassword`)         | ONE application transaction: actor re-check, user row `FOR UPDATE`, refusal of shared identities and of users with an ACTIVE platform role, credential write, `password_change_required = true`, session revocation. No reset token                                                                                                                               |
+| Staff provisioning resume (`createStaff`)                 | The original requester is checked before sign-up; an unbound intent is locked across private sign-up and binding. Resume requires that binding to the identity this workflow created and the same requester; replacement stays in the final transaction under intent and user locks. Unbound intents beside existing identities go to `auth:intents`              |
+| Own password change (`POST /api/account/change-password`) | ONE transaction under the user and credential row locks: verify the current password against the stored hash, reject a new password that verifies against that hash (including NFKC equivalents), write the new hash, clear `password_change_required`, delete every session; then a replacement session through normal email sign-in. Needs only a valid session |
+| Better Auth `/change-password` (public)                   | **Closed** (`disabledPaths`): its write cannot be made compare-and-swap. No application code calls `api.changePassword`                                                                                                                                                                                                                                           |
+| `auth:bootstrap-admin` interrupted identity recovery      | Unchanged: the remaining private reset-token caller (`replaceCredentialPassword` in `bootstrapFirstAdmin`). A database-credential path (C1-G3)                                                                                                                                                                                                                    |
+| `auth:intents` resume (operator CLI)                      | Revalidates recovery provenance and creates membership/security state; does not replace credentials. A database-credential path (C1-G3)                                                                                                                                                                                                                           |
+| First-admin bootstrap, staff creation of a new identity   | Unchanged: the private instance's `signUpEmail`                                                                                                                                                                                                                                                                                                                   |
+
+**Hashing and canonical account contract.** Direct writes hash with `hashPassword` from `better-auth/crypto` (the library's
+default, used because no custom `emailAndPassword.password.hash` is configured; if one is ever configured, these writers must
+use it). They read and write only Better Auth's **canonical** credential row: `provider_id = 'credential'` AND
+`account_id = user_id`, exactly as `internalAdapter.findCredentialAccount`, `updatePassword` and email sign-in select it. A
+non-canonical row is treated as no credential (tested: sign-in, own change, reset and bootstrap all refuse it).
+
+**Credential generation and sessions (migration 0010).**
+
+- `user_security_state.credential_generation` is incremented by a trigger on every change of a stored password, whoever
+  writes it; no caller supplies it. This is an **AFTER UPDATE** trigger: it takes the `users` row `FOR UPDATE`, but the writer already holds the account row lock. C1A application writers explicitly lock the user before updating the account; the legacy reset-token writer does not.
+- `sessions.credential_generation` and `sessions.credential_verified_at` are Better Auth session `additionalFields`
+  (`input: false`). The session-create hook (shared base config) accepts only `/sign-in/email`, re-verifies the submitted
+  password against the canonical credential, and stamps the generation and the database time read in that statement. A
+  `sessions` trigger takes the `users` row `FOR KEY SHARE` first (conflicting with every credential change) and refuses the
+  insert if the generation moved or the proof time is in the future or over a minute old. `created_at` and the binding
+  columns are immutable.
+- Platform admission reads session existence, authenticated-user binding, expiry, generation, forced-change state and ACTIVE roles in **one statement snapshot**. Permission and audit scope use only those returned roles, never a later role query. Mutation services retain their locked authorization and measure the 10-minute re-authentication window from `credential_verified_at` on `clock_timestamp()`.
+
+**Concurrency guarantees.** For the credential coordination portion of C1A application paths, `users` is locked before
+account/security rows. Grant, tenant reset, bound provisioning resume and own change hold it `FOR UPDATE` while they decide
+and write. Their earlier organization, actor, intent and platform-role locks remain operation-specific. New staff signup
+holds the intent row lock across the private signup transaction and binding, then retains the final locked checks. The legacy
+`auth:bootstrap-admin` reset-token writer can lock the account before the AFTER trigger locks the user: it does **not** share
+a universal user-first ordering and may deadlock with a C1A writer (PostgreSQL aborts one transaction). Migrating/withdrawing
+legacy privileged CLI paths remains a separate gate.
+
+The two sign-in fences prove different invariants (`src/modules/platform/platform.db.test.ts`):
+
+- `C1A-CORR-PREHOOK` parks Better Auth's initial verifier **after real verification**, lets owner replacement and enrollment
+  commit, then exercises the real session hook. The hook must reject the old password against the new canonical hash.
+  Removing only that re-verification makes the test fail even with the generation insert guard intact: stamping the latest
+  generation alone would legitimize a stale proof.
+- `C1A-P1-F` parks the session insert **after both verifications**. A later credential change must make the insert fail its
+  generation check. If the insert commits first, application credential replacement deletes it in its transaction.
+- `C1A-CORR-READ` pauses after the admission query's real result: a temporary-password session cannot inherit a role granted
+  after replacement. Both platform read routes are covered; a separate before-statement barrier checks committed revocation, and revocation/re-enrollment cannot broaden an already admitted own-audit scope.
+- `C1A-CORR-REUSE` verifies exact/NFKC reuse rejection with unchanged hash, generation, sessions and flag, followed by a real
+  distinct-password change and successful enrollment. `C1A-CORR-INTENT` checks unbound requester refusal without identity
+  creation and the original requester's completion; existing bound-recovery and pre-existing-account tests remain.
+
+Bypass by whoever holds the owning database credential is not prevented (C1-G3).
+
+**Behavior changes.** An interrupted reset or own change changes nothing (previously a half state could remain). Own changes
+always revoke every session and issue a new one. Concurrent resets of one user are serialized (both complete; the later
+wins). Sign-in costs one extra password verification (the hook's re-verification).
+
+**Better Auth upgrade checks (in addition to Limitation A).** Before any upgrade, re-verify in the installed package:
+`databaseHooks.session.create.before` still runs inside the endpoint context with `ctx.path` and `ctx.body`, its returned
+`data` is merged into the insert, and `additionalFields` with `input: false` are written; email sign-in still issues sessions
+only through `internalAdapter.createSession`; the canonical credential lookup is unchanged; `hashPassword` / `verifyPassword`
+remain the default hashing; no new public endpoint creates sessions or writes credentials (if one does, it must be closed or
+bound). Then run the auth, access and platform PostgreSQL suites.
+
+## Amendment: trusted client-IP attribution (Phase 08G-7B C1B-P3, owner-authorized implementation; pending independent review)
+
+**Problem (found in C1B-P1/P2).** Better Auth 1.7.7 defaults to `x-forwarded-for` and, without `trustedProxies`, accepts any single valid address in it. Next.js 16.3.8 passes a client-supplied `x-forwarded-for` through unchanged (it only fills the header from the socket when absent). A client could therefore choose a new limiter bucket for every sign-in attempt, push other clients' malformed or multi-hop values into one shared `no-trusted-ip` bucket, and choose the address stored in `sessions.ip_address`.
+
+**Target ingress (selected by the owner, NOT deployed):** Internet → Cloudflare edge → Cloudflare Tunnel → Next.js → Better Auth → PostgreSQL.
+
+**Contract, implemented in application code (`src/modules/auth/client-ip.ts`):**
+
+- The client IP comes only from `CF-Connecting-IP` (`advanced.ipAddress.ipAddressHeaders: ["cf-connecting-ip"]`, no `trustedProxies`). `X-Forwarded-For`, `X-Real-IP` and `Forwarded` are never read. There is no fallback header.
+- One parser: `trustedClientIp()` calls Better Auth's own `getIPFromHeader` (`@better-auth/core/utils/ip`, the function the limiter and the session writer use), so the guard and the library cannot disagree. Exactly one syntactically valid IPv4 or IPv6 address is accepted; a value containing any comma is rejected before parsing (a chain, a repeated header, which `Headers.get` joins, and also `203.0.113.7,` or `, 203.0.113.7`, whose empty elements the library parser would drop and accept). IPv4-mapped IPv6 becomes the IPv4 address; IPv6 is masked to its /64 (`ipv6Subnet: 64`, the library default, now pinned). The value is lowercased before parsing because the 1.7.7 parser misreads an uppercase hex-form mapped address (`::FFFF:c633:6409`) as the all-zero /64. The guard hands Better Auth the canonical result, so the library never parses a raw client value.
+- Fail closed: a missing, empty, malformed or multi-value header is answered with a fixed `403 {"code":"CLIENT_IP_REQUIRED","message":"Request rejected."}` before Better Auth, the limiter, the password check or any database access runs. One security event `auth.client_ip_rejected` (`reason`: `missing` or `invalid`) is logged; the header value is never logged. Such requests can no longer reach the shared `no-trusted-ip` bucket or the library's `127.0.0.1` development/test substitute.
+- Guarded endpoints: **every method and path under `/api/auth/*`** (`handleAuthRequest`, the only mount of the public instance) and **`POST /api/account/change-password`** (`changeOwnPassword`). Why this set is sufficient: Better Auth rate-limits every HTTP path of the mount, and sessions are created in exactly two places: `/sign-in/email` (the `session.create.before` hook refuses every other path) and the replacement sign-in after an own password change, which now passes the validated address (and the user agent) so that session no longer has an empty `ip_address`. Session refresh does not rewrite `ip_address`. The private provisioning instance is not mounted and creates no sessions. No other route reads a client IP; health, the Meta webhook, staff, inbox, lead and platform routes are not guarded and do not need the header.
+- Unchanged: the sign-in limit (5 per 60 s per client IP, PostgreSQL `rate_limits`), no per-account throttle, C1A roles, credential binding, revocation and recent-authentication rules.
+
+**What this does NOT establish.** The application cannot tell whether `CF-Connecting-IP` was set by Cloudflare or typed by a client. If the origin is reachable by any path other than the tunnel, a client can send its own `CF-Connecting-IP` and the original bypass returns under a different header name. Production spoof resistance therefore depends on infrastructure that does not exist yet (`docs/DEPLOYMENT.md`, "Target ingress"): Cloudflare overwriting the header, the tunnel as the only ingress, no direct-origin route, edge sign-in throttling, and staging tests that prove it. No trusted proxy ranges and no shared-secret header were added: neither proves origin.
+
+**Local development and tests.** Tests and the browser E2E play the ingress: they send a synthetic `CF-Connecting-IP` to disposable databases, so the production code path runs unmodified (the E2E servers run `NODE_ENV=production`). For manual `next dev` only, `BETTER_AUTH_LOCAL_INGRESS=loopback` makes an _absent_ header count as `127.0.0.1` (an invalid one is still rejected). `readAuthEnv` refuses to start with it when `NODE_ENV=production`, when the value is anything else, or when `BETTER_AUTH_URL` is not a loopback host; the E2E environment blanks it. It is never inferred from `NODE_ENV`. These checks validate configuration; they do not verify the peer. `BETTER_AUTH_URL` is the advertised origin, not the listener, so `npm run dev` binds the development server to `127.0.0.1` (`next dev --hostname 127.0.0.1`, pinned by a test). The fallback must never be used with another bind address, port forwarding, a tunnel or any shared exposure of the development server: anyone who can reach it would be attributed `127.0.0.1`.
+
+**Dependency note.** `@better-auth/core` is imported directly by production code, so it is declared in `package.json` at the exact version `better-auth` pins (1.7.7; it was already installed, the lockfile gains only the declaration). A unit test fails if the two versions diverge; upgrade them together.
+
+**Evidence.** `src/modules/auth/client-ip.test.ts` (parser, environment gate, guard), `src/modules/auth/client-ip.db.test.ts` (real mounted routes and limiter on PostgreSQL), and the updated P1-T6 cases of the opt-in C1B-P1 proof (real Next.js production pipeline).

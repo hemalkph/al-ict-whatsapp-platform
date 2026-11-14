@@ -129,7 +129,7 @@ describe("auth and access schema constraints (real PostgreSQL)", () => {
         for (const c of cols) expect(type(table, c), `${table}.${c}`).toBe("uuid");
       }
       const tsColumns = r.rows.filter((c) => c.column_name.endsWith("_at"));
-      expect(tsColumns.length).toBe(18);
+      expect(tsColumns.length).toBe(19); // + sessions.credential_verified_at (migration 0010)
       for (const c of tsColumns)
         expect(c.data_type, `${c.table_name}.${c.column_name}`).toBe("timestamp with time zone");
     });

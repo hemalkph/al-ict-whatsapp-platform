@@ -221,7 +221,6 @@ describe("whatsapp-worker process", () => {
       w.kill("SIGTERM");
       await until(() => w.lines.some((l) => l.webhook_event === "worker.stopping"));
       // still running: the in-flight transaction is not cut short
-      await new Promise((r) => setTimeout(r, 400));
       expect(w.child.exitCode).toBeNull();
       expect(
         (await rows("select status from webhook_events where provider_object_id = 'wamid.SD1'"))[0]
@@ -244,6 +243,51 @@ describe("whatsapp-worker process", () => {
     });
   });
 
+  it("SIGTERM while a claim is blocked drains that acquired event and initiates no later claim", async () => {
+    await tenant(t.db);
+    for (const n of [1, 2]) await post(`wamid.CLAIM${n}`, `LK.CLAIM${n}`);
+    const client = await t.pool.connect();
+    try {
+      await client.query("begin");
+      const pid = (await client.query("select pg_backend_pid() pid")).rows[0].pid;
+      await client.query("lock table webhook_events in share mode");
+      const w = start(enabled({ WHATSAPP_WORKER_CONCURRENCY: "1" }));
+      await until(
+        async () =>
+          (
+            await rows(
+              "select 1 from pg_stat_activity where datname = current_database() and application_name = 'al-ict-whatsapp-worker' and $1 = any(pg_blocking_pids(pid))",
+              [pid],
+            )
+          ).length > 0,
+        10_000,
+      );
+      w.kill("SIGTERM");
+      await until(() => w.lines.some((l) => l.webhook_event === "worker.stopping"));
+      expect(w.output()).not.toContain("worker.pool_closing");
+      await client.query("rollback");
+      expect(await w.exited).toEqual({ code: 0, signal: null });
+      expect(
+        (
+          await rows(
+            "select status, attempts from webhook_events where provider_object_id = 'wamid.CLAIM1'",
+          )
+        )[0],
+      ).toMatchObject({ status: "PROCESSED", attempts: 1 });
+      expect(
+        (
+          await rows(
+            "select status, attempts from webhook_events where provider_object_id = 'wamid.CLAIM2'",
+          )
+        )[0],
+      ).toMatchObject({ status: "PENDING", attempts: 0 });
+      await until(async () => (await workerSessions()) === 0, 10_000);
+    } finally {
+      await client.query("rollback");
+      client.release();
+    }
+  });
+
   // ------------------------------------------------------------------------------------------- crash recovery
   describe("crash and restart", () => {
     it("SIGKILL mid-event leaves the event PROCESSING with nothing written; after the lease expires another worker reclaims it exactly once", async () => {
@@ -257,7 +301,7 @@ describe("whatsapp-worker process", () => {
       expect((await first.exited).signal).toBe("SIGKILL");
       await lock.release();
       // the orphaned transaction cannot commit: nothing was written and the event is still leased
-      await new Promise((r) => setTimeout(r, 300));
+      await until(async () => (await workerSessions()) === 0, 10_000);
       expect(await count("messages")).toBe(0);
       expect(await count("contacts")).toBe(0);
       expect(

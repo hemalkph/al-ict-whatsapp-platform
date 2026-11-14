@@ -24,24 +24,32 @@ const walk = (dir: string): string[] =>
     .filter((d) => d.isFile() && /\.(m?[tj]sx?)$/.test(d.name))
     .map((d) => relative(repo, join(d.parentPath, d.name)))
     .filter((f) => !/node_modules|\.next\//.test(f));
+// The C1B-P1 proof harness, never run by the app: the client speaks only to the https origin it is given (loopback in its test)
+// and the launcher REPLACES globalThis.fetch to block outbound calls. Checked separately below: it never calls Meta or fetch.
+const PROOF_HARNESS = ["scripts/platform-auth-proof.ts", "scripts/platform-auth-proof-server.ts"];
 const appSources = () =>
   [...walk("src"), ...walk("scripts")].filter(
     (f) =>
       !/\.test\.ts$/.test(f) &&
       !/(^|\/)testing\.ts$/.test(f) &&
       !/__tests__/.test(f) &&
+      !PROOF_HARNESS.includes(f) &&
+      f !== "src/modules/bot-worker/__fixtures__/shutdown-child.ts" &&
       f !== "scripts/repro-next-body-clone-abort.mjs", // a standalone Next.js bug reproduction, never run by the app
   );
 
 describe("outbound boundaries", () => {
   it("has exactly the expected production files", () => {
     expect(sources.map((s) => s.file).sort()).toEqual([
+      "bot-authorization.ts",
       "classify.ts",
       "config.ts",
       "dispatch.ts",
       "eligibility.ts",
+      "enqueue.ts",
       "errors.ts",
       "index.ts",
+      "interactive.ts",
       "meta-transport.ts",
       "operator.ts",
       "policy.ts",
@@ -68,6 +76,10 @@ describe("outbound boundaries", () => {
       for (const f of server)
         expect(code(read(join(repo, f))), f).not.toMatch(
           /\bfetch\s*\(|globalThis\.fetch|\bfetch:|undici/,
+        );
+      for (const f of PROOF_HARNESS)
+        expect(code(read(join(repo, f))), f).not.toMatch(
+          /\bfetch\s*\(|undici|axios|XMLHttpRequest|graph\.facebook\.com/,
         );
       const script = code(read(join(repo, "scripts/whatsapp-outbound-worker.ts")));
       expect(script).toContain("new MetaTransport({ env: () => process.env })");
@@ -174,11 +186,14 @@ describe("outbound boundaries", () => {
       expect(
         d.lastIndexOf('result.kind === "throttled" || result.kind === "not_sent"', at),
       ).toBeGreaterThan(0);
-      // no other module writes request state; submit.ts only INSERTs the first QUEUED row and never updates the table
+      // no other module writes request state; submit.ts (staff) and enqueue.ts (bot, Phase 08D) only INSERT the first QUEUED
+      // row and never update the table
       for (const { file, text } of sources) {
         if (file === "dispatch.ts") continue;
-        if (file === "submit.ts")
-          expect(text).not.toMatch(/\.update\(schema\.outboundRequests|\.update\(t\)/);
+        if (file === "submit.ts" || file === "enqueue.ts")
+          expect(text, file).not.toMatch(
+            /\.update\(schema\.outboundRequests|\.update\(t\)|UPDATE outbound_requests/i,
+          );
         else
           expect(text, file).not.toMatch(
             /state: "(QUEUED|SENDING|ACCEPTED|REJECTED|UNKNOWN_OUTCOME)"/,
@@ -322,6 +337,95 @@ describe("outbound boundaries", () => {
     });
   });
 
+  describe("BOT requests (Phase 08D, ADR 0020)", () => {
+    it("BOT rows are not even candidates while the runtime gate is off, so they can neither be sent nor starve staff rows", () => {
+      const claim = source("dispatch.ts").slice(
+        source("dispatch.ts").indexOf("export async function claimNext"),
+        source("dispatch.ts").indexOf("const fenced"),
+      );
+      expect(claim).toContain("const botsEnabled = deps.config.botsRuntimeEnabled === true;");
+      expect(claim).toMatch(
+        /AND \(origin = 'STAFF' OR \$\{botsEnabled\}\)\s*ORDER BY next_attempt_at, id/,
+      );
+      expect(claim).toContain("bot_request_hold_code(");
+      expect(source("config.ts")).toContain(
+        'botsRuntimeEnabled: flag(env, "BOTS_RUNTIME_ENABLED")',
+      );
+    });
+
+    it("the BOT final authorization is one statement, then a fresh clock, then the bot rule, window and recipient", () => {
+      const b = source("bot-authorization.ts");
+      expect(b.match(/db\.execute</g)).toHaveLength(1);
+      for (const field of [
+        "c.last_inbound_at",
+        "k.archived_at",
+        "k.wa_id",
+        "k.marketing_consent_status",
+        "contact_bsuids",
+        "a.status",
+        "bot_request_hold_code(r.organization_id, r.id)",
+      ])
+        expect(b, field).toContain(field);
+      const auth = b.slice(b.indexOf("export async function authorizeBotSend"));
+      expect(auth.indexOf("readFinalState(")).toBeLessThan(auth.indexOf("const now = (deps.now"));
+      const verdict = b.slice(b.indexOf("export function botFinalVerdict"));
+      const order = [
+        'row.state !== "SENDING"',
+        "config.botsRuntimeEnabled",
+        "account_inactive_before_dispatch",
+        "claim_expired_before_dispatch",
+        "deadline_passed_before_dispatch",
+        "row.bot_hold_code !== null",
+        "assess({",
+        '"recipient_changed"',
+      ].map((x) => verdict.indexOf(x));
+      expect(order.every((i) => i > 0)).toBe(true);
+      expect([...order].sort((x, y) => x - y)).toEqual(order);
+      // staff requests never take this path; theirs is the unchanged read in dispatch.ts
+      expect(source("dispatch.ts")).toMatch(
+        /if \(claim\.origin === "BOT"\)\s*return authorizeBotSend\(/,
+      );
+    });
+
+    it("a BOT request is HELD (never re-queued) on every refusal, and the acceptance retry is bounded and database-only", () => {
+      const d = source("dispatch.ts");
+      const notSent = d.slice(
+        d.indexOf('result.kind === "throttled" || result.kind === "not_sent"'),
+      );
+      expect(notSent.indexOf('claim.origin === "BOT"')).toBeLessThan(
+        notSent.indexOf('state: "QUEUED"'),
+      );
+      expect(d).toContain('const RETRYABLE_RECORD_STATES = new Set(["40P01", "40001"]);');
+      expect(d).toContain("export const RECORD_RETRY_LIMIT = 2;");
+      const accepted = d.slice(
+        d.indexOf('if (result.kind === "accepted") {'),
+        d.indexOf('if (result.kind === "rejected") {'),
+      );
+      // reset on every attempt, inside the loop; set on both normal return paths; checked before retrying
+      expect(accepted).toMatch(
+        /for \(let attempt = 1; ; attempt\+\+\) \{[\s\S]{0,400}let bodyCompleted = false;/,
+      );
+      expect(accepted.match(/bodyCompleted = true;/g)).toHaveLength(2);
+      expect(accepted).toMatch(
+        /retryableRecordFailure\(error, bodyCompleted\) && attempt <= retries/,
+      );
+      expect(d).toMatch(/!bodyCompleted &&\s*states\.length > 0 &&\s*states\.every/);
+      expect(accepted).not.toMatch(/transport|\.send\(/);
+    });
+
+    it("enqueueAutomatedMessage has exactly one production importer (bot-runtime/outbound.ts, 08E-4), and messaging never imports the bot modules", () => {
+      const callers = appSources().filter(
+        (f) =>
+          !f.startsWith("src/modules/messaging/") &&
+          /enqueueAutomatedMessage|messaging\/enqueue/.test(read(join(repo, f))),
+      );
+      expect(callers).toEqual(["src/modules/bot-runtime/outbound.ts"]);
+      for (const { file, text } of sources)
+        expect(text, file).not.toMatch(/@\/modules\/(bots|bot-control|bot-runtime)\b/);
+      expect(source("enqueue.ts")).not.toMatch(/process\.env/);
+    });
+  });
+
   describe("tenant and identity safety", () => {
     it("the organization and actor come from the AccessContext and the database, never from the request", () => {
       const s = source("submit.ts");
@@ -409,8 +513,18 @@ describe("outbound boundaries", () => {
         "scripts/whatsapp-outbound.ts",
         "src/app/api/conversations/[conversationId]/messages/route.ts",
         "src/app/api/outbound-requests/[requestId]/route.ts",
+        "src/modules/bot-runtime/outbound.ts",
+        // Phase 08E-7: the bot worker reads the gates with the dispatcher's own parser (config only; pinned below)
+        "src/modules/bot-worker/compose.ts",
         "src/modules/inbox/detail.ts",
       ]);
+      expect(
+        [
+          ...read(join(repo, "src/modules/bot-worker/compose.ts")).matchAll(
+            /from "(@\/modules\/messaging[^"]*)"/g,
+          ),
+        ].map((m) => m[1]),
+      ).toEqual(["@/modules/messaging/config"]);
       for (const f of importers.filter((x) => x.startsWith("src/app/")))
         expect(read(join(repo, f))).toMatch(/from "@\/modules\/messaging";/);
       expect(code(read(join(root, "index.ts"))).trim()).toBe(
@@ -449,7 +563,7 @@ export { IdempotencyConflictError, OutboundRefusedError } from "./errors";`,
         ["whatsapp:outbound", "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound.ts"],
         [
           "whatsapp:outbound-worker",
-          "tsx --env-file-if-exists=.env.local scripts/whatsapp-outbound-worker.ts",
+          "node --env-file-if-exists=.env.local --import tsx scripts/whatsapp-outbound-worker.ts",
         ],
       ]);
       for (const hook of [
@@ -505,9 +619,11 @@ export { IdempotencyConflictError, OutboundRefusedError } from "./errors";`,
         "WHATSAPP_OUTBOUND_ENABLED",
         "WHATSAPP_LIVE_SEND_ENABLED",
         "WHATSAPP_BSUID_RECIPIENT_ENABLED",
+        "BOTS_RUNTIME_ENABLED",
       ])
         expect(example).toMatch(new RegExp(`^# ${name}=false$`, "m"));
       expect(example).not.toMatch(/^WHATSAPP_(OUTBOUND|LIVE_SEND|BSUID_RECIPIENT)_ENABLED=true/m);
+      expect(example).not.toMatch(/^BOTS_RUNTIME_ENABLED=true/m);
       expect(example).not.toMatch(/EAA[A-Za-z0-9]{10,}/);
     });
   });

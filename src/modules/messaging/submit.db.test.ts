@@ -774,7 +774,10 @@ describe("submitOutboundMessage", () => {
       const [after] = (
         await t.pool.query("select * from conversations where id = $1", [x.conversation.id])
       ).rows;
-      expect(after).toEqual(before); // last_inbound_at, last_outbound_at, last_message_at, status, resolved_at all unchanged
+      // Phase 08D: the request insert allocates the conversation's control sequence (+1) and changes nothing else:
+      // last_inbound_at, last_outbound_at, last_message_at, updated_at, status and resolved_at are all unchanged.
+      expect(Number(after.control_seq)).toBe(Number(before.control_seq) + 1);
+      expect({ ...after, control_seq: null }).toEqual({ ...before, control_seq: null });
       const row = await requestRow(r.requestId);
       expect(row).toMatchObject({
         state: "QUEUED",

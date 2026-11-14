@@ -244,6 +244,25 @@ describe("inbox HTTP API", () => {
     ).toBe(400);
   });
 
+  it("the Bot Attention view needs bot.read: VIEWER gets 403 and no bot data, STAFF gets 200 (08F-2, D-3)", async () => {
+    const x = await w();
+    const viewer = await staff(x.org.id, "VIEWER");
+    const member = await staff(x.org.id, "STAFF");
+    const forbidden = await call("list", "GET", "/api/inbox/conversations?view=botAttention", {
+      cookie: viewer.cookie,
+    });
+    expect(forbidden.status).toBe(403);
+    expect(await code(forbidden)).toBe("FORBIDDEN");
+    const plain = await call("list", "GET", "/api/inbox/conversations", { cookie: viewer.cookie });
+    expect(plain.status).toBe(200);
+    expect(JSON.stringify(await plain.json())).not.toMatch(/"bot"/);
+    const ok = await call("list", "GET", "/api/inbox/conversations?view=botAttention", {
+      cookie: member.cookie,
+    });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { items: unknown[] }).items).toEqual([]);
+  });
+
   it("a STAFF member works a conversation end to end through the API: list, open, mark seen, status, assign, note, tag, quick reply", async () => {
     const x = await w();
     const s = await staff(x.org.id);
@@ -510,6 +529,46 @@ describe("inbox HTTP API", () => {
     expect(missing.status).toBe(404);
     expect(await code(missing)).toBe("NOT_FOUND");
     expect(await code(responses[0]!)).toBe("NOT_FOUND");
+  });
+
+  // DEV-1 (shared body reader): the 16,384 limit of these routes is now RAW BYTES as received, not characters.
+  it("the body limit is 16,384 raw bytes: a full-length Sinhala or Tamil note and quick reply are still accepted; a padded or \\u-escaped one over the limit is refused", async () => {
+    const x = await w();
+    const s = await staff(x.org.id);
+    const cp = { conversationId: x.conversation.id };
+    const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+    const note = (raw: string) =>
+      call("notes", "POST", "/x", { cookie: s.cookie, params: cp, raw });
+    const notes = async () =>
+      (
+        await t.pool.query(
+          "select count(*)::int n from conversation_notes where conversation_id = $1",
+          [x.conversation.id],
+        )
+      ).rows[0].n as number;
+    for (const letter of ["අ", "வ"]) {
+      const raw = JSON.stringify({ body: letter.repeat(4000) }); // NOTE_MAX units, 3 bytes each
+      expect(bytes(raw)).toBe(12_011);
+      expect((await note(raw)).status).toBe(201);
+    }
+    expect(await notes()).toBe(2);
+    const compact = JSON.stringify({ body: "අ".repeat(4000) });
+    const atLimit = compact + " ".repeat(16_384 - 12_011);
+    expect((await note(atLimit)).status).toBe(201);
+    for (const raw of [`${atLimit} `, `{"body":"${"\\u0d85".repeat(4000)}"}`]) {
+      expect(bytes(raw)).toBeGreaterThan(16_384);
+      const res = await note(raw);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: { code: "VALIDATION_ERROR", message: "Invalid input", fields: ["body"] },
+      });
+    }
+    expect(await notes()).toBe(3);
+    const quick = await call("quick", "POST", "/x", {
+      cookie: s.cookie,
+      body: { title: "ආ".repeat(60), body: "வ".repeat(1000) },
+    });
+    expect(quick.status).toBe(201);
   });
 
   it("a member suspended after logging in is refused on the next request (no ACTIVE membership)", async () => {

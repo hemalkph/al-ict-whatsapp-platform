@@ -15,6 +15,7 @@ export type SecurityEventName =
   | "access.actor_changed"
   | "auth.session_denied"
   | "auth.login_failed"
+  | "auth.client_ip_rejected"
   | "staff.created"
   | "staff.creation_refused"
   | "staff.provisioning_incomplete"
@@ -34,7 +35,10 @@ export type SecurityEventName =
   | "bootstrap.incomplete"
   | "provisioning_recovery.resumed"
   | "provisioning_recovery.removed"
-  | "provisioning_recovery.refused";
+  | "provisioning_recovery.refused"
+  | "platform.access_denied"
+  | "platform.audit_write_failed"
+  | "platform.bootstrap_refused";
 
 export type SecurityEvent = {
   event: SecurityEventName;

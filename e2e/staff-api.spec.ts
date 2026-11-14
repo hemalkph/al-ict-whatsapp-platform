@@ -244,11 +244,10 @@ test.describe("login rate limiting", () => {
     page,
     context,
   }) => {
-    // The browser sends no client IP of its own, so the limiter has nothing to key on and is skipped (documented
-    // deployment blocker). The test supplies a deterministic IP header for this context only; the application's
-    // proxy-header trust is NOT changed. This proves the database limiter is wired in the production build and
-    // that the UI reports it; it does not (and cannot) prove client-IP trust, which is a deployment concern.
-    await context.setExtraHTTPHeaders({ "x-forwarded-for": "198.51.100.77" });
+    // The test plays the trusted ingress: it supplies a fixed synthetic CF-Connecting-IP for this context only (C1B-P3,
+    // ADR 0012). This proves the database limiter is wired in the production build and that the UI reports it; it does
+    // not (and cannot) prove the header came from Cloudflare, which is a deployment concern.
+    await context.setExtraHTTPHeaders({ "cf-connecting-ip": "198.51.100.77" });
     await page.goto("/login");
     for (let attempt = 1; attempt <= 5; attempt++) {
       await submitLogin(page, "nobody.here@e2e.test", `wrong-password-${attempt}-xx`);
